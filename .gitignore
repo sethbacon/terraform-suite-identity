@@ -1,0 +1,10 @@
+# Test / coverage artifacts
+*.out
+coverage.*
+gosec-results.json
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

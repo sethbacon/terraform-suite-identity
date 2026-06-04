@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS identity.revoked_tokens;
+DROP TABLE IF EXISTS identity.system_settings;
+DROP TABLE IF EXISTS identity.oidc_config;
+DROP TABLE IF EXISTS identity.audit_logs;
+DROP TABLE IF EXISTS identity.api_keys;
+DROP TABLE IF EXISTS identity.organization_members;
+DROP TABLE IF EXISTS identity.role_templates;
+DROP TABLE IF EXISTS identity.users;
+DROP TABLE IF EXISTS identity.organizations;
+DROP SCHEMA IF EXISTS identity;
