@@ -74,7 +74,7 @@ func TestHasAllScopes(t *testing.T) {
 	}{
 		{"all present", []string{"foo:read", "bar:read"}, []string{"foo:read", "bar:read"}, true},
 		{"partial", []string{"foo:read"}, []string{"foo:read", "bar:read"}, false},
-		{"empty required always true", []string{}, []string{}, true},
+		{"empty required always false", []string{}, []string{}, false},
 		{"admin covers all", []string{auth.ScopeAdmin}, []string{"anything", "everything"}, true},
 	}
 
