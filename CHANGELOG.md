@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.4.0...v0.5.0) (2026-06-04)
+
+
+### Features
+
+* add storage-agnostic API key helpers ([#10](https://github.com/sethbacon/terraform-suite-identity/issues/10)) ([3af7cc0](https://github.com/sethbacon/terraform-suite-identity/commit/3af7cc01529cd23f911a6c97913f206500de9089))
+
 ## [0.4.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.3.1...v0.4.0) (2026-06-04)
 
 
