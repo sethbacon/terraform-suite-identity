@@ -54,7 +54,11 @@ func HasAnyScope(userScopes []string, required []string, rwPairs ReadWritePairs)
 }
 
 // HasAllScopes returns true if userScopes satisfies every scope in required.
+// An empty required list returns false (fail-closed: unspecified scopes deny access).
 func HasAllScopes(userScopes []string, required []string, rwPairs ReadWritePairs) bool {
+	if len(required) == 0 {
+		return false
+	}
 	for _, r := range required {
 		if !HasScope(userScopes, r, rwPairs) {
 			return false
