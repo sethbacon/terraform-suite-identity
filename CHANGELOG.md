@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.3.0...v0.3.1) (2026-06-04)
+
+
+### Bug Fixes
+
+* **auth:** HasAllScopes returns false for empty required list ([#6](https://github.com/sethbacon/terraform-suite-identity/issues/6)) ([2637ec3](https://github.com/sethbacon/terraform-suite-identity/commit/2637ec3912c05d9aa2f554209c780719ce3321c0))
+
 ## [0.3.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.2.0...v0.3.0) (2026-06-04)
 
 
