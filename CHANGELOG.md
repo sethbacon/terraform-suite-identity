@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.3.1...v0.4.0) (2026-06-04)
+
+
+### Features
+
+* add app-neutral JWT TokenManager ([#8](https://github.com/sethbacon/terraform-suite-identity/issues/8)) ([38e5cbe](https://github.com/sethbacon/terraform-suite-identity/commit/38e5cbeec7ea2bbdc3cab79d0da5c9e84b59ecc3))
+
 ## [0.3.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.3.0...v0.3.1) (2026-06-04)
 
 
