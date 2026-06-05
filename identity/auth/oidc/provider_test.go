@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"golang.org/x/oauth2"
 )
 
 func TestNewProvider_ValidationErrors(t *testing.T) {
@@ -92,5 +94,37 @@ func TestNewProvider_DiscoveryFailure(t *testing.T) {
 		ClientSecret: "secret",
 	}); err == nil {
 		t.Error("expected discovery failure to return an error")
+	}
+}
+
+func TestNewProvider_RequireHTTPSRejectsHTTPIssuer(t *testing.T) {
+	// RequireHTTPS must reject a plaintext issuer before any discovery attempt.
+	_, err := NewProvider(Config{
+		IssuerURL:    "http://issuer.example",
+		ClientID:     "id",
+		ClientSecret: "secret",
+		RequireHTTPS: true,
+	})
+	if err == nil {
+		t.Fatal("expected an error for an http issuer when RequireHTTPS is set")
+	}
+	if !strings.Contains(err.Error(), "HTTPS") {
+		t.Errorf("expected an HTTPS error, got: %v", err)
+	}
+}
+
+func TestNewProviderForConfig_GetAuthURL(t *testing.T) {
+	// A discovery-free provider still builds authorization URLs.
+	p := NewProviderForConfig(&oauth2.Config{
+		ClientID:    "my-client",
+		RedirectURL: "https://app.example/callback",
+		Endpoint:    oauth2.Endpoint{AuthURL: "https://issuer.example/auth"},
+		Scopes:      []string{"openid"},
+	})
+	authURL := p.GetAuthURL("state-xyz")
+	for _, want := range []string{"https://issuer.example/auth", "client_id=my-client", "state=state-xyz"} {
+		if !strings.Contains(authURL, want) {
+			t.Errorf("auth URL %q missing %q", authURL, want)
+		}
 	}
 }
