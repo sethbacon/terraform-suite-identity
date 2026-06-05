@@ -2,15 +2,19 @@ package models
 
 import "time"
 
-// AuditLog records a mutating action for the audit trail.
+// AuditLog represents an audit log entry for tracking user actions.
 type AuditLog struct {
-	ID             string                 `db:"id" json:"id"`
-	UserID         *string                `db:"user_id" json:"user_id,omitempty"`
-	OrganizationID *string                `db:"organization_id" json:"organization_id,omitempty"`
-	Action         string                 `db:"action" json:"action"`
-	ResourceType   *string                `db:"resource_type" json:"resource_type,omitempty"`
-	ResourceID     *string                `db:"resource_id" json:"resource_id,omitempty"`
-	IPAddress      *string                `db:"ip_address" json:"ip_address,omitempty"`
-	Metadata       map[string]interface{} `json:"metadata,omitempty"`
-	CreatedAt      time.Time              `db:"created_at" json:"created_at"`
+	ID             string
+	UserID         *string // Nullable for system actions
+	OrganizationID *string
+	Action         string                 // "module.upload", "provider.delete", "user.create"
+	ResourceType   *string                // "module", "provider", "user", "api_key"
+	ResourceID     *string                // UUID of affected resource
+	Metadata       map[string]interface{} // JSONB: additional context
+	IPAddress      *string                // Client IP
+	CreatedAt      time.Time
+
+	// Transient fields populated via LEFT JOIN with users table (never stored in audit_logs).
+	UserEmail *string `json:"user_email,omitempty"`
+	UserName  *string `json:"user_name,omitempty"`
 }
