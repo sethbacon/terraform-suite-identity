@@ -79,3 +79,56 @@ func TestTokenManager_DefaultExpiry(t *testing.T) {
 		t.Errorf("expected ~DefaultExpiry, got %s", d)
 	}
 }
+
+func TestTokenManager_GeneratesUniqueJTI(t *testing.T) {
+	tm := newTM()
+	tok1, _ := tm.Generate("u", "e", nil, time.Hour)
+	tok2, _ := tm.Generate("u", "e", nil, time.Hour)
+	c1, err := tm.Validate(tok1)
+	if err != nil {
+		t.Fatalf("Validate tok1: %v", err)
+	}
+	c2, err := tm.Validate(tok2)
+	if err != nil {
+		t.Fatalf("Validate tok2: %v", err)
+	}
+	if c1.JTI == "" || c2.JTI == "" {
+		t.Fatal("expected non-empty JTI on both tokens")
+	}
+	if c1.JTI == c2.JTI {
+		t.Errorf("expected unique JTIs, got %q twice", c1.JTI)
+	}
+}
+
+func TestTokenManager_RotateSecret_OverlapThenClear(t *testing.T) {
+	tm := newTM()
+	// Token signed with the original secret.
+	oldTok, err := tm.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Rotate to a new secret. The old token must still validate (overlap).
+	tm.RotateSecret([]byte("a-new-rotated-secret-32-bytes-minimum!"))
+	if _, err := tm.Validate(oldTok); err != nil {
+		t.Errorf("old token should still validate during overlap: %v", err)
+	}
+
+	// A freshly generated token uses the new secret and validates.
+	newTok, err := tm.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate after rotate: %v", err)
+	}
+	if _, err := tm.Validate(newTok); err != nil {
+		t.Errorf("new token should validate with rotated secret: %v", err)
+	}
+
+	// Ending the overlap invalidates tokens signed with the previous secret.
+	tm.ClearPreviousSecret()
+	if _, err := tm.Validate(oldTok); err == nil {
+		t.Error("old token should fail after the previous secret is cleared")
+	}
+	if _, err := tm.Validate(newTok); err != nil {
+		t.Errorf("new token should still validate after clearing previous: %v", err)
+	}
+}
