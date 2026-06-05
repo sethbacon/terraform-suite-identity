@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.11.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.10.0...v0.11.0) (2026-06-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* identity/models and identity/store types changed shape. Consumers must update in lockstep; TSM stays pinned to v0.10.0 until its rewrite adopts this model.
+
+### Features
+
+* adopt the registry identity model as canonical ([#22](https://github.com/sethbacon/terraform-suite-identity/issues/22)) ([5719eee](https://github.com/sethbacon/terraform-suite-identity/commit/5719eee8d551360c75be8e0a1654c88b3564b6b9))
+
 ## [0.10.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.9.0...v0.10.0) (2026-06-05)
 
 
