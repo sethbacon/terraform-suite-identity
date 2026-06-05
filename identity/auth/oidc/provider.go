@@ -6,7 +6,10 @@ package oidc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -21,6 +24,12 @@ type Config struct {
 	ClientSecret string
 	RedirectURL  string
 	Scopes       []string
+
+	// RequireHTTPS rejects a non-HTTPS issuer URL. An HTTP issuer means discovery
+	// and JWKS key material are fetched over plaintext, allowing a MITM to
+	// substitute signing keys and forge ID tokens. Off by default so local/dev
+	// stacks can use http issuers; production callers should set it true.
+	RequireHTTPS bool
 }
 
 // Provider wraps the generic OIDC provider, verifier and OAuth2 config.
@@ -51,6 +60,10 @@ func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) 
 		return nil, fmt.Errorf("OIDC client secret is required")
 	}
 
+	if cfg.RequireHTTPS && !strings.HasPrefix(cfg.IssuerURL, "https://") {
+		return nil, fmt.Errorf("OIDC issuer URL must use HTTPS, got: %q", cfg.IssuerURL)
+	}
+
 	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OIDC provider: %w", err)
@@ -73,6 +86,16 @@ func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) 
 		config:   oauth2Config,
 		provider: provider,
 	}, nil
+}
+
+// NewProviderForConfig constructs a Provider backed by the given oauth2 config
+// without performing OIDC discovery. Intended for sibling packages (e.g. an
+// Azure AD adapter) and tests that need the OAuth2 methods (GetAuthURL,
+// ExchangeCode) without a live identity provider. Methods that depend on the
+// discovery document or verifier (VerifyIDToken, GetEndSessionEndpoint) are not
+// usable on a Provider built this way.
+func NewProviderForConfig(cfg *oauth2.Config) *Provider {
+	return &Provider{config: cfg}
 }
 
 // GetAuthURL returns the OAuth2 authorization URL for the given state.
@@ -144,12 +167,19 @@ func (p *Provider) ExtractGroups(idToken *oidc.IDToken, claimName string) []stri
 }
 
 // ExtractUserInfo extracts the subject, email and name from the ID token.
-// If the name claim is empty it falls back to the email.
+// The email identifier is resolved from the standard `email` claim, falling
+// back to the Azure AD / Entra ID variants (preferred_username, upn,
+// unique_name) which carry the UPN when `email` is not configured as an
+// optional claim. If the name claim is empty it falls back to the resolved
+// email.
 func (p *Provider) ExtractUserInfo(idToken *oidc.IDToken) (sub, email, name string, err error) {
 	var claims struct {
-		Sub   string `json:"sub"`
-		Email string `json:"email"`
-		Name  string `json:"name"`
+		Sub               string `json:"sub"`
+		Email             string `json:"email"`
+		Name              string `json:"name"`
+		PreferredUsername string `json:"preferred_username"`
+		UPN               string `json:"upn"`
+		UniqueName        string `json:"unique_name"`
 	}
 
 	if err := idToken.Claims(&claims); err != nil {
@@ -160,13 +190,35 @@ func (p *Provider) ExtractUserInfo(idToken *oidc.IDToken) (sub, email, name stri
 		return "", "", "", fmt.Errorf("ID token missing 'sub' claim")
 	}
 
-	if claims.Email == "" {
-		return "", "", "", fmt.Errorf("ID token missing 'email' claim")
+	// Resolve email: standard claim first, then Azure AD UPN variants.
+	resolved := claims.Email
+	if resolved == "" {
+		resolved = claims.PreferredUsername
+	}
+	if resolved == "" {
+		resolved = claims.UPN
+	}
+	if resolved == "" {
+		resolved = claims.UniqueName
+	}
+	if resolved == "" {
+		// Log the available claim keys so an administrator can diagnose which
+		// claims the identity provider is actually sending.
+		var raw map[string]json.RawMessage
+		if jsonErr := idToken.Claims(&raw); jsonErr == nil {
+			keys := make([]string, 0, len(raw))
+			for k := range raw {
+				keys = append(keys, k)
+			}
+			slog.Error("oidc: no email identifier found in ID token",
+				"available_claims", keys)
+		}
+		return "", "", "", fmt.Errorf("ID token missing email identifier (checked: email, preferred_username, upn, unique_name)")
 	}
 
 	if claims.Name == "" {
-		claims.Name = claims.Email
+		claims.Name = resolved
 	}
 
-	return claims.Sub, claims.Email, claims.Name, nil
+	return claims.Sub, resolved, claims.Name, nil
 }
