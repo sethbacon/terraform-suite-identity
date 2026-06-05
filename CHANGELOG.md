@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.5.0...v0.6.0) (2026-06-05)
+
+
+### Features
+
+* add generic OIDC provider ([#12](https://github.com/sethbacon/terraform-suite-identity/issues/12)) ([a6fde90](https://github.com/sethbacon/terraform-suite-identity/commit/a6fde908de31bc2385dd4435dcb3f68e220a3ef1))
+
 ## [0.5.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.4.0...v0.5.0) (2026-06-04)
 
 
