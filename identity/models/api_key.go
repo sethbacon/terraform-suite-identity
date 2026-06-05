@@ -2,20 +2,24 @@ package models
 
 import "time"
 
-// APIKey is a stored API key record. KeyHash holds the bcrypt hash; the full
-// key value is never persisted.
+// APIKey represents an API key for authentication.
+//
+// A key is usable while it exists and has not passed ExpiresAt. Revocation is a
+// hard delete (there is no soft-active flag); expiry warnings are tracked via
+// ExpiryNotificationSentAt.
 type APIKey struct {
-	ID             string     `db:"id" json:"id"`
-	UserID         *string    `db:"user_id" json:"user_id,omitempty"`
-	OrganizationID string     `db:"organization_id" json:"organization_id"`
-	Name           string     `db:"name" json:"name"`
-	Description    *string    `db:"description" json:"description,omitempty"`
-	KeyHash        string     `db:"key_hash" json:"-"`
-	KeyPrefix      string     `db:"key_prefix" json:"key_prefix"`
-	Scopes         []string   `json:"scopes"`
-	ExpiresAt      *time.Time `db:"expires_at" json:"expires_at,omitempty"`
-	LastUsedAt     *time.Time `db:"last_used_at" json:"last_used_at,omitempty"`
-	IsActive       bool       `db:"is_active" json:"is_active"`
-	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+	ID                       string     `json:"id"`
+	UserID                   *string    `json:"user_id,omitempty"`
+	OrganizationID           string     `json:"organization_id"`
+	Name                     string     `json:"name"`
+	Description              *string    `json:"description,omitempty"`
+	KeyHash                  string     `json:"key_hash"`
+	KeyPrefix                string     `json:"key_prefix"`
+	Scopes                   []string   `json:"scopes"`
+	ExpiresAt                *time.Time `json:"expires_at,omitempty"`
+	LastUsedAt               *time.Time `json:"last_used_at,omitempty"`
+	ExpiryNotificationSentAt *time.Time `json:"expiry_notification_sent_at,omitempty"`
+	CreatedAt                time.Time  `json:"created_at"`
+	// Joined fields (not stored in api_keys table)
+	UserName *string `json:"user_name,omitempty"`
 }

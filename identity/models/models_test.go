@@ -1,21 +1,26 @@
 package models
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestOIDCConfig_GetScopes(t *testing.T) {
 	cases := []struct {
-		name string
-		json string
-		want []string
+		name   string
+		scopes string
+		want   []string
 	}{
 		{"empty defaults", "", []string{"openid", "email", "profile"}},
-		{"comma separated", "openid,email,groups", []string{"openid", "email", "groups"}},
-		{"trims whitespace", " openid , email ", []string{"openid", "email"}},
-		{"ignores empty entries", "openid,,email,", []string{"openid", "email"}},
+		{"json array", `["openid","email","groups"]`, []string{"openid", "email", "groups"}},
+		{"single", `["openid"]`, []string{"openid"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &OIDCConfig{ScopesJSON: tc.json}
+			c := &OIDCConfig{}
+			if tc.scopes != "" {
+				c.Scopes = json.RawMessage(tc.scopes)
+			}
 			got := c.GetScopes()
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
@@ -29,29 +34,44 @@ func TestOIDCConfig_GetScopes(t *testing.T) {
 	}
 }
 
-func TestUserWithOrgRoles_HasAdminScope(t *testing.T) {
-	admin := &UserWithOrgRoles{Scopes: []string{"analysis:read", "admin"}}
-	if !admin.HasAdminScope() {
-		t.Error("expected HasAdminScope true when admin scope present")
+func TestOIDCConfig_GroupMappingRoundTrip(t *testing.T) {
+	c := &OIDCConfig{}
+	mappings := []OIDCGroupMapping{{Group: "admins", Organization: "acme", Role: "admin"}}
+	if err := c.SetGroupMappingConfig("groups", mappings, "viewer"); err != nil {
+		t.Fatalf("SetGroupMappingConfig: %v", err)
 	}
-	if !equalStrings(admin.GetAllowedScopes(), admin.Scopes) {
-		t.Error("GetAllowedScopes should return the user's scopes")
+	claim, got, def := c.GetGroupMappingConfig()
+	if claim != "groups" || def != "viewer" {
+		t.Errorf("claim=%q default=%q, want groups/viewer", claim, def)
 	}
-
-	plain := &UserWithOrgRoles{Scopes: []string{"analysis:read"}}
-	if plain.HasAdminScope() {
-		t.Error("expected HasAdminScope false without admin scope")
+	if len(got) != 1 || got[0].Group != "admins" || got[0].Organization != "acme" || got[0].Role != "admin" {
+		t.Errorf("mappings = %+v, want one admins/acme/admin", got)
 	}
 }
 
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+func TestUserWithOrgRoles_ScopesAcrossMemberships(t *testing.T) {
+	u := &UserWithOrgRoles{
+		Memberships: []UserMembership{
+			{OrganizationID: "o1", RoleTemplateScopes: []string{"analysis:read", "admin"}},
+			{OrganizationID: "o2", RoleTemplateScopes: []string{"analysis:read", "sources:write"}},
+		},
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+	if !u.HasAdminScope() {
+		t.Error("expected HasAdminScope true when any membership has admin")
+	}
+	got := u.GetAllowedScopes()
+	want := map[string]bool{"analysis:read": true, "admin": true, "sources:write": true}
+	if len(got) != len(want) {
+		t.Fatalf("GetAllowedScopes = %v, want keys %v", got, want)
+	}
+	for _, s := range got {
+		if !want[s] {
+			t.Errorf("unexpected scope %q", s)
 		}
 	}
-	return true
+
+	plain := &UserWithOrgRoles{Memberships: []UserMembership{{RoleTemplateScopes: []string{"analysis:read"}}}}
+	if plain.HasAdminScope() {
+		t.Error("expected HasAdminScope false without admin scope")
+	}
 }
