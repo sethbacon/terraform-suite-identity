@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.7.0...v0.8.0) (2026-06-05)
+
+
+### Features
+
+* add identity data-access layer (store) ([#16](https://github.com/sethbacon/terraform-suite-identity/issues/16)) ([022031d](https://github.com/sethbacon/terraform-suite-identity/commit/022031dcaf0d23be3256580b229152530cda3347))
+
 ## [0.7.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.6.0...v0.7.0) (2026-06-05)
 
 
