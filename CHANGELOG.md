@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.6.0...v0.7.0) (2026-06-05)
+
+
+### Features
+
+* add identity data models ([#14](https://github.com/sethbacon/terraform-suite-identity/issues/14)) ([0247053](https://github.com/sethbacon/terraform-suite-identity/commit/0247053e7f5a4cee39683f744932fefabe9b4b84))
+
 ## [0.6.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.5.0...v0.6.0) (2026-06-05)
 
 
