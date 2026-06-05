@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.9.0...v0.10.0) (2026-06-05)
+
+
+### Features
+
+* enrich OIDC provider toward the registry superset ([#20](https://github.com/sethbacon/terraform-suite-identity/issues/20)) ([22e77ea](https://github.com/sethbacon/terraform-suite-identity/commit/22e77ea10c378466ad902de02c180b359206f0e7))
+
 ## [0.9.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.8.0...v0.9.0) (2026-06-05)
 
 
