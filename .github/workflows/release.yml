@@ -1,0 +1,83 @@
+name: Release
+
+# Publishes the GitHub Release for a semver tag.
+#
+# release-please (.github/workflows/release-please.yml) creates the tag and a
+# DRAFT release with the changelog when its release PR is merged ("draft": true
+# in .release-please-config.json). The resulting tag push triggers this workflow,
+# which publishes that draft. This mirrors the registry's two-stage release flow;
+# the registry also builds binaries + a Docker image here, but this is a pure Go
+# library with no artifacts to attach, so the job only flips the draft to
+# published.
+#
+# To publish an already-tagged version manually (e.g. a tag created before this
+# workflow existed):  gh workflow run release.yml --ref vX.Y.Z
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Releases must originate from main: verify the tagged commit is reachable
+  # from origin/main before publishing (GitHub can't filter tag events by branch).
+  guard:
+    name: Verify tag is on main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0 # full history to walk ancestry
+      - name: Check tagged commit is reachable from main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Release tags must be on main." \
+                 "This ref points to a commit that is not in origin/main."
+            exit 1
+          fi
+          echo "✅ Tag is on main — proceeding with release."
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # publish / create releases
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
+      - name: Publish the release-please draft (or create it if absent)
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::This workflow must run on a semver tag (got '${TAG}')." \
+                 "Use: gh workflow run release.yml --ref vX.Y.Z"
+            exit 1
+          fi
+
+          if gh release view "${TAG}" --repo "${REPO}" > /dev/null 2>&1; then
+            echo "Release ${TAG} exists (draft from release-please) — publishing."
+            gh release edit "${TAG}" --repo "${REPO}" --draft=false
+          else
+            echo "No release for ${TAG} — creating from CHANGELOG.md."
+            CHANGELOG_BODY="$(sed -n "/^## \[${TAG#v}\]/,/^## \[/{ /^## \[${TAG#v}\]/d; /^## \[/d; p; }" CHANGELOG.md)"
+            gh release create "${TAG}" \
+              --repo "${REPO}" \
+              --title "${TAG}" \
+              --notes "${CHANGELOG_BODY}"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
