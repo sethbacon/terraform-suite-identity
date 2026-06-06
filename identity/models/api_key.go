@@ -13,7 +13,7 @@ type APIKey struct {
 	OrganizationID           string     `json:"organization_id"`
 	Name                     string     `json:"name"`
 	Description              *string    `json:"description,omitempty"`
-	KeyHash                  string     `json:"key_hash"`
+	KeyHash                  string     `json:"-"` // bcrypt hash — never exposed in API responses
 	KeyPrefix                string     `json:"key_prefix"`
 	Scopes                   []string   `json:"scopes"`
 	ExpiresAt                *time.Time `json:"expires_at,omitempty"`
