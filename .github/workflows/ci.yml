@@ -42,9 +42,23 @@ jobs:
         run: go vet ./...
 
       - name: Test (with coverage)
-        # Coverage is ~0% until integration tests land — the migration runner
-        # requires a live PostgreSQL. No coverage floor is enforced yet.
+        # auth/models/store are unit-tested (sqlmock for the data layer — no live
+        # DB needed). The migration runner (identity.RunMigrations) requires a live
+        # PostgreSQL and is exercised by the consumers' integration/UAT suites.
         run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+
+      - name: Check coverage threshold
+        run: |
+          THRESHOLD=75
+          COVERAGE=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}' | tr -d '%')
+          echo "Coverage: ${COVERAGE}%  (threshold: ${THRESHOLD}%)"
+          awk -v cov="$COVERAGE" -v thr="$THRESHOLD" 'BEGIN {
+            if (cov + 0 < thr + 0) {
+              print "FAIL: " cov "% is below the " thr "% minimum threshold."
+              exit 1
+            }
+            print "PASS: " cov "% meets the " thr "% threshold."
+          }'
 
       - name: Upload coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
