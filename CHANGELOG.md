@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.11.0...v0.11.1) (2026-06-06)
+
+
+### Bug Fixes
+
+* migration 000003 down fails — subquery not allowed in USING ([#27](https://github.com/sethbacon/terraform-suite-identity/issues/27)) ([a736f8c](https://github.com/sethbacon/terraform-suite-identity/commit/a736f8c4daee4d5c25bdf619563d5664603b6aab)), closes [#26](https://github.com/sethbacon/terraform-suite-identity/issues/26)
+
 ## [0.11.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.10.0...v0.11.0) (2026-06-05)
 
 
