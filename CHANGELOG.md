@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.11.1...v0.11.2) (2026-06-06)
+
+
+### Bug Fixes
+
+* omit API key hash from JSON responses ([#29](https://github.com/sethbacon/terraform-suite-identity/issues/29)) ([ff36284](https://github.com/sethbacon/terraform-suite-identity/commit/ff36284698f1564ff1cb50428ad1c2a7f0b05bf0))
+
 ## [0.11.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.11.0...v0.11.1) (2026-06-06)
 
 
