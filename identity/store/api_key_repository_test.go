@@ -15,12 +15,12 @@ import (
 
 var apiKeyCols = []string{
 	"id", "user_id", "organization_id", "name", "description",
-	"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at", "created_at",
+	"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at", "expiry_notification_sent_at", "created_at",
 }
 
 var apiKeyListCols = []string{
 	"id", "user_id", "organization_id", "name", "description",
-	"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at", "created_at", "user_name",
+	"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at", "expiry_notification_sent_at", "created_at", "user_name",
 }
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ var sampleScopes = []byte(`["modules:read","modules:write"]`)
 func sampleAPIKeyRow() *sqlmock.Rows {
 	return sqlmock.NewRows(apiKeyCols).
 		AddRow("key-1", "user-1", "org-1", "CI Key", nil, "hashedkey", "tfr_abc123",
-			sampleScopes, nil, nil, time.Now())
+			sampleScopes, nil, nil, nil, time.Now())
 }
 
 func emptyAPIKeyRow() *sqlmock.Rows {
@@ -42,7 +42,7 @@ func emptyAPIKeyRow() *sqlmock.Rows {
 func sampleAPIKeyListRow() *sqlmock.Rows {
 	return sqlmock.NewRows(apiKeyListCols).
 		AddRow("key-1", "user-1", "org-1", "CI Key", nil, "hashedkey", "tfr_abc123",
-			sampleScopes, nil, nil, time.Now(), nil)
+			sampleScopes, nil, nil, nil, time.Now(), nil)
 }
 
 func newAPIKeyRepo(t *testing.T) (*APIKeyRepository, sqlmock.Sqlmock) {
@@ -400,11 +400,19 @@ func TestAPIKey_ListByOrganization_Delegate(t *testing.T) {
 // FindExpiringKeys
 // ---------------------------------------------------------------------------
 
+var expiringKeyCols = []string{
+	"id", "user_id", "organization_id", "name", "description",
+	"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at", "created_at",
+}
+
 func TestFindExpiringKeys_Success(t *testing.T) {
 	repo, mock := newAPIKeyRepo(t)
 
+	rows := sqlmock.NewRows(expiringKeyCols).
+		AddRow("key-1", "user-1", "org-1", "CI Key", nil, "hashedkey", "tfr_abc123",
+			sampleScopes, nil, nil, time.Now())
 	mock.ExpectQuery("SELECT.*FROM api_keys").
-		WillReturnRows(sampleAPIKeyRow())
+		WillReturnRows(rows)
 
 	keys, err := repo.FindExpiringKeys(context.Background(), 7)
 	if err != nil {
@@ -419,7 +427,7 @@ func TestFindExpiringKeys_Empty(t *testing.T) {
 	repo, mock := newAPIKeyRepo(t)
 
 	mock.ExpectQuery("SELECT.*FROM api_keys").
-		WillReturnRows(mock.NewRows(apiKeyCols))
+		WillReturnRows(mock.NewRows(expiringKeyCols))
 
 	keys, err := repo.FindExpiringKeys(context.Background(), 7)
 	if err != nil {

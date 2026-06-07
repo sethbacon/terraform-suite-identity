@@ -58,7 +58,8 @@ func (r *APIKeyRepository) CreateAPIKey(ctx context.Context, apiKey *models.APIK
 // GetAPIKeyByHash retrieves an API key by its hash (for authentication)
 func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) (*models.APIKey, error) {
 	query := `
-		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes, expires_at, last_used_at, created_at
+		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
+		       expires_at, last_used_at, expiry_notification_sent_at, created_at
 		FROM api_keys
 		WHERE key_hash = $1
 	`
@@ -77,6 +78,7 @@ func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) 
 		&scopesJSON,
 		&apiKey.ExpiresAt,
 		&apiKey.LastUsedAt,
+		&apiKey.ExpiryNotificationSentAt,
 		&apiKey.CreatedAt,
 	)
 
@@ -100,7 +102,8 @@ func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) 
 // GetAPIKeyByID retrieves an API key by ID
 func (r *APIKeyRepository) GetAPIKeyByID(ctx context.Context, keyID string) (*models.APIKey, error) {
 	query := `
-		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes, expires_at, last_used_at, created_at
+		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
+		       expires_at, last_used_at, expiry_notification_sent_at, created_at
 		FROM api_keys
 		WHERE id = $1
 	`
@@ -119,6 +122,7 @@ func (r *APIKeyRepository) GetAPIKeyByID(ctx context.Context, keyID string) (*mo
 		&scopesJSON,
 		&apiKey.ExpiresAt,
 		&apiKey.LastUsedAt,
+		&apiKey.ExpiryNotificationSentAt,
 		&apiKey.CreatedAt,
 	)
 
@@ -143,7 +147,7 @@ func (r *APIKeyRepository) GetAPIKeyByID(ctx context.Context, keyID string) (*mo
 func (r *APIKeyRepository) ListAPIKeysByUser(ctx context.Context, userID string) ([]*models.APIKey, error) {
 	query := `
 		SELECT ak.id, ak.user_id, ak.organization_id, ak.name, ak.description, ak.key_hash, ak.key_prefix, ak.scopes,
-		       ak.expires_at, ak.last_used_at, ak.created_at, u.name as user_name
+		       ak.expires_at, ak.last_used_at, ak.expiry_notification_sent_at, ak.created_at, u.name as user_name
 		FROM api_keys ak
 		LEFT JOIN users u ON ak.user_id = u.id
 		WHERE ak.user_id = $1
@@ -172,6 +176,7 @@ func (r *APIKeyRepository) ListAPIKeysByUser(ctx context.Context, userID string)
 			&scopesJSON,
 			&apiKey.ExpiresAt,
 			&apiKey.LastUsedAt,
+			&apiKey.ExpiryNotificationSentAt,
 			&apiKey.CreatedAt,
 			&apiKey.UserName,
 		)
@@ -195,7 +200,7 @@ func (r *APIKeyRepository) ListAPIKeysByUser(ctx context.Context, userID string)
 func (r *APIKeyRepository) ListAPIKeysByOrganization(ctx context.Context, orgID string) ([]*models.APIKey, error) {
 	query := `
 		SELECT ak.id, ak.user_id, ak.organization_id, ak.name, ak.description, ak.key_hash, ak.key_prefix, ak.scopes,
-		       ak.expires_at, ak.last_used_at, ak.created_at, u.name as user_name
+		       ak.expires_at, ak.last_used_at, ak.expiry_notification_sent_at, ak.created_at, u.name as user_name
 		FROM api_keys ak
 		LEFT JOIN users u ON ak.user_id = u.id
 		WHERE ak.organization_id = $1
@@ -224,6 +229,7 @@ func (r *APIKeyRepository) ListAPIKeysByOrganization(ctx context.Context, orgID 
 			&scopesJSON,
 			&apiKey.ExpiresAt,
 			&apiKey.LastUsedAt,
+			&apiKey.ExpiryNotificationSentAt,
 			&apiKey.CreatedAt,
 			&apiKey.UserName,
 		)
@@ -276,7 +282,8 @@ func (r *APIKeyRepository) DeleteExpiredKeys(ctx context.Context) error {
 // GetAPIKeysByPrefix retrieves API keys matching a prefix (for authentication)
 func (r *APIKeyRepository) GetAPIKeysByPrefix(ctx context.Context, keyPrefix string) ([]*models.APIKey, error) {
 	query := `
-		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes, expires_at, last_used_at, created_at
+		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
+		       expires_at, last_used_at, expiry_notification_sent_at, created_at
 		FROM api_keys
 		WHERE key_prefix = $1
 		ORDER BY created_at DESC
@@ -304,6 +311,7 @@ func (r *APIKeyRepository) GetAPIKeysByPrefix(ctx context.Context, keyPrefix str
 			&scopesJSON,
 			&apiKey.ExpiresAt,
 			&apiKey.LastUsedAt,
+			&apiKey.ExpiryNotificationSentAt,
 			&apiKey.CreatedAt,
 		)
 		if err != nil {
@@ -427,7 +435,7 @@ func (r *APIKeyRepository) ListByOrganization(ctx context.Context, orgID string)
 func (r *APIKeyRepository) ListByUserAndOrganization(ctx context.Context, userID, orgID string) ([]*models.APIKey, error) {
 	query := `
 		SELECT ak.id, ak.user_id, ak.organization_id, ak.name, ak.description, ak.key_hash, ak.key_prefix, ak.scopes,
-		       ak.expires_at, ak.last_used_at, ak.created_at, u.name as user_name
+		       ak.expires_at, ak.last_used_at, ak.expiry_notification_sent_at, ak.created_at, u.name as user_name
 		FROM api_keys ak
 		LEFT JOIN users u ON ak.user_id = u.id
 		WHERE ak.user_id = $1 AND ak.organization_id = $2
@@ -456,6 +464,7 @@ func (r *APIKeyRepository) ListByUserAndOrganization(ctx context.Context, userID
 			&scopesJSON,
 			&apiKey.ExpiresAt,
 			&apiKey.LastUsedAt,
+			&apiKey.ExpiryNotificationSentAt,
 			&apiKey.CreatedAt,
 			&apiKey.UserName,
 		)
@@ -479,7 +488,7 @@ func (r *APIKeyRepository) ListByUserAndOrganization(ctx context.Context, userID
 func (r *APIKeyRepository) ListAll(ctx context.Context) ([]*models.APIKey, error) {
 	query := `
 		SELECT ak.id, ak.user_id, ak.organization_id, ak.name, ak.description, ak.key_hash, ak.key_prefix, ak.scopes,
-		       ak.expires_at, ak.last_used_at, ak.created_at, u.name as user_name
+		       ak.expires_at, ak.last_used_at, ak.expiry_notification_sent_at, ak.created_at, u.name as user_name
 		FROM api_keys ak
 		LEFT JOIN users u ON ak.user_id = u.id
 		ORDER BY ak.created_at DESC
@@ -507,6 +516,7 @@ func (r *APIKeyRepository) ListAll(ctx context.Context) ([]*models.APIKey, error
 			&scopesJSON,
 			&apiKey.ExpiresAt,
 			&apiKey.LastUsedAt,
+			&apiKey.ExpiryNotificationSentAt,
 			&apiKey.CreatedAt,
 			&apiKey.UserName,
 		)
