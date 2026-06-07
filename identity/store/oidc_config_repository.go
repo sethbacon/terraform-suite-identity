@@ -50,10 +50,20 @@ func (r *OIDCConfigRepository) CreateOIDCConfig(ctx context.Context, config *mod
 	return err
 }
 
+// oidcConfigColumns is the explicit column projection for oidc_config reads.
+// extra_config is COALESCEd to '{}' so a NULL JSONB value does not fail the scan
+// into the model's non-nullable json.RawMessage ExtraConfig field (a bare
+// SELECT * errors when extra_config is NULL). The AS alias keeps the column name
+// so sqlx still maps it.
+const oidcConfigColumns = `id, name, provider_type, issuer_url, client_id, ` +
+	`client_secret_encrypted, redirect_url, scopes, is_active, ` +
+	`COALESCE(extra_config, '{}'::jsonb) AS extra_config, ` +
+	`created_at, updated_at, created_by, updated_by`
+
 // GetActiveOIDCConfig retrieves the currently active OIDC configuration.
 func (r *OIDCConfigRepository) GetActiveOIDCConfig(ctx context.Context) (*models.OIDCConfig, error) {
 	var config models.OIDCConfig
-	query := `SELECT * FROM oidc_config WHERE is_active = true LIMIT 1`
+	query := `SELECT ` + oidcConfigColumns + ` FROM oidc_config WHERE is_active = true LIMIT 1`
 	err := r.db.GetContext(ctx, &config, query)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -64,7 +74,7 @@ func (r *OIDCConfigRepository) GetActiveOIDCConfig(ctx context.Context) (*models
 // GetOIDCConfig retrieves an OIDC configuration by ID.
 func (r *OIDCConfigRepository) GetOIDCConfig(ctx context.Context, id uuid.UUID) (*models.OIDCConfig, error) {
 	var config models.OIDCConfig
-	query := `SELECT * FROM oidc_config WHERE id = $1`
+	query := `SELECT ` + oidcConfigColumns + ` FROM oidc_config WHERE id = $1`
 	err := r.db.GetContext(ctx, &config, query, id)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -75,7 +85,7 @@ func (r *OIDCConfigRepository) GetOIDCConfig(ctx context.Context, id uuid.UUID) 
 // ListOIDCConfigs lists all OIDC configurations.
 func (r *OIDCConfigRepository) ListOIDCConfigs(ctx context.Context) ([]*models.OIDCConfig, error) {
 	var configs []*models.OIDCConfig
-	query := `SELECT * FROM oidc_config ORDER BY created_at DESC`
+	query := `SELECT ` + oidcConfigColumns + ` FROM oidc_config ORDER BY created_at DESC`
 	err := r.db.SelectContext(ctx, &configs, query)
 	return configs, err
 }
