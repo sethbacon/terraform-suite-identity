@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.3](https://github.com/sethbacon/terraform-suite-identity/compare/v0.11.2...v0.11.3) (2026-06-07)
+
+
+### Bug Fixes
+
+* **store:** tolerate NULL extra_config in oidc_config reads ([#33](https://github.com/sethbacon/terraform-suite-identity/issues/33)) ([25520a1](https://github.com/sethbacon/terraform-suite-identity/commit/25520a1898d50cf92d12783ce9b787a8c5dc5412))
+
 ## [0.11.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.11.1...v0.11.2) (2026-06-06)
 
 
