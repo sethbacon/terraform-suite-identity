@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.11.3...v0.12.0) (2026-06-07)
+
+
+### Features
+
+* **store:** select expiry_notification_sent_at in all API key queries ([0e87fff](https://github.com/sethbacon/terraform-suite-identity/commit/0e87ffffa4ccdd3989f2535241316e0c66230ae2))
+
 ## [0.11.3](https://github.com/sethbacon/terraform-suite-identity/compare/v0.11.2...v0.11.3) (2026-06-07)
 
 
