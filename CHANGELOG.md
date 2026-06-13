@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.12.0...v0.13.0) (2026-06-13)
+
+
+### Features
+
+* **suite:** add runtime capability manifest + discovery client ([#36](https://github.com/sethbacon/terraform-suite-identity/issues/36)) ([e80838e](https://github.com/sethbacon/terraform-suite-identity/commit/e80838e24ea4fba6e0f83964635d627049ee94ba))
+
 ## [0.12.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.11.3...v0.12.0) (2026-06-07)
 
 
