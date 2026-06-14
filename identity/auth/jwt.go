@@ -36,6 +36,10 @@ type TokenManager struct {
 	issuer   string
 	current  atomic.Pointer[[]byte]
 	previous atomic.Pointer[[]byte]
+	// allowedIssuers, when non-nil, restricts Validate to tokens whose `iss`
+	// claim is in the set. nil (the default) disables the check — accepting any
+	// issuer, preserving single-app behaviour.
+	allowedIssuers atomic.Pointer[[]string]
 }
 
 // NewTokenManager returns a TokenManager that signs with secret and stamps the
@@ -62,6 +66,39 @@ func (m *TokenManager) RotateSecret(newSecret []byte) {
 // overlap window. Tokens signed with the previous secret no longer validate.
 func (m *TokenManager) ClearPreviousSecret() {
 	m.previous.Store(nil)
+}
+
+// SetAllowedIssuers restricts Validate to tokens whose `iss` claim is one of the
+// given issuers. An empty or nil set (the default) disables the check entirely,
+// accepting any issuer — so this is fully backward-compatible for single-app use.
+//
+// In a coupled suite sharing one signing secret, set this to {own issuer} plus
+// the trusted sibling issuers so a shared secret cannot be replayed from an
+// untrusted minter while still accepting legitimate sibling tokens. Safe for
+// concurrent use and intended to be updated at runtime as siblings are
+// discovered.
+func (m *TokenManager) SetAllowedIssuers(issuers []string) {
+	if len(issuers) == 0 {
+		m.allowedIssuers.Store(nil)
+		return
+	}
+	cp := append([]string(nil), issuers...)
+	m.allowedIssuers.Store(&cp)
+}
+
+// issuerAllowed reports whether iss passes the configured issuer pin. With no
+// pin configured (the default) every issuer is allowed.
+func (m *TokenManager) issuerAllowed(iss string) bool {
+	allowed := m.allowedIssuers.Load()
+	if allowed == nil {
+		return true
+	}
+	for _, a := range *allowed {
+		if a == iss {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *TokenManager) currentSecret() []byte {
@@ -127,6 +164,11 @@ func (m *TokenManager) validateWith(tokenString string, secret []byte) (*Claims,
 	claims, ok := token.Claims.(*Claims)
 	if !ok {
 		return nil, errors.New("invalid claims type")
+	}
+	// Enforced here (the single choke point) so the pin applies to both the
+	// current- and previous-secret validation attempts.
+	if !m.issuerAllowed(claims.Issuer) {
+		return nil, errors.New("token issuer not allowed")
 	}
 	return claims, nil
 }
