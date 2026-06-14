@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.13.0...v0.14.0) (2026-06-14)
+
+
+### Features
+
+* **auth:** optional issuer pinning in TokenManager ([#40](https://github.com/sethbacon/terraform-suite-identity/issues/40)) ([95f8787](https://github.com/sethbacon/terraform-suite-identity/commit/95f87877881b093a4e01c9af76f1df58e40b49fe))
+
 ## [0.13.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.12.0...v0.13.0) (2026-06-13)
 
 
