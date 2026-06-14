@@ -100,6 +100,52 @@ func TestTokenManager_GeneratesUniqueJTI(t *testing.T) {
 	}
 }
 
+func TestTokenManager_AllowedIssuers(t *testing.T) {
+	tm := newTM() // issuer "test-issuer"
+	tok, err := tm.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Default (unset) accepts any issuer — backward compatible.
+	if _, err := tm.Validate(tok); err != nil {
+		t.Fatalf("default (no pin) should accept: %v", err)
+	}
+
+	// Pin to a set that INCLUDES the token's issuer → accepted.
+	tm.SetAllowedIssuers([]string{"test-issuer", "terraform-registry"})
+	if _, err := tm.Validate(tok); err != nil {
+		t.Errorf("issuer in allowed set should validate: %v", err)
+	}
+
+	// Pin to a set that EXCLUDES the token's issuer → rejected.
+	tm.SetAllowedIssuers([]string{"some-other-app"})
+	if _, err := tm.Validate(tok); err == nil {
+		t.Error("issuer not in allowed set should be rejected")
+	}
+
+	// Clearing the set restores accept-any (default behaviour).
+	tm.SetAllowedIssuers(nil)
+	if _, err := tm.Validate(tok); err != nil {
+		t.Errorf("cleared allowed set should accept any issuer: %v", err)
+	}
+}
+
+func TestTokenManager_AllowedIssuers_AcrossSecretRotation(t *testing.T) {
+	// The pin is enforced in validateWith, so it also rejects a disallowed issuer
+	// on the previous-secret (rotation-overlap) path.
+	tm := newTM()
+	oldTok, err := tm.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	tm.RotateSecret([]byte("a-new-rotated-secret-32-bytes-minimum!"))
+	tm.SetAllowedIssuers([]string{"some-other-app"}) // excludes "test-issuer"
+	if _, err := tm.Validate(oldTok); err == nil {
+		t.Error("old (previous-secret) token with a disallowed issuer must be rejected")
+	}
+}
+
 func TestTokenManager_RotateSecret_OverlapThenClear(t *testing.T) {
 	tm := newTM()
 	// Token signed with the original secret.
