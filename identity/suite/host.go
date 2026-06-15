@@ -4,20 +4,22 @@ import (
 	"net"
 	"net/url"
 	"strings"
+
+	"golang.org/x/net/idna"
 )
 
 // CanonicalHost normalizes a registry host so the suite "Consumed by" join
 // compares like-for-like across apps. The host captured from a Terraform module
 // source address, the registry's service-discovery host, and the registry's own
-// public host can differ only in case, a default port, a trailing FQDN dot, or
-// an accidental scheme prefix; folding those away makes the exact-match join
-// robust to such variants.
+// public host can differ only in case, a default port, a trailing FQDN dot, an
+// accidental scheme prefix, or Unicode (IDN) vs punycode encoding; folding those
+// away makes the exact-match join robust to such variants.
 //
-// It strips any scheme, lowercases the host, removes a trailing dot, and drops
-// a default port (:80/:443) while preserving any non-default port. IDN/punycode
-// folding is intentionally NOT done here, to keep this module free of a
-// golang.org/x/net dependency; ASCII hosts (the overwhelming common case) are
-// fully covered. Callers needing IDN folding should normalize before calling.
+// It strips any scheme, lowercases the host, removes a trailing dot, folds an
+// internationalized (Unicode) host to its punycode ASCII form, and drops a
+// default port (:80/:443) while preserving any non-default port. IDN folding is
+// best-effort: a host the IDNA "lookup" profile rejects (e.g. underscores) is
+// left as the lowercased value, so the function never drops or mangles input.
 func CanonicalHost(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -35,6 +37,12 @@ func CanonicalHost(raw string) string {
 		host, port = h, p
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	// Fold an internationalized host to punycode ASCII so a Unicode source
+	// address matches a punycode-stored one. Best-effort: keep the lowercased
+	// host if the lookup profile rejects it (the common ASCII host is unchanged).
+	if ascii, err := idna.Lookup.ToASCII(host); err == nil && ascii != "" {
+		host = ascii
+	}
 	if port == "" || port == "80" || port == "443" {
 		return host
 	}

@@ -1,6 +1,9 @@
 package suite
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCanonicalHost(t *testing.T) {
 	cases := []struct {
@@ -35,10 +38,32 @@ func TestCanonicalHost(t *testing.T) {
 // TestCanonicalHost_Idempotent guards the join invariant: applying the function
 // twice equals applying it once, so re-canonicalizing a stored host never drifts.
 func TestCanonicalHost_Idempotent(t *testing.T) {
-	for _, in := range []string{"reg.example.com", "REG.Example.com:443", "https://reg.example.com:8080"} {
+	for _, in := range []string{
+		"reg.example.com", "REG.Example.com:443", "https://reg.example.com:8080",
+		"CAFÉ.Example.com", // IDN: punycode form must re-canonicalize stably
+	} {
 		once := CanonicalHost(in)
 		if twice := CanonicalHost(once); twice != once {
 			t.Errorf("not idempotent: CanonicalHost(%q)=%q then %q", in, once, twice)
 		}
+	}
+}
+
+// TestCanonicalHost_IDN: a Unicode host folds to lowercase punycode ASCII so it
+// matches a punycode-encoded source address. (Exact punycode is not hardcoded —
+// asserted via ASCII-ness + the xn-- prefix + stability.)
+func TestCanonicalHost_IDN(t *testing.T) {
+	got := CanonicalHost("CAFÉ.Example.COM")
+	if !strings.HasPrefix(got, "xn--") || !strings.HasSuffix(got, ".example.com") {
+		t.Fatalf("IDN host not folded to punycode: %q", got)
+	}
+	for _, r := range got {
+		if r > 127 {
+			t.Fatalf("result not ASCII: %q", got)
+		}
+	}
+	// Non-default port is preserved alongside IDN folding.
+	if withPort := CanonicalHost("CAFÉ.Example.com:8443"); !strings.HasSuffix(withPort, ":8443") {
+		t.Errorf("port dropped on IDN host: %q", withPort)
 	}
 }
