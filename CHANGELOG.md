@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.14.0...v0.15.0) (2026-06-15)
+
+
+### Features
+
+* **suite:** add CanonicalHost helper for cross-app host matching ([#42](https://github.com/sethbacon/terraform-suite-identity/issues/42)) ([0c8ef74](https://github.com/sethbacon/terraform-suite-identity/commit/0c8ef74feb6d8978ca6f353cf6685592fd5124ce))
+
 ## [0.14.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.13.0...v0.14.0) (2026-06-14)
 
 
