@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.15.0...v0.16.0) (2026-06-15)
+
+
+### Features
+
+* **suite:** fold IDN hosts to punycode in CanonicalHost ([#44](https://github.com/sethbacon/terraform-suite-identity/issues/44)) ([d15b977](https://github.com/sethbacon/terraform-suite-identity/commit/d15b9778b9e6b6f212f0ee8ad30ac3a90ee3680e))
+
 ## [0.15.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.14.0...v0.15.0) (2026-06-15)
 
 
