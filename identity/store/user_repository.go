@@ -1,4 +1,4 @@
-// Package repositories implements the data access layer (repository pattern) for the Terraform Registry.
+// Package store implements the data access layer (repository pattern) for the shared identity model.
 // Each repository type encapsulates all database queries for a domain entity.
 // Handlers never issue SQL directly — all database access goes through this layer, which makes query logic testable in isolation and prevents accidental cross-domain data access.
 package store

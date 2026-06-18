@@ -1,7 +1,7 @@
 # terraform-suite-identity
 
-Shared identity & auth component for the Terraform tooling suite (the registry and
-the state manager).
+Shared identity & auth component for the Terraform tooling suite (the Enterprise
+Terraform Registry and the state manager).
 
 It is owned by **neither** consuming application: either app can stand the identity
 store up at setup time, and whichever app is installed second detects that it already
@@ -21,6 +21,7 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 | `identity/store` | The data-access layer (repository pattern) for those types, plus `TokenRepository` (JWT revocation). Repos use **unqualified** table names so the connection's `search_path` selects the schema. |
 | `identity/auth` | App-neutral auth primitives: scope checking (`HasScope`/`HasAnyScope`/`HasAllScopes` with wildcard `admin` + write-implies-read), the JWT `TokenManager` (HS256, JTI, secret rotation), and API-key generation/validation. |
 | `identity/auth/oidc` | A generic OpenID Connect provider (discovery, auth URL, code exchange, ID-token verification, group/user-info extraction). |
+| `identity/suite` | The shared runtime-coupling contract used by **both** apps: the capability `Manifest` each app publishes, `NegotiateCompat` version negotiation, the polling `DiscoveryClient`, and `CanonicalHost` for the cross-app "Consumed by" join. |
 
 ## Canonical identity model
 
@@ -33,7 +34,8 @@ Notable modelling choices:
 
 - **No soft-active flag on users.** Access derives entirely from organization memberships
   and the scopes their role templates grant; "disabling" a user means removing their
-  memberships (or deleting the user).
+  memberships (or deleting the user). (The `users.is_active` column still exists in the
+  schema for historical reasons but is intentionally unread/unwritten by the model.)
 - **API keys** are usable while they exist and have not passed `expires_at`; revocation is
   a hard delete (no soft flag). JWT revocation is tracked separately in `revoked_tokens`.
 - **Multi-org by default** — `UserWithOrgRoles` aggregates scopes across all memberships.
@@ -45,6 +47,7 @@ go get github.com/sethbacon/terraform-suite-identity@latest
 ```
 
 Pin a minimum version in `go.mod`. Schema migrations are additive within a major version.
+Requires Go 1.25 or newer.
 
 ## Usage
 
@@ -95,18 +98,37 @@ apiKeyRepo := store.NewAPIKeyRepository(db)
 tokenRepo  := store.NewTokenRepository(db) // revoked_tokens
 ```
 
+Most repositories take a `*sql.DB`, but `RoleTemplateRepository` and
+`OIDCConfigRepository` take a `*sqlx.DB`. Wrap the same connection with
+`sqlx.NewDb(db, "postgres")` for those two:
+
+```go
+sqlxDB := sqlx.NewDb(db, "postgres") // db is the *sql.DB from above
+
+roleRepo := store.NewRoleTemplateRepository(sqlxDB)
+oidcRepo := store.NewOIDCConfigRepository(sqlxDB)
+```
+
 ### Auth
 
 ```go
 import "github.com/sethbacon/terraform-suite-identity/identity/auth"
 
-// Scope checks — the app injects its own write→read pairs and scope set.
-ok := auth.HasScope(userScopes, "modules:write", auth.ReadWritePairs{...})
+// Scope checks — the module ships identity-core scope constants (auth.ScopeUsersRead,
+// auth.ScopeOrganizationsWrite, …); apps add their own scopes (e.g. "modules:write")
+// and supply the write→read pairs. Using an exported scope here:
+ok := auth.HasScope(userScopes, auth.ScopeUsersRead,
+    auth.ReadWritePairs{auth.ScopeUsersRead: auth.ScopeUsersWrite})
 
 // JWT — secret + issuer injected (never read from the environment by the module).
 tm := auth.NewTokenManager([]byte(secret), "terraform-registry")
 token, _ := tm.Generate(userID, email, scopes, 24*time.Hour)
 claims, _ := tm.Validate(token) // tries current then previous secret (rotation)
+
+// Issuer pinning — OFF by default (Validate accepts any issuer). In a coupled
+// suite that shares one signing secret, pin the trusted issuers so a shared
+// secret cannot be replayed from an untrusted minter:
+tm.SetAllowedIssuers([]string{"terraform-registry", "terraform-state-manager"})
 
 // API keys
 key, hash, prefix, _ := auth.GenerateAPIKey("tfr")
@@ -124,11 +146,59 @@ prov, _ := identityoidc.NewProvider(identityoidc.Config{
 })
 ```
 
+### Suite coupling
+
+`identity/suite` is the shared, framework-free contract both apps import so the
+runtime coupling between them cannot drift. It carries no application logic — just
+the manifest shape, version negotiation, the discovery poller, and host
+normalization.
+
+Each app publishes a capability **`Manifest`** at `GET /api/v1/suite/manifest`.
+Its `SchemaVersion` is `suite/v1` (`suite.SchemaVersionV1`), and the contract is
+**additive**: never remove or repurpose a field, and consumers
+ignore unknown fields (`encoding/json` does this by default), so a newer app can
+advertise new capabilities to an older one harmlessly.
+
+```go
+import "github.com/sethbacon/terraform-suite-identity/identity/suite"
+
+self := suite.Manifest{
+    SchemaVersion: suite.SchemaVersionV1,
+    App:           "terraform-registry",
+    Version:       buildVersion,
+    Identity:      suite.IdentityInfo{Issuer: issuer, SharedStore: true, Schema: "identity"},
+}
+
+// Poll the configured sibling's manifest (construct ONLY when an operator set a
+// sibling URL). Snapshot() is cheap and safe per request.
+dc := suite.NewDiscoveryClient("https://tfstate.example.com", self, 0) // 0 → default 60s
+go dc.Start(ctx)
+state, sibling := dc.Snapshot() // active / degraded / unreachable / unknown
+```
+
+The poller calls `NegotiateCompat` for you (incompatible when the sibling app id is
+empty, equals self, or its schema MAJOR differs); call it directly when you receive
+a manifest by other means.
+
+**`CanonicalHost`** normalizes a registry host so the suite "Consumed by" join
+compares like-for-like across apps — folding away case, a default port (`:80`/`:443`),
+a trailing FQDN dot, an accidental scheme prefix, and Unicode (IDN) vs punycode
+encoding:
+
+```go
+suite.CanonicalHost("https://Registry.Example.com:443/") // "registry.example.com"
+```
+
+See the canonical-host and suite-coupling design notes for the full rationale.
+
 ## Versioning
 
-Released with release-please + goreleaser on Conventional Commits. The module is in the
-`0.x` series while the API stabilises — breaking changes bump the **minor** version, and
-consumers pin and upgrade in lockstep. Schema migrations are additive.
+Released with release-please on Conventional Commits: release-please raises the release PR
+and, when it merges, tags the version and drafts the GitHub Release. `release.yml` then
+publishes that draft — there are no build artifacts to attach, since this is a pure Go
+library. The module is in the `0.x` series while the API stabilises — breaking changes bump
+the **minor** version, and consumers pin and upgrade in lockstep. Schema migrations are
+additive.
 
 ## Development
 
