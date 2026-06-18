@@ -5,8 +5,8 @@ the state manager).
 
 It is owned by **neither** consuming application: either app can stand the identity
 store up at setup time, and whichever app is installed second detects that it already
-exists and attaches to it. See ADR 002 in the consuming repositories for the full
-rationale.
+exists and attaches to it. See ADR 012 (Shared Identity Component) in
+terraform-registry-backend for the full rationale.
 
 The module is a **Go library** — it is linked into each app's binary, not run as a
 separate service. Consuming it has no runtime/operational footprint; an app can use the
