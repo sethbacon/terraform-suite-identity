@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.16.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.16.0...v0.16.1) (2026-06-18)
+
+
+### Documentation
+
+* add CONTRIBUTING, schema, and suite-coupling docs ([#47](https://github.com/sethbacon/terraform-suite-identity/issues/47)) ([6e53634](https://github.com/sethbacon/terraform-suite-identity/commit/6e536343a70c61ff8fcfd8f9e0ab581a5db2a7d3))
+* document the identity/suite package and correct README inaccuracies ([#46](https://github.com/sethbacon/terraform-suite-identity/issues/46)) ([32ae023](https://github.com/sethbacon/terraform-suite-identity/commit/32ae0238d47d3a2836a08b3644347b6065f37ec1))
+
 ## [0.16.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.15.0...v0.16.0) (2026-06-15)
 
 
