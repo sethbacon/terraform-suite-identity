@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -228,19 +229,23 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 	}
 
 	// No user found by OIDC sub — check for an existing user by email.
-	// Two cases:
-	//   1. Pre-provisioned user (setup wizard): oidc_sub IS NULL — link OIDC identity.
-	//   2. Sub changed for same email (IdP re-provisioning or dev Keycloak restart):
-	//      oidc_sub has a stale value — update to the new sub so subsequent lookups
-	//      hit the fast path (GetUserByOIDCSub) instead of falling through here.
-	// Email is treated as the authoritative identity anchor for same-provider logins.
+	// Only a PRE-PROVISIONED account whose oidc_sub is not yet set (setup wizard)
+	// may be linked to this OIDC identity. If an account with this email already
+	// has a DIFFERENT oidc_sub, refuse rather than silently re-point it: doing so
+	// would let anyone able to present a matching email (e.g. an unverified email
+	// asserted by another provider) hijack the established account. Re-linking a
+	// changed sub is an explicit administrative action, not an implicit login
+	// side effect.
 	emailUser, err := r.GetUserByEmail(ctx, email)
 	if err != nil {
 		return nil, err
 	}
 
 	if emailUser != nil {
-		// Update sub and name regardless of whether sub was previously set
+		if emailUser.OIDCSub != nil && *emailUser.OIDCSub != oidcSub {
+			return nil, fmt.Errorf("oidc account linking refused: email %q is already linked to a different OIDC subject", email)
+		}
+		// Link the OIDC identity to the pre-provisioned (or same-sub) account.
 		emailUser.OIDCSub = &oidcSub
 		emailUser.Name = name
 		if err := r.UpdateUser(ctx, emailUser); err != nil {

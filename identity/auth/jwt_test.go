@@ -3,6 +3,8 @@ package auth
 import (
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func newTM() *TokenManager {
@@ -128,6 +130,80 @@ func TestTokenManager_AllowedIssuers(t *testing.T) {
 	tm.SetAllowedIssuers(nil)
 	if _, err := tm.Validate(tok); err != nil {
 		t.Errorf("cleared allowed set should accept any issuer: %v", err)
+	}
+}
+
+func TestTokenManager_AllowedIssuers_EmptySetFailsClosed(t *testing.T) {
+	tm := newTM()
+	tok, err := tm.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// A non-nil but EMPTY set fails closed (rejects everything) rather than
+	// silently disabling the pin — the footgun this guards against.
+	tm.SetAllowedIssuers([]string{})
+	if _, err := tm.Validate(tok); err == nil {
+		t.Error("a non-nil empty allowed-issuer set must reject all tokens")
+	}
+
+	// nil (the documented default) still restores accept-any.
+	tm.SetAllowedIssuers(nil)
+	if _, err := tm.Validate(tok); err != nil {
+		t.Errorf("nil allowed-issuer set should accept any issuer: %v", err)
+	}
+}
+
+func TestTokenManager_RejectsNonHS256(t *testing.T) {
+	const secret = "test-secret-key-that-is-long-enough-32+"
+	tm := NewTokenManager(secret, "test-issuer")
+
+	// Craft a token signed with the SAME secret but a different HMAC variant.
+	other := jwt.NewWithClaims(jwt.SigningMethodHS384, jwt.RegisteredClaims{
+		Issuer:    "test-issuer",
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	})
+	signed, err := other.SignedString([]byte(secret))
+	if err != nil {
+		t.Fatalf("sign HS384: %v", err)
+	}
+
+	if _, err := tm.Validate(signed); err == nil {
+		t.Error("expected an HS384 token to be rejected (strict HS256 only)")
+	}
+}
+
+func TestTokenManager_Audience(t *testing.T) {
+	tm := newTM()
+	tm.SetAudience("app-a")
+
+	tok, err := tm.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// The issuing manager (audience app-a) validates its own token, and the aud
+	// claim is stamped.
+	claims, err := tm.Validate(tok)
+	if err != nil {
+		t.Fatalf("Validate own-audience token: %v", err)
+	}
+	if len(claims.Audience) != 1 || claims.Audience[0] != "app-a" {
+		t.Errorf("aud claim = %v, want [app-a]", claims.Audience)
+	}
+
+	// A sibling sharing the secret but expecting a DIFFERENT audience rejects it
+	// — this is the cross-app replay defense.
+	sibling := newTM()
+	sibling.SetAudience("app-b")
+	if _, err := sibling.Validate(tok); err == nil {
+		t.Error("expected a token with aud=app-a to be rejected when app-b is required")
+	}
+
+	// Clearing the audience restores accept-any (backward compatible).
+	tm.SetAudience("")
+	if _, err := tm.Validate(tok); err != nil {
+		t.Errorf("cleared audience should accept: %v", err)
 	}
 }
 
