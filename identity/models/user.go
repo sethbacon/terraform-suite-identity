@@ -4,7 +4,11 @@
 // limited to role→scope mapping, which each app seeds onto role_templates.
 package models
 
-import "time"
+import (
+	"time"
+
+	"github.com/sethbacon/terraform-suite-identity/identity/auth"
+)
 
 // User represents an identity user account.
 //
@@ -46,7 +50,7 @@ func (u *UserWithOrgRoles) GetAllowedScopes() []string {
 func (u *UserWithOrgRoles) HasAdminScope() bool {
 	for _, m := range u.Memberships {
 		for _, scope := range m.RoleTemplateScopes {
-			if scope == "admin" {
+			if scope == auth.ScopeAdmin {
 				return true
 			}
 		}
