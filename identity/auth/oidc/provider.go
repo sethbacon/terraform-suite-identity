@@ -154,6 +154,11 @@ func randomNonce() (string, error) {
 // GetEndSessionEndpoint returns the OIDC end_session_endpoint from the discovery
 // document, or an empty string if the provider does not advertise one.
 func (p *Provider) GetEndSessionEndpoint() string {
+	// A Provider built via NewProviderForConfig has no discovery document.
+	// Return empty rather than dereferencing a nil provider.
+	if p.provider == nil {
+		return ""
+	}
 	var claims struct {
 		EndSessionEndpoint string `json:"end_session_endpoint"`
 	}
@@ -215,6 +220,13 @@ func WithExpectedNonce(nonce string) VerifyOption {
 // VerifyIDToken verifies and parses the raw ID token. When an expected nonce is
 // supplied via WithExpectedNonce, the token's `nonce` claim must match it.
 func (p *Provider) VerifyIDToken(ctx context.Context, rawIDToken string, opts ...VerifyOption) (*oidc.IDToken, error) {
+	// A Provider built via NewProviderForConfig has no verifier (it skipped
+	// discovery). Return a descriptive error rather than panicking on a nil
+	// verifier deref.
+	if p.verifier == nil {
+		return nil, fmt.Errorf("VerifyIDToken is unavailable: this Provider was built with NewProviderForConfig (no discovery); use NewProvider or NewProviderWithContext")
+	}
+
 	var cfg verifyConfig
 	for _, opt := range opts {
 		opt(&cfg)
