@@ -136,6 +136,27 @@ func TestNewProviderForConfig_GetAuthURL(t *testing.T) {
 	}
 }
 
+func TestNewProviderForConfig_DiscoveryMethodsDoNotPanic(t *testing.T) {
+	// A discovery-free provider has no verifier/provider. The discovery-dependent
+	// methods must degrade gracefully instead of nil-panicking.
+	p := NewProviderForConfig(&oauth2.Config{
+		ClientID: "my-client",
+		Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth"},
+	})
+
+	if got := p.GetEndSessionEndpoint(); got != "" {
+		t.Errorf("GetEndSessionEndpoint() = %q, want empty", got)
+	}
+
+	tok, err := p.VerifyIDToken(context.Background(), "any.jwt.value")
+	if err == nil {
+		t.Error("VerifyIDToken() error = nil, want a descriptive error")
+	}
+	if tok != nil {
+		t.Errorf("VerifyIDToken() token = %v, want nil", tok)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Nonce + PKCE (BeginAuth / ExchangeCode / VerifyIDToken)
 // ---------------------------------------------------------------------------
