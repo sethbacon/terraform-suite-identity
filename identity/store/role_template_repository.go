@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -119,14 +120,37 @@ func (r *RoleTemplateRepository) UpdateRoleTemplate(ctx context.Context, templat
 	query := `UPDATE role_templates SET display_name = $2, description = $3, scopes = $4, updated_at = $5
 			  WHERE id = $1 AND is_system = false`
 
-	_, err = r.db.ExecContext(ctx, query,
+	result, err := r.db.ExecContext(ctx, query,
 		template.ID, template.DisplayName, template.Description, scopesJSON, time.Now())
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// The WHERE also matches on is_system = false, so zero rows means the
+		// template does not exist or is a system template. Surface it instead of
+		// reporting a silent success.
+		return fmt.Errorf("role template %s not found or is a system template (immutable)", template.ID)
+	}
+	return nil
 }
 
 // DeleteRoleTemplate deletes a role template (non-system only).
 func (r *RoleTemplateRepository) DeleteRoleTemplate(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM role_templates WHERE id = $1 AND is_system = false`
-	_, err := r.db.ExecContext(ctx, query, id)
-	return err
+	result, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("role template %s not found or is a system template (immutable)", id)
+	}
+	return nil
 }
