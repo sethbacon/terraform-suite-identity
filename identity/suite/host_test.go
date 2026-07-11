@@ -25,6 +25,17 @@ func TestCanonicalHost(t *testing.T) {
 		{"public registry idempotent", "registry.terraform.io", "registry.terraform.io"},
 		{"ipv4", "10.0.0.5", "10.0.0.5"},
 		{"ipv4 with port", "10.0.0.5:8443", "10.0.0.5:8443"},
+		// Port canonicalized numerically: a leading-zero default port folds away,
+		// and a leading-zero non-default port loses the zero — so ":080" and ":80"
+		// (and ":08443"/":8443") produce the same join key.
+		{"leading-zero default port", "reg.example.com:080", "reg.example.com"},
+		{"leading-zero non-default port", "reg.example.com:08443", "reg.example.com:8443"},
+		// IPv6 brackets are unwrapped so every spelling of the same literal folds
+		// to one key.
+		{"ipv6 bare bracketed", "[::1]", "::1"},
+		{"ipv6 default port", "[::1]:443", "::1"},
+		{"ipv6 non-default port", "[::1]:8080", "[::1]:8080"},
+		{"ipv6 uppercase + default port", "[2001:DB8::1]:443", "2001:db8::1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -3,6 +3,8 @@ package suite
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -25,6 +27,10 @@ const (
 	defaultGraceWindow  = 5 * time.Minute
 	pollTimeout         = 2 * time.Second
 	manifestPath        = "/api/v1/suite/manifest"
+	// maxManifestBytes caps how much of a sibling's response is read. A manifest
+	// is a few hundred bytes; the cap defends against a hostile or malfunctioning
+	// sibling streaming an unbounded body.
+	maxManifestBytes = 1 << 20 // 1 MiB
 )
 
 // DiscoveryClient polls a sibling app's manifest endpoint and caches the last
@@ -49,13 +55,27 @@ func NewDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Dura
 	if pollInterval <= 0 {
 		pollInterval = defaultPollInterval
 	}
+	siblingURL = strings.TrimRight(siblingURL, "/")
+	if strings.HasPrefix(strings.ToLower(siblingURL), "http://") {
+		slog.Warn("suite discovery: sibling URL uses plaintext HTTP; manifest polling is exposed to interception and tampering — use HTTPS",
+			"sibling_url", siblingURL)
+	}
 	return &DiscoveryClient{
-		siblingURL:   strings.TrimRight(siblingURL, "/"),
+		siblingURL:   siblingURL,
 		self:         self,
 		pollInterval: pollInterval,
 		graceWindow:  defaultGraceWindow,
-		httpClient:   &http.Client{Timeout: pollTimeout},
-		state:        StateUnknown,
+		// Do not follow redirects: the manifest lives at a known path on the
+		// configured sibling. Following a redirect could be steered to an
+		// unintended (e.g. internal) host. ErrUseLastResponse returns the 3xx as-is,
+		// which then fails the StatusOK check and is treated as unreachable.
+		httpClient: &http.Client{
+			Timeout: pollTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		state: StateUnknown,
 	}
 }
 
@@ -120,7 +140,7 @@ func (d *DiscoveryClient) fetch(ctx context.Context) (*Manifest, error) {
 		return nil, &statusError{resp.StatusCode}
 	}
 	var m Manifest
-	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxManifestBytes)).Decode(&m); err != nil {
 		return nil, err
 	}
 	return &m, nil

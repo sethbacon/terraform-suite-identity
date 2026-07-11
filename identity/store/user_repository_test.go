@@ -423,6 +423,53 @@ func TestGetOrCreateUserFromOIDC_NewUser(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateUserFromOIDC_LinksPreProvisionedUser(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	// sub lookup misses
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-new").
+		WillReturnRows(emptyUserRow())
+	// email lookup finds a pre-provisioned user with a NULL oidc_sub
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("alice@example.com").
+		WillReturnRows(sampleUserRow()) // oidc_sub is nil
+	// linking updates the row
+	mock.ExpectExec("UPDATE users").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "alice@example.com", "Alice")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if user == nil || user.OIDCSub == nil || *user.OIDCSub != "sub-new" {
+		t.Fatalf("expected oidc_sub to be linked to sub-new, got %+v", user)
+	}
+}
+
+func TestGetOrCreateUserFromOIDC_RefusesRelinkDifferentSub(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	// sub lookup misses (attacker presents a new sub)
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("attacker-sub").
+		WillReturnRows(emptyUserRow())
+	// email lookup finds an account ALREADY linked to a different, established sub
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("alice@example.com").
+		WillReturnRows(sqlmock.NewRows(userCols).
+			AddRow("user-1", "alice@example.com", "Alice", "established-sub", time.Now(), time.Now()))
+	// No UPDATE is expected: re-pointing the sub must be refused.
+
+	_, err := repo.GetOrCreateUserFromOIDC(context.Background(), "attacker-sub", "alice@example.com", "Alice")
+	if err == nil {
+		t.Fatal("expected account linking to be refused for a different established oidc_sub")
+	}
+	if mockErr := mock.ExpectationsWereMet(); mockErr != nil {
+		t.Errorf("unexpected DB calls (an UPDATE would indicate a takeover): %v", mockErr)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // GetUserWithOrgRoles
 // ---------------------------------------------------------------------------

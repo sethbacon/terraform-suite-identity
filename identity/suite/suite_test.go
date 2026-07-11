@@ -111,3 +111,31 @@ func TestDiscoveryClient_DegradedWithinGrace(t *testing.T) {
 		t.Fatalf("failed poll within grace window: state=%v, want degraded", st)
 	}
 }
+
+func TestDiscoveryClient_DoesNotFollowRedirects(t *testing.T) {
+	// A sibling that redirects the manifest must NOT be followed to another
+	// location; the 3xx is treated as a non-OK response (unreachable). If the
+	// client wrongly followed it, /elsewhere would return a valid manifest and
+	// the state would become Active.
+	sibling := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
+		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case manifestPath:
+			http.Redirect(w, r, "/elsewhere", http.StatusFound)
+		case "/elsewhere":
+			_ = json.NewEncoder(w).Encode(sibling)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d := NewDiscoveryClient(srv.URL, self, time.Second)
+	d.pollOnce(context.Background())
+
+	if st, m := d.Snapshot(); st != StateUnreachable || m != nil {
+		t.Fatalf("redirect must not be followed (want unreachable/nil), got state=%v manifest=%v", st, m)
+	}
+}

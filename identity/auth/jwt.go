@@ -40,6 +40,10 @@ type TokenManager struct {
 	// claim is in the set. nil (the default) disables the check — accepting any
 	// issuer, preserving single-app behaviour.
 	allowedIssuers atomic.Pointer[[]string]
+	// audience, when non-nil, is stamped as the `aud` claim on Generate and
+	// required on Validate. nil (the default) omits and does not check the
+	// audience, preserving single-app behaviour.
+	audience atomic.Pointer[string]
 }
 
 // NewTokenManager returns a TokenManager that signs with secret and stamps the
@@ -69,8 +73,13 @@ func (m *TokenManager) ClearPreviousSecret() {
 }
 
 // SetAllowedIssuers restricts Validate to tokens whose `iss` claim is one of the
-// given issuers. An empty or nil set (the default) disables the check entirely,
-// accepting any issuer — so this is fully backward-compatible for single-app use.
+// given issuers.
+//
+// A nil set (the default) disables the check entirely, accepting any issuer — so
+// this is fully backward-compatible for single-app use. A non-nil but EMPTY set
+// fails closed (rejects every token): passing an accidentally-empty configured
+// slice therefore denies access rather than silently disabling the pin, which
+// would otherwise re-open shared-secret cross-app replay in a coupled suite.
 //
 // In a coupled suite sharing one signing secret, set this to {own issuer} plus
 // the trusted sibling issuers so a shared secret cannot be replayed from an
@@ -78,12 +87,26 @@ func (m *TokenManager) ClearPreviousSecret() {
 // concurrent use and intended to be updated at runtime as siblings are
 // discovered.
 func (m *TokenManager) SetAllowedIssuers(issuers []string) {
-	if len(issuers) == 0 {
+	if issuers == nil {
 		m.allowedIssuers.Store(nil)
 		return
 	}
 	cp := append([]string(nil), issuers...)
 	m.allowedIssuers.Store(&cp)
+}
+
+// SetAudience sets the audience stamped as the `aud` claim on Generate and
+// required on Validate. An empty string (the default) omits the claim and skips
+// the audience check, preserving single-app behaviour. In a coupled suite each
+// app should set this to its own identity so a token minted for one app cannot
+// be replayed against a sibling. Safe for concurrent use.
+func (m *TokenManager) SetAudience(aud string) {
+	if aud == "" {
+		m.audience.Store(nil)
+		return
+	}
+	cp := aud
+	m.audience.Store(&cp)
 }
 
 // issuerAllowed reports whether iss passes the configured issuer pin. With no
@@ -129,12 +152,15 @@ func (m *TokenManager) Generate(userID, email string, scopes []string, expiresIn
 			// field (same tag, shallower) is the canonical one, so ID is left unset.
 		},
 	}
+	if aud := m.audience.Load(); aud != nil {
+		claims.Audience = jwt.ClaimStrings{*aud}
+	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.currentSecret())
 }
 
-// Validate parses and verifies a JWT (rejecting non-HMAC signing methods) and
-// returns its claims. It tries the current signing secret first, then the
-// previous secret (if a rotation overlap is in effect).
+// Validate parses and verifies a JWT (rejecting any signing method other than
+// HS256) and returns its claims. It tries the current signing secret first, then
+// the previous secret (if a rotation overlap is in effect).
 func (m *TokenManager) Validate(tokenString string) (*Claims, error) {
 	claims, err := m.validateWith(tokenString, m.currentSecret())
 	if err == nil {
@@ -149,12 +175,19 @@ func (m *TokenManager) Validate(tokenString string) (*Claims, error) {
 }
 
 func (m *TokenManager) validateWith(tokenString string, secret []byte) (*Claims, error) {
+	parserOpts := []jwt.ParserOption{}
+	if aud := m.audience.Load(); aud != nil {
+		parserOpts = append(parserOpts, jwt.WithAudience(*aud))
+	}
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		// Strictly require HS256 — the only method Generate ever uses. Accepting
+		// other HMAC variants (HS384/HS512), let alone non-HMAC methods, widens the
+		// signature-algorithm surface for no benefit.
+		if t.Method != jwt.SigningMethodHS256 {
 			return nil, errors.New("unexpected signing method")
 		}
 		return secret, nil
-	})
+	}, parserOpts...)
 	if err != nil {
 		return nil, err
 	}
