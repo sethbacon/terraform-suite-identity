@@ -484,7 +484,7 @@ func (r *OrganizationRepository) Search(ctx context.Context, query string, limit
 		LIMIT $2 OFFSET $3
 	`
 
-	searchPattern := "%" + query + "%"
+	searchPattern := "%" + escapeLikePattern(query) + "%"
 	rows, err := r.db.QueryContext(ctx, searchQuery, searchPattern, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search organizations: %w", err)
