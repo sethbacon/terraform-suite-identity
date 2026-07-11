@@ -79,12 +79,15 @@ func NewDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Dura
 	}
 }
 
-// Snapshot returns the current state and the last-good sibling manifest (nil if
-// the sibling was never successfully reached). Cheap; safe to call per request.
+// Snapshot returns the current state and a deep COPY of the last-good sibling
+// manifest (nil if the sibling was never successfully reached). Returning a copy
+// keeps the client's cached manifest immutable from the caller's side — a
+// consumer mutating the result (e.g. its Links map or Capabilities slice) cannot
+// corrupt the shared cache or race the poll loop. Cheap; safe to call per request.
 func (d *DiscoveryClient) Snapshot() (SiblingState, *Manifest) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.state, d.lastGood
+	return d.state, d.lastGood.clone()
 }
 
 // Start runs the poll loop until ctx is cancelled. Run it in a goroutine.
