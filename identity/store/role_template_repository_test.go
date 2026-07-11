@@ -175,3 +175,25 @@ func TestDeleteRoleTemplate_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestUpdateRoleTemplate_NotFoundOrSystem(t *testing.T) {
+	repo, mock := newRoleTemplateRepo(t)
+	// Zero rows affected (id absent or is_system=true) must error, not no-op.
+	mock.ExpectExec("UPDATE role_templates").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	tpl := &models.RoleTemplate{ID: uuid.New(), DisplayName: "x", Scopes: []string{"a:read"}}
+	if err := repo.UpdateRoleTemplate(context.Background(), tpl); err == nil {
+		t.Fatal("expected an error when no row was updated, got nil")
+	}
+}
+
+func TestDeleteRoleTemplate_NotFoundOrSystem(t *testing.T) {
+	repo, mock := newRoleTemplateRepo(t)
+	mock.ExpectExec("DELETE FROM role_templates").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := repo.DeleteRoleTemplate(context.Background(), uuid.New()); err == nil {
+		t.Fatal("expected an error when no row was deleted, got nil")
+	}
+}

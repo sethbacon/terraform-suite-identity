@@ -498,15 +498,30 @@ func TestAddMemberWithParams_Success(t *testing.T) {
 
 func TestAddMemberWithParams_TemplateNotFound(t *testing.T) {
 	repo, mock := newOrgRepo(t)
-	// Template not found - should still insert with nil roleTemplateID
+	// An unresolved role name must error rather than adding a scope-less member.
 	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").
 		WithArgs("nonexistent").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
-	mock.ExpectExec("INSERT INTO organization_members").
-		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	if err := repo.AddMemberWithParams(context.Background(), "org-1", "user-1", "nonexistent"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := repo.AddMemberWithParams(context.Background(), "org-1", "user-1", "nonexistent"); err == nil {
+		t.Fatal("expected an error for an unknown role template, got nil")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unexpected DB calls (should not have inserted): %v", err)
+	}
+}
+
+func TestUpdateMemberRole_TemplateNotFound(t *testing.T) {
+	repo, mock := newOrgRepo(t)
+	mock.ExpectQuery("SELECT id FROM role_templates WHERE name").
+		WithArgs("nonexistent").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	if err := repo.UpdateMemberRole(context.Background(), "org-1", "user-1", "nonexistent"); err == nil {
+		t.Fatal("expected an error for an unknown role template, got nil")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unexpected DB calls (should not have updated): %v", err)
 	}
 }
 
