@@ -112,6 +112,37 @@ func TestDiscoveryClient_DegradedWithinGrace(t *testing.T) {
 	}
 }
 
+func TestDiscoveryClient_SnapshotReturnsIsolatedCopy(t *testing.T) {
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d := NewDiscoveryClient("https://sibling.example", self, time.Second)
+	d.mu.Lock()
+	d.state = StateActive
+	d.lastGood = &Manifest{
+		SchemaVersion: SchemaVersionV1,
+		App:           "terraform-state-manager",
+		Capabilities:  []Capability{{ID: "state.v1"}},
+		Links:         map[string]string{"ui": "https://sibling.example/ui"},
+	}
+	d.mu.Unlock()
+
+	_, m := d.Snapshot()
+	// Mutating the returned copy must not affect the client's cached manifest.
+	m.Links["ui"] = "https://evil.example"
+	m.Capabilities[0].ID = "tampered"
+	m.App = "tampered"
+
+	_, again := d.Snapshot()
+	if again.Links["ui"] != "https://sibling.example/ui" {
+		t.Errorf("cached Links mutated via Snapshot copy: %q", again.Links["ui"])
+	}
+	if again.Capabilities[0].ID != "state.v1" {
+		t.Errorf("cached Capabilities mutated via Snapshot copy: %q", again.Capabilities[0].ID)
+	}
+	if again.App != "terraform-state-manager" {
+		t.Errorf("cached App mutated via Snapshot copy: %q", again.App)
+	}
+}
+
 func TestDiscoveryClient_DoesNotFollowRedirects(t *testing.T) {
 	// A sibling that redirects the manifest must NOT be followed to another
 	// location; the 3xx is treated as a non-OK response (unreachable). If the

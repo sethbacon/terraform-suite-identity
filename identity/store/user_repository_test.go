@@ -343,6 +343,23 @@ func TestSearch_Success(t *testing.T) {
 	}
 }
 
+func TestSearch_EscapesLikeMetacharacters(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	// A term containing LIKE wildcards must be bound with the metacharacters
+	// escaped so they match literally instead of widening the pattern.
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE.*ILIKE").
+		WithArgs(`%50\%\_off%`, 20, 0).
+		WillReturnRows(emptyUserRow())
+
+	if _, err := repo.Search(context.Background(), "50%_off", 20, 0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
 func TestSearch_Empty(t *testing.T) {
 	repo, mock := newUserRepo(t)
 

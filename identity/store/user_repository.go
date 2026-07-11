@@ -337,7 +337,7 @@ func (r *UserRepository) Search(ctx context.Context, query string, limit, offset
 		LIMIT $2 OFFSET $3
 	`
 
-	searchPattern := "%" + query + "%"
+	searchPattern := "%" + escapeLikePattern(query) + "%"
 	rows, err := r.db.QueryContext(ctx, searchQuery, searchPattern, limit, offset)
 	if err != nil {
 		return nil, err

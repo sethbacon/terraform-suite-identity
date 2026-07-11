@@ -98,7 +98,7 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 	if filters.UserEmail != nil {
 		countQuery += fmt.Sprintf(` AND u.email ILIKE $%d`, paramIndex)
 		query += fmt.Sprintf(` AND u.email ILIKE $%d`, paramIndex)
-		args = append(args, "%"+*filters.UserEmail+"%")
+		args = append(args, "%"+escapeLikePattern(*filters.UserEmail)+"%")
 		paramIndex++
 	}
 

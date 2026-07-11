@@ -28,6 +28,27 @@ type Manifest struct {
 	Links         map[string]string `json:"links,omitempty"`
 }
 
+// clone returns a deep copy of the manifest. The value fields copy directly; the
+// Capabilities slice and Links map are duplicated so a caller holding the copy
+// cannot mutate shared state (e.g. the discovery client's cached last-good
+// manifest) through the returned pointer. Returns nil for a nil receiver.
+func (m *Manifest) clone() *Manifest {
+	if m == nil {
+		return nil
+	}
+	cp := *m
+	if m.Capabilities != nil {
+		cp.Capabilities = append([]Capability(nil), m.Capabilities...)
+	}
+	if m.Links != nil {
+		cp.Links = make(map[string]string, len(m.Links))
+		for k, v := range m.Links {
+			cp.Links[k] = v
+		}
+	}
+	return &cp
+}
+
 // IdentityInfo advertises how the app does identity so a sibling (and the UI)
 // can decide whether single-sign-on is actually in effect.
 type IdentityInfo struct {
