@@ -222,6 +222,91 @@ func TestDiscoveryClient_IncompatibleManifestBecomesUnreachableButKeepsStaleLast
 	}
 }
 
+func TestNewSecureDiscoveryClient_RejectsPlaintextHTTP(t *testing.T) {
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d, err := NewSecureDiscoveryClient("http://sibling.example", self, time.Second)
+	if err == nil {
+		t.Fatal("expected an error for a plaintext http:// siblingURL, got nil")
+	}
+	if d != nil {
+		t.Fatalf("expected a nil client on rejection, got %+v", d)
+	}
+	if !strings.Contains(err.Error(), "http://sibling.example") {
+		t.Errorf("error message should reference the rejected URL, got: %v", err)
+	}
+}
+
+func TestNewSecureDiscoveryClient_RejectsPlaintextHTTP_CaseInsensitiveAndTrailingSlash(t *testing.T) {
+	// Mirrors NewDiscoveryClient's own TrimRight(siblingURL, "/") normalization
+	// and case-insensitive scheme check, so an uppercase scheme or a trailing
+	// slash cannot slip past the guard.
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d, err := NewSecureDiscoveryClient("HTTP://sibling.example/", self, time.Second)
+	if err == nil || d != nil {
+		t.Fatalf("expected rejection for uppercase-scheme plaintext URL, got client=%+v err=%v", d, err)
+	}
+}
+
+func TestNewSecureDiscoveryClient_AcceptsHTTPS(t *testing.T) {
+	sibling := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
+		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != manifestPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(sibling)
+	}))
+	defer srv.Close()
+	// httptest.NewServer is plain HTTP; swap the scheme to https:// to exercise
+	// the accept path without standing up a TLS listener — NewSecureDiscoveryClient
+	// only inspects the scheme prefix, it does not itself dial the sibling.
+	httpsURL := "https://" + strings.TrimPrefix(srv.URL, "http://")
+
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d, err := NewSecureDiscoveryClient(httpsURL, self, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error for an https:// siblingURL: %v", err)
+	}
+	if d == nil {
+		t.Fatal("expected a non-nil client for an https:// siblingURL")
+	}
+
+	want := NewDiscoveryClient(httpsURL, self, time.Second)
+	if d.siblingURL != want.siblingURL || d.pollInterval != want.pollInterval ||
+		d.graceWindow != want.graceWindow || d.state != want.state ||
+		d.self.App != want.self.App || d.self.SchemaVersion != want.self.SchemaVersion {
+		t.Fatalf("NewSecureDiscoveryClient result diverges from NewDiscoveryClient: got %+v, want-equivalent %+v", d, want)
+	}
+}
+
+func TestNewDiscoveryClient_PlaintextHTTPStillWarnsAndConstructs(t *testing.T) {
+	// Regression guard: NewDiscoveryClient's own behavior must remain completely
+	// unchanged by the addition of NewSecureDiscoveryClient — it still only
+	// warns (never rejects) on a plaintext sibling, and returns a working,
+	// non-nil client that a caller can Start()/poll normally.
+	sibling := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
+		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != manifestPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(sibling)
+	}))
+	defer srv.Close()
+
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d := NewDiscoveryClient(srv.URL, self, time.Second) // srv.URL is plain http://
+	if d == nil {
+		t.Fatal("NewDiscoveryClient must still construct a client for a plaintext sibling URL")
+	}
+	d.pollOnce(context.Background())
+	if st, m := d.Snapshot(); st != StateActive || m == nil || m.App != "terraform-state-manager" {
+		t.Fatalf("plaintext-sibling client must still operate normally: state=%v manifest=%v", st, m)
+	}
+}
+
 func TestDiscoveryClient_OversizedBodyRejected(t *testing.T) {
 	// maxManifestBytes (1 MiB) caps the response body read. A sibling streaming
 	// more than that must be truncated/rejected (a decode failure -> fetch
