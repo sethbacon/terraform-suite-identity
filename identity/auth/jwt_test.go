@@ -272,6 +272,160 @@ func TestTokenManager_AllowedIssuers_AcrossSecretRotation(t *testing.T) {
 	}
 }
 
+func TestNewCoupledTokenManager_Success(t *testing.T) {
+	tm, err := NewCoupledTokenManager(
+		[]byte("test-secret-key-that-is-long-enough-32+"),
+		"registry-backend",
+		[]string{"registry-backend", "state-manager-backend"},
+		"terraform-suite",
+	)
+	if err != nil {
+		t.Fatalf("NewCoupledTokenManager: %v", err)
+	}
+	if tm == nil {
+		t.Fatal("expected a non-nil TokenManager")
+	}
+
+	tok, err := tm.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	claims, err := tm.Validate(tok)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if claims.Issuer != "registry-backend" {
+		t.Errorf("issuer = %q, want %q", claims.Issuer, "registry-backend")
+	}
+	if len(claims.Audience) != 1 || claims.Audience[0] != "terraform-suite" {
+		t.Errorf("aud claim = %v, want [terraform-suite]", claims.Audience)
+	}
+}
+
+func TestNewCoupledTokenManager_Errors(t *testing.T) {
+	secret := []byte("test-secret-key-that-is-long-enough-32+")
+
+	tests := []struct {
+		name           string
+		issuer         string
+		allowedIssuers []string
+		audience       string
+	}{
+		{
+			name:           "empty issuer",
+			issuer:         "",
+			allowedIssuers: []string{"registry-backend"},
+			audience:       "terraform-suite",
+		},
+		{
+			name:           "empty audience",
+			issuer:         "registry-backend",
+			allowedIssuers: []string{"registry-backend"},
+			audience:       "",
+		},
+		{
+			name:           "empty allowedIssuers",
+			issuer:         "registry-backend",
+			allowedIssuers: nil,
+			audience:       "terraform-suite",
+		},
+		{
+			name:           "issuer not in allowedIssuers",
+			issuer:         "registry-backend",
+			allowedIssuers: []string{"state-manager-backend"},
+			audience:       "terraform-suite",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm, err := NewCoupledTokenManager(secret, tt.issuer, tt.allowedIssuers, tt.audience)
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if tm != nil {
+				t.Errorf("expected a nil TokenManager on error, got %+v", tm)
+			}
+		})
+	}
+}
+
+func TestNewCoupledTokenManager_CrossAppReplayRejected(t *testing.T) {
+	// Both apps share the same signing secret (the coupled-suite threat model),
+	// but each is configured with its own issuer/audience via
+	// NewCoupledTokenManager.
+	secret := []byte("shared-suite-secret-32-bytes-minimum!!")
+
+	registry, err := NewCoupledTokenManager(
+		secret,
+		"registry-backend",
+		[]string{"registry-backend", "state-manager-backend"},
+		"registry-backend",
+	)
+	if err != nil {
+		t.Fatalf("NewCoupledTokenManager (registry): %v", err)
+	}
+
+	stateManager, err := NewCoupledTokenManager(
+		secret,
+		"state-manager-backend",
+		[]string{"registry-backend", "state-manager-backend"},
+		"state-manager-backend",
+	)
+	if err != nil {
+		t.Fatalf("NewCoupledTokenManager (state-manager): %v", err)
+	}
+
+	tok, err := registry.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// The cross-app-replay-prevention property this constructor exists to
+	// guarantee: a token minted for the registry backend's own audience must
+	// NOT validate against the state-manager backend, even though they share
+	// the signing secret.
+	if _, err := stateManager.Validate(tok); err == nil {
+		t.Error("expected a registry-backend token to be rejected by the state-manager TokenManager")
+	}
+
+	// The registry backend still validates its own legitimate token.
+	if _, err := registry.Validate(tok); err != nil {
+		t.Errorf("expected the issuing app to validate its own token: %v", err)
+	}
+}
+
+func TestNewCoupledTokenManager_SameSuiteTokenValidates(t *testing.T) {
+	// A single coupled suite where both apps trust each other's issuer and
+	// share one audience: legitimate same-suite tokens must still validate.
+	secret := []byte("shared-suite-secret-32-bytes-minimum!!")
+	allowedIssuers := []string{"registry-backend", "state-manager-backend"}
+
+	registry, err := NewCoupledTokenManager(secret, "registry-backend", allowedIssuers, "terraform-suite")
+	if err != nil {
+		t.Fatalf("NewCoupledTokenManager (registry): %v", err)
+	}
+	stateManager, err := NewCoupledTokenManager(secret, "state-manager-backend", allowedIssuers, "terraform-suite")
+	if err != nil {
+		t.Fatalf("NewCoupledTokenManager (state-manager): %v", err)
+	}
+
+	tok, err := registry.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// state-manager trusts registry-backend as a sibling issuer and shares the
+	// same audience, so the token validates.
+	claims, err := stateManager.Validate(tok)
+	if err != nil {
+		t.Fatalf("expected a legitimate same-suite token to validate: %v", err)
+	}
+	if claims.Issuer != "registry-backend" {
+		t.Errorf("issuer = %q, want %q", claims.Issuer, "registry-backend")
+	}
+}
+
 func TestTokenManager_RotateSecret_OverlapThenClear(t *testing.T) {
 	tm := newTM()
 	// Token signed with the original secret.

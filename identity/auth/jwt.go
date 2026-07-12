@@ -63,6 +63,62 @@ func NewTokenManager(secret, issuer string) *TokenManager {
 	return m
 }
 
+// NewCoupledTokenManager is the RECOMMENDED constructor for any app
+// participating in a shared-secret coupled suite — today that means
+// terraform-registry-backend and terraform-state-manager-backend, which sign
+// and validate with the same HS256 secret. Unlike NewTokenManager, whose
+// issuer pin and audience check both default OFF (see SetAllowedIssuers and
+// SetAudience), NewCoupledTokenManager makes both mandatory up front: it
+// calls SetAllowedIssuers(allowedIssuers) and SetAudience(audience) before
+// returning, so the secure configuration is the default path for a coupled
+// caller rather than something it must remember to opt into. This closes the
+// cross-app token replay gap described in security-audit issue #51: without
+// an issuer pin and an audience check, a token minted by one app in the suite
+// validates unchanged at a sibling app, because both trust the same signing
+// secret.
+//
+// It returns an error instead of constructing a misconfigured manager when:
+//   - issuer is empty,
+//   - audience is empty,
+//   - allowedIssuers is empty (a nil/empty allowed-issuer set disables or
+//     fails closed on the pin per SetAllowedIssuers, neither of which is the
+//     intended coupled-mode configuration), or
+//   - issuer is not itself present in allowedIssuers (a coupled TokenManager
+//     that does not trust its own issuer would immediately reject its own
+//     freshly generated tokens, and is almost certainly a copy-paste
+//     misconfiguration).
+//
+// This constructor is purely additive: NewTokenManager's default (permissive)
+// behaviour is unchanged, so existing callers are unaffected.
+func NewCoupledTokenManager(secret []byte, issuer string, allowedIssuers []string, audience string) (*TokenManager, error) {
+	if issuer == "" {
+		return nil, errors.New("auth: NewCoupledTokenManager requires a non-empty issuer")
+	}
+	if audience == "" {
+		return nil, errors.New("auth: NewCoupledTokenManager requires a non-empty audience")
+	}
+	if len(allowedIssuers) == 0 {
+		return nil, errors.New("auth: NewCoupledTokenManager requires a non-empty allowedIssuers set")
+	}
+	selfTrusted := false
+	for _, a := range allowedIssuers {
+		if a == issuer {
+			selfTrusted = true
+			break
+		}
+	}
+	if !selfTrusted {
+		return nil, errors.New("auth: NewCoupledTokenManager requires issuer to be present in allowedIssuers")
+	}
+
+	m := &TokenManager{issuer: issuer}
+	b := append([]byte(nil), secret...)
+	m.current.Store(&b)
+	m.SetAllowedIssuers(allowedIssuers)
+	m.SetAudience(audience)
+	return m, nil
+}
+
 // RotateSecret swaps in newSecret as the current signing secret and retains the
 // outgoing secret as the previous one, so tokens signed with it still validate
 // until ClearPreviousSecret. Safe for concurrent use.
