@@ -163,6 +163,13 @@ orgClaims, _ := tm.Validate(orgToken)
 ok = auth.HasScopeInOrg(orgClaims, orgID, auth.ScopeUsersRead,
     auth.ReadWritePairs{auth.ScopeUsersRead: auth.ScopeUsersWrite})
 
+// Audience — also OFF by default (Validate skips the aud check unless set).
+// Each app in a coupled suite should set THIS app's own identity as the
+// audience, so a token minted for one app cannot be replayed against a
+// sibling even though they share the signing secret and both appear in
+// each other's allowed-issuers list:
+tm.SetAudience("terraform-registry")
+
 // API keys
 key, hash, prefix, _ := auth.GenerateAPIKey("tfr")
 ```
@@ -174,6 +181,12 @@ standalone app, but is a real gap for a **coupled suite that shares one
 signing secret** — today that's `terraform-registry-backend` and
 `terraform-state-manager-backend` — because with the defaults left alone, a
 token minted by one app validates unchanged at the other.
+
+**Issuer pinning and audience are independent opt-in checks, and a coupled suite needs
+both.** `SetAllowedIssuers` alone still lets a trusted sibling's token through unchanged;
+`SetAudience` closes that gap by additionally requiring the token to have been minted
+*for this app specifically*, so even a token from a trusted sibling issuer is rejected
+unless it names this app as its audience.
 
 **If your app shares a secret with another app in the suite, use
 `NewCoupledTokenManager` instead of `NewTokenManager`.** It requires
