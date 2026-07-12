@@ -74,3 +74,44 @@ func HasAllScopes(userScopes []string, required []string, rwPairs ReadWritePairs
 	}
 	return true
 }
+
+// orgBound reports whether claims is bound to orgID: both must be non-empty and
+// equal. A GLOBAL (org-less) token — one minted by TokenManager.Generate rather
+// than GenerateForOrg, so Claims.OrgID is empty — never matches any orgID here,
+// deliberately: an org-scoped check must never fall back to trusting a flat,
+// org-less scope set.
+func orgBound(claims *Claims, orgID string) bool {
+	return claims != nil && orgID != "" && claims.OrgID != "" && claims.OrgID == orgID
+}
+
+// HasScopeInOrg is the org-aware counterpart to HasScope: it returns true only
+// if claims is bound to orgID (see orgBound) AND claims.Scopes satisfies
+// required. Use this instead of calling HasScope on claims.Scopes directly
+// whenever the authorization decision is scoped to a specific organization —
+// the common case for any multi-tenant, per-resource check — so that a token
+// carrying a different organization's scopes, or no organization at all,
+// cannot authorize the action. See the warning on
+// store.OrganizationRepository.GetUserCombinedScopes for the cross-org
+// escalation this guards against.
+func HasScopeInOrg(claims *Claims, orgID string, required string, rwPairs ReadWritePairs) bool {
+	if !orgBound(claims, orgID) {
+		return false
+	}
+	return HasScope(claims.Scopes, required, rwPairs)
+}
+
+// HasAnyScopeInOrg is the org-aware counterpart to HasAnyScope. See HasScopeInOrg.
+func HasAnyScopeInOrg(claims *Claims, orgID string, required []string, rwPairs ReadWritePairs) bool {
+	if !orgBound(claims, orgID) {
+		return false
+	}
+	return HasAnyScope(claims.Scopes, required, rwPairs)
+}
+
+// HasAllScopesInOrg is the org-aware counterpart to HasAllScopes. See HasScopeInOrg.
+func HasAllScopesInOrg(claims *Claims, orgID string, required []string, rwPairs ReadWritePairs) bool {
+	if !orgBound(claims, orgID) {
+		return false
+	}
+	return HasAllScopes(claims.Scopes, required, rwPairs)
+}

@@ -38,7 +38,10 @@ type UserWithOrgRoles struct {
 // authorize an org-scoped action: a caller must independently verify the user's
 // membership/role in the SPECIFIC target organization before trusting these scopes for that
 // organization, or use GetScopesForOrg instead, which resolves scopes for exactly one target
-// organization.
+// organization. Pair GetScopesForOrg with auth.TokenManager.GenerateForOrg (to mint the
+// token) and auth.HasScopeInOrg / auth.HasAnyScopeInOrg / auth.HasAllScopesInOrg (to check
+// it) so the org binding is enforceable from the token itself rather than trusted from a
+// flat scope list.
 func (u *UserWithOrgRoles) GetAllowedScopes() []string {
 	scopeSet := make(map[string]bool)
 	for _, m := range u.Memberships {

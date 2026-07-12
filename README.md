@@ -48,6 +48,13 @@ Notable modelling choices:
   separately in `revoked_tokens`, but is likewise host-enforced — see the Auth section
   below.
 - **Multi-org by default** — `UserWithOrgRoles` aggregates scopes across all memberships.
+  **`GetAllowedScopes`/`GetUserCombinedScopes` union those scopes into one flat, GLOBAL set
+  with no per-organization qualifier — do not feed that set into a JWT (or any other
+  authorization decision) as "what the user can do" for a specific organization**, since a
+  role in one organization would silently authorize an action in another. Use
+  `GetScopesForOrg`/`GetUserScopesForOrg` plus `auth.TokenManager.GenerateForOrg` and
+  `auth.HasScopeInOrg` instead whenever the decision is scoped to a single organization —
+  see the [Auth](#auth) section below.
 
 ## Installation
 
@@ -134,13 +141,36 @@ ok := auth.HasScope(userScopes, auth.ScopeUsersRead,
 
 // JWT — secret + issuer injected (never read from the environment by the module).
 tm := auth.NewTokenManager([]byte(secret), "terraform-registry")
+
+// GLOBAL (org-less) token: `scopes` here is typically a flat union across every
+// organization the user belongs to (e.g. GetUserCombinedScopes/GetAllowedScopes).
+// Only appropriate for a deliberately suite-wide, org-independent decision —
+// see the warning on Generate and the "Multi-org by default" note above.
 token, _ := tm.Generate(userID, email, scopes, 24*time.Hour)
 claims, _ := tm.Validate(token) // tries current then previous secret (rotation)
+
+// Org-scoped token (preferred for any multi-tenant, per-resource authorization):
+// fetch scopes for the SPECIFIC target organization, then bind the token to it.
+orgScopes, _ := orgRepo.GetUserScopesForOrg(ctx, userID, orgID)
+orgToken, _ := tm.GenerateForOrg(userID, email, orgID, orgScopes, 24*time.Hour)
+orgClaims, _ := tm.Validate(orgToken)
+
+// ...and check it with the org-aware counterpart to HasScope, passing the SAME
+// orgID as the resource being accessed — this rejects a token bound to a
+// different organization (or no organization at all), closing the cross-org
+// escalation a flat scope set otherwise leaves open:
+ok = auth.HasScopeInOrg(orgClaims, orgID, auth.ScopeUsersRead,
+    auth.ReadWritePairs{auth.ScopeUsersRead: auth.ScopeUsersWrite})
 
 // Issuer pinning — OFF by default (Validate accepts any issuer). In a coupled
 // suite that shares one signing secret, pin the trusted issuers so a shared
 // secret cannot be replayed from an untrusted minter:
 tm.SetAllowedIssuers([]string{"terraform-registry", "terraform-state-manager"})
+
+// Audience — also OFF by default. In a coupled suite each app should set this
+// to its own identity so a token minted for one app cannot be replayed against
+// a sibling that shares the same signing secret:
+tm.SetAudience("terraform-registry")
 
 // API keys
 key, hash, prefix, _ := auth.GenerateAPIKey("tfr")

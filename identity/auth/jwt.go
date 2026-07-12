@@ -12,9 +12,16 @@ import (
 // Claims is the suite-standard JWT claims payload carried by access tokens.
 // JTI is a unique token identifier that apps may use for revocation
 // (e.g. a denylist keyed by JTI).
+//
+// OrgID is empty on a token minted by Generate (a GLOBAL, org-less token — see
+// the warning on Generate) and set to a single organization ID on a token
+// minted by GenerateForOrg. Never authorize an org-scoped action from Scopes
+// alone: check OrgID and Scopes together via HasScopeInOrg / HasAnyScopeInOrg /
+// HasAllScopesInOrg rather than reading Scopes directly.
 type Claims struct {
 	UserID string   `json:"user_id"`
 	Email  string   `json:"email"`
+	OrgID  string   `json:"org_id,omitempty"`
 	Scopes []string `json:"scopes,omitempty"`
 	JTI    string   `json:"jti,omitempty"`
 	jwt.RegisteredClaims
@@ -141,7 +148,40 @@ func (m *TokenManager) currentSecret() []byte {
 
 // Generate creates a signed JWT for the given user, scopes, and lifetime.
 // A zero expiresIn uses DefaultExpiry. Each token receives a unique JTI.
+//
+// This mints a GLOBAL (org-less) token: Claims.OrgID is left empty and
+// Claims.Scopes is stamped in verbatim — typically the flat set unioned across
+// every organization the user belongs to (e.g.
+// store.OrganizationRepository.GetUserCombinedScopes or
+// models.UserWithOrgRoles.GetAllowedScopes). Such a token authorizes the union
+// of scopes across ALL of the user's organizations; nothing in the token lets a
+// resource server tell which organization a given scope came from, so a role in
+// one organization silently authorizes an action in another unless the host
+// independently re-checks per-org membership on every request.
+//
+// In a multi-tenant deployment, prefer GenerateForOrg: it binds the token to a
+// single organization and that organization's own scopes, so the binding is
+// enforceable from the token alone via HasScopeInOrg (or HasAnyScopeInOrg /
+// HasAllScopesInOrg) instead of trusting a flat scope list.
 func (m *TokenManager) Generate(userID, email string, scopes []string, expiresIn time.Duration) (string, error) {
+	return m.generate(userID, email, "", scopes, expiresIn)
+}
+
+// GenerateForOrg creates a signed JWT scoped to a single organization: it is
+// identical to Generate except Claims.OrgID is set to orgID. Pass the scopes
+// that orgID SPECIFICALLY grants the user — e.g.
+// store.OrganizationRepository.GetUserScopesForOrg or
+// models.UserWithOrgRoles.GetScopesForOrg — not the flat, cross-organization
+// union Generate expects. Pair this with HasScopeInOrg (or HasAnyScopeInOrg /
+// HasAllScopesInOrg) on the verification side, checking the same orgID as the
+// resource being accessed, so a token minted for one organization cannot
+// authorize an action in another. See the warning on Generate for the
+// cross-org escalation this closes.
+func (m *TokenManager) GenerateForOrg(userID, email, orgID string, scopes []string, expiresIn time.Duration) (string, error) {
+	return m.generate(userID, email, orgID, scopes, expiresIn)
+}
+
+func (m *TokenManager) generate(userID, email, orgID string, scopes []string, expiresIn time.Duration) (string, error) {
 	if expiresIn == 0 {
 		expiresIn = DefaultExpiry
 	}
@@ -149,6 +189,7 @@ func (m *TokenManager) Generate(userID, email string, scopes []string, expiresIn
 	claims := &Claims{
 		UserID: userID,
 		Email:  email,
+		OrgID:  orgID,
 		Scopes: scopes,
 		JTI:    jti,
 		RegisteredClaims: jwt.RegisteredClaims{

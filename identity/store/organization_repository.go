@@ -653,15 +653,27 @@ func (r *OrganizationRepository) GetUserMemberships(ctx context.Context, userID 
 	return memberships, rows.Err()
 }
 
-// GetUserCombinedScopes retrieves all unique scopes for a user across all their organization memberships.
-// This is used for JWT authentication where we need to know what the user can do globally.
+// GetUserCombinedScopes retrieves all unique scopes for a user, unioned across
+// ALL of their organization memberships into one flat, GLOBAL set that carries
+// NO per-organization qualifier.
 //
-// WARNING: This returns a GLOBAL set unioned across every organization membership — it is
-// suite-wide by design and carries NO per-organization qualifier. Do not use this alone to
-// authorize an org-scoped action: a caller must independently verify the user's
-// membership/role in the SPECIFIC target organization before trusting these scopes for that
-// organization, or use GetUserScopesForOrg instead, which resolves scopes for exactly one
-// target organization.
+// Do NOT feed this directly into a JWT (or any other authorization decision) as
+// "what the user can do" for a specific organization: a user who is admin in
+// one organization and merely a viewer in another gets admin-level scopes in
+// this set, because nothing in it distinguishes which organization granted
+// which scope — that is exactly the cross-org privilege-escalation primitive
+// this accessor must not be used to build. If the decision is scoped to a
+// single organization — the common case for any multi-tenant, per-resource
+// check — use GetUserScopesForOrg instead, paired with
+// auth.TokenManager.GenerateForOrg (to mint the token) and auth.HasScopeInOrg /
+// auth.HasAnyScopeInOrg / auth.HasAllScopesInOrg (to check it), so the org
+// binding is enforceable from the token itself rather than trusted from a flat
+// scope list.
+//
+// The only legitimate use of this GLOBAL set is a deliberately suite-wide,
+// org-independent decision (e.g. a system/superuser scope check that by design
+// applies across every organization); it must never stand in for a per-org
+// authorization check.
 func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, userID string) ([]string, error) {
 	memberships, err := r.GetUserMemberships(ctx, userID)
 	if err != nil {
@@ -696,8 +708,11 @@ func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, user
 // convention in this file, rather than returning sql.ErrNoRows.
 //
 // Use this (or models.UserWithOrgRoles.GetScopesForOrg) whenever an authorization decision is
-// scoped to a specific organization. See the warning on GetUserCombinedScopes for why that
-// global accessor is unsafe for that purpose.
+// scoped to a specific organization — pair the result with
+// auth.TokenManager.GenerateForOrg to mint the token and auth.HasScopeInOrg /
+// auth.HasAnyScopeInOrg / auth.HasAllScopesInOrg to check it, so the org binding
+// is enforceable from the token itself. See the doc on GetUserCombinedScopes for
+// why that global accessor must not be used for this purpose.
 func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID, orgID string) ([]string, error) {
 	member, err := r.GetMemberWithRole(ctx, orgID, userID)
 	if err != nil {

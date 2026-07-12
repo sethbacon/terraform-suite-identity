@@ -272,6 +272,49 @@ func TestTokenManager_AllowedIssuers_AcrossSecretRotation(t *testing.T) {
 	}
 }
 
+func TestTokenManager_GenerateForOrg_SetsOrgID(t *testing.T) {
+	// Regression test for issue #54: a token minted by GenerateForOrg must carry
+	// the organization it was scoped to, so a verifier can bind an authorization
+	// decision to that specific organization instead of trusting a flat scope set.
+	tm := newTM()
+	scopes := []string{"org1:admin", "shared:read"}
+	tok, err := tm.GenerateForOrg("user-1", "u@example.com", "org-1", scopes, time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateForOrg: %v", err)
+	}
+	claims, err := tm.Validate(tok)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if claims.OrgID != "org-1" {
+		t.Errorf("claims.OrgID = %q, want %q", claims.OrgID, "org-1")
+	}
+	if len(claims.Scopes) != 2 {
+		t.Errorf("scopes mismatch: %v", claims.Scopes)
+	}
+	if claims.UserID != "user-1" || claims.Email != "u@example.com" {
+		t.Errorf("claims mismatch: %+v", claims)
+	}
+}
+
+func TestTokenManager_Generate_LeavesOrgIDEmpty(t *testing.T) {
+	// Generate (the GLOBAL, org-less path) must never stamp an OrgID — a
+	// verifier relies on OrgID being empty to distinguish a global token (which
+	// HasScopeInOrg must always reject) from an org-scoped one.
+	tm := newTM()
+	tok, err := tm.Generate("user-1", "u@example.com", []string{"admin"}, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	claims, err := tm.Validate(tok)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if claims.OrgID != "" {
+		t.Errorf("claims.OrgID = %q, want empty for a Generate (global) token", claims.OrgID)
+	}
+}
+
 func TestTokenManager_RotateSecret_OverlapThenClear(t *testing.T) {
 	tm := newTM()
 	// Token signed with the original secret.

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/sethbacon/terraform-suite-identity/identity/auth"
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 )
 
@@ -841,6 +842,51 @@ func TestGetUserScopesForOrg_ExcludesOtherOrgScopes(t *testing.T) {
 	}
 	if len(org2Scopes) != 2 {
 		t.Fatalf("org-2 scopes = %v, want exactly 2 (org2:viewer, shared:read)", org2Scopes)
+	}
+}
+
+// TestGetUserScopesForOrg_EndToEndWithJWT is the full-chain regression test for issue #54:
+// it exercises the entire recommended safe path — GetUserScopesForOrg (this package) feeding
+// auth.TokenManager.GenerateForOrg, verified by auth.Validate + auth.HasScopeInOrg — for a
+// user who is admin in org-1 and only a viewer in org-2, and proves the org-1 admin token
+// cannot authorize an org-2 action, while it can authorize the equivalent org-1 action.
+// Contrast this with the legacy GetUserCombinedScopes + Generate + HasScope path, which
+// (by design, per its documented warning) would authorize the org-2 action too.
+func TestGetUserScopesForOrg_EndToEndWithJWT(t *testing.T) {
+	repo, mock := newOrgRepo(t)
+	mock.ExpectQuery("SELECT.*FROM organization_members").
+		WithArgs("org-1", "user-1").
+		WillReturnRows(sqlmock.NewRows(orgMemberWithRoleRepoCols).AddRow(
+			"org-1", "user-1", nil, time.Now(),
+			"Alice", "alice@example.com",
+			"admin", "Admin", []byte(`["admin"]`),
+		))
+
+	orgScopes, err := repo.GetUserScopesForOrg(context.Background(), "user-1", "org-1")
+	if err != nil {
+		t.Fatalf("GetUserScopesForOrg: %v", err)
+	}
+
+	tm := auth.NewTokenManager("test-secret-key-that-is-long-enough-32+", "test-issuer")
+	tok, err := tm.GenerateForOrg("user-1", "alice@example.com", "org-1", orgScopes, time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateForOrg: %v", err)
+	}
+	claims, err := tm.Validate(tok)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	// The org-1 admin token must authorize an org-1 action...
+	if !auth.HasScopeInOrg(claims, "org-1", auth.ScopeUsersRead, nil) {
+		t.Fatal("expected org-1 admin token to authorize an org-1 action")
+	}
+	// ...but must NOT authorize the equivalent action against org-2, even though
+	// the token carries the "admin" scope — this is the exact cross-org
+	// escalation issue #54 describes, and GenerateForOrg + HasScopeInOrg (unlike
+	// Generate + HasScope on a flat combined-scope set) close it.
+	if auth.HasScopeInOrg(claims, "org-2", auth.ScopeUsersRead, nil) {
+		t.Fatal("org-1 admin token must not authorize an org-2 action")
 	}
 }
 
