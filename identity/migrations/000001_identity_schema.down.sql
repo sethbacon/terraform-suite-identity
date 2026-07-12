@@ -7,4 +7,3 @@ DROP TABLE IF EXISTS identity.organization_members;
 DROP TABLE IF EXISTS identity.role_templates;
 DROP TABLE IF EXISTS identity.users;
 DROP TABLE IF EXISTS identity.organizations;
-DROP SCHEMA IF EXISTS identity;
