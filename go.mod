@@ -2,6 +2,12 @@ module github.com/sethbacon/terraform-suite-identity
 
 go 1.25.0
 
+// Pinned to a patched release (CVE-2026-42505 / GO-2026-5856, a crypto/tls ECH
+// privacy leak affecting Go before 1.25.12 and the 1.26.x line before 1.26.5).
+// go command and CI (actions/setup-go with go-version-file) both honor this
+// directive and auto-select/install it.
+toolchain go1.26.5
+
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/coreos/go-oidc/v3 v3.18.0
