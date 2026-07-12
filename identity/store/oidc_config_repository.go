@@ -28,26 +28,58 @@ func NewOIDCConfigRepository(db *sqlx.DB) *OIDCConfigRepository {
 	return &OIDCConfigRepository{db: db}
 }
 
-// CreateOIDCConfig creates a new OIDC configuration.
-func (r *OIDCConfigRepository) CreateOIDCConfig(ctx context.Context, config *models.OIDCConfig) error {
-	query := `
-		INSERT INTO oidc_config (
-			id, name, provider_type, issuer_url, client_id, client_secret_encrypted,
-			redirect_url, scopes, is_active, extra_config,
-			created_at, updated_at, created_by, updated_by
-		) VALUES (
-			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10,
-			$11, $12, $13, $14
-		)`
+// createOIDCConfigInsertQuery is the shared INSERT statement used by both the
+// plain (inactive) and transactional (active) create paths in CreateOIDCConfig.
+const createOIDCConfigInsertQuery = `
+	INSERT INTO oidc_config (
+		id, name, provider_type, issuer_url, client_id, client_secret_encrypted,
+		redirect_url, scopes, is_active, extra_config,
+		created_at, updated_at, created_by, updated_by
+	) VALUES (
+		$1, $2, $3, $4, $5, $6,
+		$7, $8, $9, $10,
+		$11, $12, $13, $14
+	)`
 
-	_, err := r.db.ExecContext(ctx, query,
+// CreateOIDCConfig creates a new OIDC configuration.
+//
+// If config.IsActive is true, the insert is wrapped in the same
+// deactivate-all-then-activate-one transaction that ActivateOIDCConfig uses,
+// so a config can never be created active while another active row still
+// exists (the single-active-config invariant is enforced at write time, not
+// just by convention). If config.IsActive is false, this is a plain,
+// untransacted insert — behavior is unchanged from before.
+func (r *OIDCConfigRepository) CreateOIDCConfig(ctx context.Context, config *models.OIDCConfig) error {
+	if !config.IsActive {
+		_, err := r.db.ExecContext(ctx, createOIDCConfigInsertQuery,
+			config.ID, config.Name, config.ProviderType, config.IssuerURL, config.ClientID,
+			config.ClientSecretCiphertext,
+			config.RedirectURL, config.Scopes, config.IsActive, config.ExtraConfig,
+			config.CreatedAt, config.UpdatedAt, config.CreatedBy, config.UpdatedBy,
+		)
+		return err
+	}
+
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // nolint:errcheck
+
+	if err := deactivateAllOIDCConfigsTx(ctx, tx); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, createOIDCConfigInsertQuery,
 		config.ID, config.Name, config.ProviderType, config.IssuerURL, config.ClientID,
 		config.ClientSecretCiphertext,
 		config.RedirectURL, config.Scopes, config.IsActive, config.ExtraConfig,
 		config.CreatedAt, config.UpdatedAt, config.CreatedBy, config.UpdatedBy,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // oidcConfigColumns is the explicit column projection for oidc_config reads.
@@ -61,9 +93,14 @@ const oidcConfigColumns = `id, name, provider_type, issuer_url, client_id, ` +
 	`created_at, updated_at, created_by, updated_by`
 
 // GetActiveOIDCConfig retrieves the currently active OIDC configuration.
+//
+// The query orders by updated_at DESC as a defensive, deterministic tie-break:
+// the schema now enforces at most one is_active=true row via a partial unique
+// index (see migration 000005), but the ORDER BY keeps behavior deterministic
+// even against an older database that hasn't run that migration yet.
 func (r *OIDCConfigRepository) GetActiveOIDCConfig(ctx context.Context) (*models.OIDCConfig, error) {
 	var config models.OIDCConfig
-	query := `SELECT ` + oidcConfigColumns + ` FROM oidc_config WHERE is_active = true LIMIT 1`
+	query := `SELECT ` + oidcConfigColumns + ` FROM oidc_config WHERE is_active = true ORDER BY updated_at DESC LIMIT 1`
 	err := r.db.GetContext(ctx, &config, query)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -111,6 +148,16 @@ func (r *OIDCConfigRepository) DeactivateAllOIDCConfigs(ctx context.Context) err
 	return err
 }
 
+// deactivateAllOIDCConfigsTx sets is_active=false for all configurations
+// within an already-open transaction. It is the shared "deactivate all" step
+// of the single-active-config invariant, used by both ActivateOIDCConfig and
+// CreateOIDCConfig (when creating an already-active config) so exactly one
+// row can be active at commit time.
+func deactivateAllOIDCConfigsTx(ctx context.Context, tx *sqlx.Tx) error {
+	_, err := tx.ExecContext(ctx, `UPDATE oidc_config SET is_active = false, updated_at = $1`, time.Now())
+	return err
+}
+
 // ActivateOIDCConfig activates a specific configuration (deactivates others first).
 func (r *OIDCConfigRepository) ActivateOIDCConfig(ctx context.Context, id uuid.UUID) error {
 	tx, err := r.db.BeginTxx(ctx, nil)
@@ -119,9 +166,7 @@ func (r *OIDCConfigRepository) ActivateOIDCConfig(ctx context.Context, id uuid.U
 	}
 	defer tx.Rollback() // nolint:errcheck
 
-	// Deactivate all configs
-	_, err = tx.ExecContext(ctx, `UPDATE oidc_config SET is_active = false, updated_at = $1`, time.Now())
-	if err != nil {
+	if err := deactivateAllOIDCConfigsTx(ctx, tx); err != nil {
 		return err
 	}
 

@@ -32,10 +32,53 @@ var oidcConfigCols = []string{
 	"extra_config", "created_at", "updated_at", "created_by", "updated_by",
 }
 
+// TestCreateOIDCConfig_Success covers the IsActive=false path, which remains
+// a plain, untransacted insert (no change in behavior for this case).
 func TestCreateOIDCConfig_Success(t *testing.T) {
 	repo, mock := newOIDCConfigRepo(t)
 	mock.ExpectExec("INSERT INTO oidc_config").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	cfg := &models.OIDCConfig{
+		ID:           uuid.New(),
+		Name:         "test",
+		ProviderType: "generic_oidc",
+		IssuerURL:    "https://issuer.example.com",
+		ClientID:     "client-id",
+		RedirectURL:  "https://app.example.com/callback",
+		IsActive:     false,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+
+	if err := repo.CreateOIDCConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCreateOIDCConfig_Error covers the IsActive=false plain-insert error path.
+func TestCreateOIDCConfig_Error(t *testing.T) {
+	repo, mock := newOIDCConfigRepo(t)
+	mock.ExpectExec("INSERT INTO oidc_config").
+		WillReturnError(errOIDCDB)
+
+	if err := repo.CreateOIDCConfig(context.Background(), &models.OIDCConfig{ID: uuid.New()}); err == nil {
+		t.Error("expected error")
+	}
+}
+
+// TestCreateOIDCConfig_ActiveSuccess covers the IsActive=true path: it must
+// enforce the single-active-config invariant by deactivating all existing
+// configs and inserting the new one as active, all within one transaction
+// (mirroring ActivateOIDCConfig's transactional pattern below).
+func TestCreateOIDCConfig_ActiveSuccess(t *testing.T) {
+	repo, mock := newOIDCConfigRepo(t)
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE oidc_config SET is_active = false").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO oidc_config").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 
 	cfg := &models.OIDCConfig{
 		ID:           uuid.New(),
@@ -54,21 +97,50 @@ func TestCreateOIDCConfig_Success(t *testing.T) {
 	}
 }
 
-func TestCreateOIDCConfig_Error(t *testing.T) {
+func TestCreateOIDCConfig_ActiveBeginError(t *testing.T) {
 	repo, mock := newOIDCConfigRepo(t)
-	mock.ExpectExec("INSERT INTO oidc_config").
-		WillReturnError(errOIDCDB)
+	mock.ExpectBegin().WillReturnError(errOIDCDB)
 
-	if err := repo.CreateOIDCConfig(context.Background(), &models.OIDCConfig{ID: uuid.New()}); err == nil {
-		t.Error("expected error")
+	if err := repo.CreateOIDCConfig(context.Background(), &models.OIDCConfig{ID: uuid.New(), IsActive: true}); err == nil {
+		t.Error("expected error from Begin")
 	}
 }
 
+func TestCreateOIDCConfig_ActiveDeactivateError(t *testing.T) {
+	repo, mock := newOIDCConfigRepo(t)
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE oidc_config SET is_active = false").
+		WillReturnError(errOIDCDB)
+	mock.ExpectRollback()
+
+	if err := repo.CreateOIDCConfig(context.Background(), &models.OIDCConfig{ID: uuid.New(), IsActive: true}); err == nil {
+		t.Error("expected error from deactivation")
+	}
+}
+
+func TestCreateOIDCConfig_ActiveInsertError(t *testing.T) {
+	repo, mock := newOIDCConfigRepo(t)
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE oidc_config SET is_active = false").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO oidc_config").
+		WillReturnError(errOIDCDB)
+	mock.ExpectRollback()
+
+	if err := repo.CreateOIDCConfig(context.Background(), &models.OIDCConfig{ID: uuid.New(), IsActive: true}); err == nil {
+		t.Error("expected error from insert")
+	}
+}
+
+// TestGetActiveOIDCConfig_Found also asserts the query orders by
+// updated_at DESC — a defensive, deterministic tie-break so that if two rows
+// are ever somehow both is_active=true, the most-recently-updated one wins
+// consistently rather than an implementation-defined row being returned.
 func TestGetActiveOIDCConfig_Found(t *testing.T) {
 	repo, mock := newOIDCConfigRepo(t)
 	id := uuid.New()
 	now := time.Now()
-	mock.ExpectQuery("SELECT.*FROM oidc_config WHERE is_active").
+	mock.ExpectQuery("SELECT.*FROM oidc_config WHERE is_active.*ORDER BY updated_at DESC").
 		WillReturnRows(sqlmock.NewRows(oidcConfigCols).AddRow(
 			id, "default", "generic_oidc", "https://issuer.example.com", "client-id",
 			"encrypted-secret", "https://app/callback", []byte(`["openid"]`), true,
