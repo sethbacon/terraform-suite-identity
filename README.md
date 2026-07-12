@@ -14,14 +14,14 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 
 ## Packages
 
-| Package | Purpose |
-| ------- | ------- |
-| `identity` | Migration runner for the dedicated `identity` Postgres schema (isolated golang-migrate instance + `identity_schema_migrations` version table). |
-| `identity/models` | The canonical identity data types — `User`, `Organization`, `OrganizationMember` (+ membership views), `APIKey`, `RoleTemplate`, `OIDCConfig`, `AuditLog`. |
-| `identity/store` | The data-access layer (repository pattern) for those types, plus `TokenRepository` (JWT revocation). Repos use **unqualified** table names so the connection's `search_path` selects the schema. |
-| `identity/auth` | App-neutral auth primitives: scope checking (`HasScope`/`HasAnyScope`/`HasAllScopes` with wildcard `admin` + write-implies-read), the JWT `TokenManager` (HS256, JTI, secret rotation), and API-key generation/validation. |
-| `identity/auth/oidc` | A generic OpenID Connect provider (discovery, auth URL, code exchange, ID-token verification, group/user-info extraction). |
-| `identity/suite` | The shared runtime-coupling contract used by **both** apps: the capability `Manifest` each app publishes, `NegotiateCompat` version negotiation, the polling `DiscoveryClient`, and `CanonicalHost` for the cross-app "Consumed by" join. |
+| Package              | Purpose                                                                                                                                                                                                                                   |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `identity`           | Migration runner for the dedicated `identity` Postgres schema (isolated golang-migrate instance + `identity_schema_migrations` version table).                                                                                            |
+| `identity/models`    | The canonical identity data types — `User`, `Organization`, `OrganizationMember` (+ membership views), `APIKey`, `RoleTemplate`, `OIDCConfig`, `AuditLog`.                                                                                |
+| `identity/store`     | The data-access layer (repository pattern) for those types, plus `TokenRepository` (JWT revocation). Repos use **unqualified** table names so the connection's `search_path` selects the schema.                                          |
+| `identity/auth`      | App-neutral auth primitives: scope checking (`HasScope`/`HasAnyScope`/`HasAllScopes` with wildcard `admin` + write-implies-read), the JWT `TokenManager` (HS256, JTI, secret rotation), and API-key generation/validation.                |
+| `identity/auth/oidc` | A generic OpenID Connect provider (discovery, auth URL, code exchange, ID-token verification, group/user-info extraction).                                                                                                                |
+| `identity/suite`     | The shared runtime-coupling contract used by **both** apps: the capability `Manifest` each app publishes, `NegotiateCompat` version negotiation, the polling `DiscoveryClient`, and `CanonicalHost` for the cross-app "Consumed by" join. |
 
 ## Canonical identity model
 
@@ -92,7 +92,9 @@ schema — so adopting the shared schema is **opt-in and reversible** behind a f
 import "github.com/sethbacon/terraform-suite-identity/identity/store"
 
 userRepo := store.NewUserRepository(db)
-user, err := userRepo.GetOrCreateUserFromOIDC(ctx, sub, email, name)
+// emailVerified MUST carry the IdP's email_verified claim; an unverified email
+// is refused for account linking/creation (returning users are unaffected).
+user, err := userRepo.GetOrCreateUserFromOIDC(ctx, sub, email, name, emailVerified)
 
 apiKeyRepo := store.NewAPIKeyRepository(db)
 tokenRepo  := store.NewTokenRepository(db) // revoked_tokens

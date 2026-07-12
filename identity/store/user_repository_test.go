@@ -387,7 +387,7 @@ func TestGetOrCreateUserFromOIDC_ExistingUser_NoChange(t *testing.T) {
 		WithArgs("sub-123").
 		WillReturnRows(sampleUserRow()) // email=alice@example.com, name=Alice
 
-	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-123", "alice@example.com", "Alice")
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-123", "alice@example.com", "Alice", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestGetOrCreateUserFromOIDC_ExistingUser_UpdateNeeded(t *testing.T) {
 	mock.ExpectExec("UPDATE users").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-123", "alice_new@example.com", "Alice")
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-123", "alice_new@example.com", "Alice", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestGetOrCreateUserFromOIDC_NewUser(t *testing.T) {
 	mock.ExpectExec("INSERT INTO users").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "new@example.com", "New User")
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "new@example.com", "New User", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestGetOrCreateUserFromOIDC_LinksPreProvisionedUser(t *testing.T) {
 	mock.ExpectExec("UPDATE users").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "alice@example.com", "Alice")
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "alice@example.com", "Alice", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -478,12 +478,56 @@ func TestGetOrCreateUserFromOIDC_RefusesRelinkDifferentSub(t *testing.T) {
 			AddRow("user-1", "alice@example.com", "Alice", "established-sub", time.Now(), time.Now()))
 	// No UPDATE is expected: re-pointing the sub must be refused.
 
-	_, err := repo.GetOrCreateUserFromOIDC(context.Background(), "attacker-sub", "alice@example.com", "Alice")
+	_, err := repo.GetOrCreateUserFromOIDC(context.Background(), "attacker-sub", "alice@example.com", "Alice", true)
 	if err == nil {
 		t.Fatal("expected account linking to be refused for a different established oidc_sub")
 	}
 	if mockErr := mock.ExpectationsWereMet(); mockErr != nil {
 		t.Errorf("unexpected DB calls (an UPDATE would indicate a takeover): %v", mockErr)
+	}
+}
+
+func TestGetOrCreateUserFromOIDC_RefusesUnverifiedPreProvisionedLink(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	// sub lookup misses
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-new").
+		WillReturnRows(emptyUserRow())
+	// email matches a pre-provisioned (NULL oidc_sub) account
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("alice@example.com").
+		WillReturnRows(sampleUserRow())
+	// No UPDATE expected: an unverified email must not link the account.
+
+	_, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "alice@example.com", "Alice", false)
+	if err == nil {
+		t.Fatal("expected linking to be refused for an unverified email")
+	}
+	if mockErr := mock.ExpectationsWereMet(); mockErr != nil {
+		t.Errorf("unexpected DB calls (an UPDATE would link an unverified email): %v", mockErr)
+	}
+}
+
+func TestGetOrCreateUserFromOIDC_RefusesUnverifiedNewUser(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	// sub lookup misses
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-new").
+		WillReturnRows(emptyUserRow())
+	// no existing account with this email
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("new@example.com").
+		WillReturnRows(emptyUserRow())
+	// No INSERT expected: an unverified email must not create an account.
+
+	_, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "new@example.com", "New User", false)
+	if err == nil {
+		t.Fatal("expected creation to be refused for an unverified email")
+	}
+	if mockErr := mock.ExpectationsWereMet(); mockErr != nil {
+		t.Errorf("unexpected DB calls (an INSERT would create an account for an unverified email): %v", mockErr)
 	}
 }
 
@@ -652,7 +696,7 @@ func TestGetOrCreateUserByOIDC_ExistingUser(t *testing.T) {
 		WithArgs("sub-123").
 		WillReturnRows(sampleUserRow())
 
-	u, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-123", "alice@example.com", "Alice")
+	u, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-123", "alice@example.com", "Alice", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -673,7 +717,7 @@ func TestGetOrCreateUserByOIDC_ExistingUserUpdateNeeded(t *testing.T) {
 	mock.ExpectExec("UPDATE users SET").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	u, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-123", "new@example.com", "NewName")
+	u, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-123", "new@example.com", "NewName", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -695,7 +739,7 @@ func TestGetOrCreateUserByOIDC_NewUser(t *testing.T) {
 	mock.ExpectExec("INSERT INTO users").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	u, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-new", "new@example.com", "New User")
+	u, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-new", "new@example.com", "New User", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -709,7 +753,7 @@ func TestGetOrCreateUserByOIDC_OIDCLookupError(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM users WHERE oidc_sub").
 		WillReturnError(errDB)
 
-	_, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-123", "a@b.com", "Alice")
+	_, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-123", "a@b.com", "Alice", true)
 	if err == nil {
 		t.Error("expected error")
 	}
@@ -759,7 +803,7 @@ func TestGetOrCreateUserFromOIDC_EmailMatch(t *testing.T) {
 	mock.ExpectExec("UPDATE users").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "alice@example.com", "Alice Updated")
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "alice@example.com", "Alice Updated", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
