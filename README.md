@@ -32,12 +32,21 @@ scope *contents*, and each app seeds its own scopes onto `role_templates` at set
 
 Notable modelling choices:
 
-- **No soft-active flag on users.** Access derives entirely from organization memberships
-  and the scopes their role templates grant; "disabling" a user means removing their
-  memberships (or deleting the user). (The `users.is_active` column still exists in the
-  schema for historical reasons but is intentionally unread/unwritten by the model.)
-- **API keys** are usable while they exist and have not passed `expires_at`; revocation is
-  a hard delete (no soft flag). JWT revocation is tracked separately in `revoked_tokens`.
+- **No soft-active flag on users, api keys, or organizations.** Access derives entirely
+  from organization memberships and the scopes their role templates grant; "disabling" a
+  user means removing their memberships (or deleting the user). The `is_active` column
+  still exists on `users`, `api_keys`, and `organizations` for historical reasons but is
+  intentionally unread/unwritten by the model on all three tables — do not mistake any of
+  them for a working kill-switch. (`oidc_config.is_active` is the one exception: it is
+  genuinely read/written by `GetActiveOIDCConfig`/`ActivateOIDCConfig`/
+  `DeactivateAllOIDCConfigs`.)
+- **API keys** carry an optional `expires_at`, but this library does not enforce it at
+  lookup/validate time — `GetAPIKeysByPrefix` (the query the auth path uses) returns rows
+  regardless of expiry, and `auth.ValidateAPIKey` is a pure bcrypt comparison with no
+  expiry check at all. **Hosts must check `expires_at` themselves** before accepting a key
+  as valid. Revocation is a hard delete (no soft flag). JWT revocation is tracked
+  separately in `revoked_tokens`, but is likewise host-enforced — see the Auth section
+  below.
 - **Multi-org by default** — `UserWithOrgRoles` aggregates scopes across all memberships.
 
 ## Installation
@@ -46,8 +55,9 @@ Notable modelling choices:
 go get github.com/sethbacon/terraform-suite-identity@latest
 ```
 
-Pin a minimum version in `go.mod`. Schema migrations are additive within a major version.
-Requires Go 1.25 or newer.
+Pin a minimum version in `go.mod`. Schema migrations are additive within a major version,
+with one documented in-place exception (migration `000003` — see
+[docs/schema.md](docs/schema.md)). Requires Go 1.25 or newer.
 
 ## Usage
 
@@ -136,6 +146,14 @@ tm.SetAllowedIssuers([]string{"terraform-registry", "terraform-state-manager"})
 key, hash, prefix, _ := auth.GenerateAPIKey("tfr")
 ```
 
+**Revocation is entirely host-enforced.** The module provides no revocation of its own —
+only the `JTI` claim, which a host must denylist (e.g. via `store.TokenRepository`) and
+check on every request; `Validate` never consults a denylist itself. Two related limits to
+plan for: (1) a token stays valid for its full lifetime (`DefaultExpiry` is 1 hour) unless
+the host's denylist check runs on the request path, and (2) after `RotateSecret`, a token
+signed with the **previous** secret keeps validating until the host calls
+`ClearPreviousSecret` — size the rotation-overlap window deliberately.
+
 OIDC:
 
 ```go
@@ -146,7 +164,21 @@ prov, _ := identityoidc.NewProvider(identityoidc.Config{
     RedirectURL: cb, Scopes: []string{"openid", "email", "profile"},
     RequireHTTPS: true,
 })
+
+// Login: BeginAuth generates the auth URL plus a per-login nonce and PKCE verifier.
+// Persist Nonce and CodeVerifier server-side, keyed to state, until the callback.
+challenge, _ := prov.BeginAuth(state)
+redirectUser(challenge.URL)
+
+// Callback: bind the code exchange and ID-token verification back to that same login.
+token, _ := prov.ExchangeCode(ctx, code, identityoidc.WithPKCEVerifier(challenge.CodeVerifier))
+rawIDToken := token.Extra("id_token").(string)
+idToken, err := prov.VerifyIDToken(ctx, rawIDToken, identityoidc.WithExpectedNonce(challenge.Nonce))
 ```
+
+**Use `BeginAuth`/`WithPKCEVerifier`/`WithExpectedNonce` for new integrations.** The
+package also exposes a legacy pair, `GetAuthURL`/`VerifyIDToken` called with no options —
+it provides **no nonce or PKCE protection** and exists only for backward compatibility.
 
 ### Suite coupling
 
@@ -200,7 +232,7 @@ and, when it merges, tags the version and drafts the GitHub Release. `release.ym
 publishes that draft — there are no build artifacts to attach, since this is a pure Go
 library. The module is in the `0.x` series while the API stabilises — breaking changes bump
 the **minor** version, and consumers pin and upgrade in lockstep. Schema migrations are
-additive.
+additive, with one documented in-place exception (see [docs/schema.md](docs/schema.md)).
 
 ## Development
 
