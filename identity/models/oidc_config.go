@@ -7,26 +7,31 @@ import (
 	"github.com/google/uuid"
 )
 
-// OIDCConfig holds OIDC provider configuration stored in the database. Sensitive
-// fields use the _encrypted suffix and are hidden from JSON.
+// OIDCConfig holds OIDC provider configuration stored in the database.
+//
+// This module performs NO cryptography: ClientSecretCiphertext is stored and
+// returned verbatim. A caller that requires encryption at rest must encrypt the
+// client secret before persisting and decrypt after reading — the module does
+// not own an encryption key. (The database column keeps its historical
+// client_secret_encrypted name.)
 //
 // Only the persisted identity shape and its data helpers live in the module;
 // API request/response DTOs and setup-wizard state are owned by each app.
 type OIDCConfig struct {
-	ID                    uuid.UUID       `db:"id" json:"id"`
-	Name                  string          `db:"name" json:"name"`
-	ProviderType          string          `db:"provider_type" json:"provider_type"`
-	IssuerURL             string          `db:"issuer_url" json:"issuer_url"`
-	ClientID              string          `db:"client_id" json:"client_id"`
-	ClientSecretEncrypted string          `db:"client_secret_encrypted" json:"-"` // Never expose
-	RedirectURL           string          `db:"redirect_url" json:"redirect_url"`
-	Scopes                json.RawMessage `db:"scopes" json:"scopes"`
-	IsActive              bool            `db:"is_active" json:"is_active"`
-	ExtraConfig           json.RawMessage `db:"extra_config" json:"extra_config,omitempty"`
-	CreatedAt             time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt             time.Time       `db:"updated_at" json:"updated_at"`
-	CreatedBy             uuid.NullUUID   `db:"created_by" json:"created_by,omitempty"`
-	UpdatedBy             uuid.NullUUID   `db:"updated_by" json:"updated_by,omitempty"`
+	ID                     uuid.UUID       `db:"id" json:"id"`
+	Name                   string          `db:"name" json:"name"`
+	ProviderType           string          `db:"provider_type" json:"provider_type"`
+	IssuerURL              string          `db:"issuer_url" json:"issuer_url"`
+	ClientID               string          `db:"client_id" json:"client_id"`
+	ClientSecretCiphertext string          `db:"client_secret_encrypted" json:"-"` // caller-supplied; module does no crypto
+	RedirectURL            string          `db:"redirect_url" json:"redirect_url"`
+	Scopes                 json.RawMessage `db:"scopes" json:"scopes"`
+	IsActive               bool            `db:"is_active" json:"is_active"`
+	ExtraConfig            json.RawMessage `db:"extra_config" json:"extra_config,omitempty"`
+	CreatedAt              time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt              time.Time       `db:"updated_at" json:"updated_at"`
+	CreatedBy              uuid.NullUUID   `db:"created_by" json:"created_by,omitempty"`
+	UpdatedBy              uuid.NullUUID   `db:"updated_by" json:"updated_by,omitempty"`
 }
 
 // OIDCGroupMapping maps a single IdP group claim value to an organization and role template.

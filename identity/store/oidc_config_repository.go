@@ -43,7 +43,7 @@ func (r *OIDCConfigRepository) CreateOIDCConfig(ctx context.Context, config *mod
 
 	_, err := r.db.ExecContext(ctx, query,
 		config.ID, config.Name, config.ProviderType, config.IssuerURL, config.ClientID,
-		config.ClientSecretEncrypted,
+		config.ClientSecretCiphertext,
 		config.RedirectURL, config.Scopes, config.IsActive, config.ExtraConfig,
 		config.CreatedAt, config.UpdatedAt, config.CreatedBy, config.UpdatedBy,
 	)

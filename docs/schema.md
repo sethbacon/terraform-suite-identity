@@ -90,9 +90,10 @@ All tables live in the `identity` schema. UUID primary keys default to
 
 - **Hashed secrets only.** `api_keys` stores a hash and a short `key_prefix`
   (indexed by `idx_identity_api_keys_key_prefix` for fast lookup); the raw key is
-  never persisted. OIDC client secrets are stored encrypted
-  (`client_secret_encrypted`) — the library stores the ciphertext the caller
-  supplies; it does not own the encryption key.
+  never persisted. OIDC client secrets are stored **verbatim** in
+  `client_secret_encrypted` — the module performs no cryptography, so a caller
+  that wants encryption at rest must supply ciphertext (it does not own the
+  encryption key). The column keeps its historical name.
 - **JWT revocation is separate.** Revoking a JWT writes to `revoked_tokens` (by
   `jti`); revoking an API key is a hard delete of the `api_keys` row. There is no
   soft-revoke flag on tokens.
