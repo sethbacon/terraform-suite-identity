@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	oidcpkg "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/oauth2"
 )
@@ -379,4 +380,237 @@ func (idp *mockIDP) mintIDToken(t *testing.T, nonce string) string {
 func writeTestJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// ---------------------------------------------------------------------------
+// ExtractUserInfo / ExtractGroups (claim-resolution logic)
+// ---------------------------------------------------------------------------
+
+// mintIDTokenWithClaims signs an arbitrary claim set, merged over a minimal
+// base (iss/sub/aud/exp/iat), for ad hoc claim-shape tests beyond the fixed
+// shape mintIDToken uses for the nonce/PKCE tests. A key in extra overrides
+// the base (e.g. "sub": "" to test a missing-subject token).
+func (idp *mockIDP) mintIDTokenWithClaims(t *testing.T, extra jwt.MapClaims) string {
+	t.Helper()
+	claims := jwt.MapClaims{
+		"iss": idp.server.URL,
+		"sub": "user-123",
+		"aud": idp.clientID,
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iat": time.Now().Unix(),
+	}
+	for k, v := range extra {
+		claims[k] = v
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tok.Header["kid"] = idp.kid
+	signed, err := tok.SignedString(idp.key)
+	if err != nil {
+		t.Fatalf("sign ID token: %v", err)
+	}
+	return signed
+}
+
+// verifiedIDToken builds a Provider against a fresh mock IdP, mints a token
+// with the given extra claims, and verifies it, returning a real
+// *oidcpkg.IDToken so ExtractUserInfo/ExtractGroups can be exercised against
+// claim shapes a live IdP could actually send.
+func verifiedIDToken(t *testing.T, extra jwt.MapClaims) *oidcpkg.IDToken {
+	t.Helper()
+	idp := newMockIDP(t, "test-client")
+	p, err := NewProviderWithContext(context.Background(), Config{
+		IssuerURL:    idp.server.URL,
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+	})
+	if err != nil {
+		t.Fatalf("NewProviderWithContext: %v", err)
+	}
+	raw := idp.mintIDTokenWithClaims(t, extra)
+	idToken, err := p.VerifyIDToken(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("VerifyIDToken: %v", err)
+	}
+	return idToken
+}
+
+func TestExtractUserInfo_EmailFallbackOrder(t *testing.T) {
+	// email present alongside every fallback claim: email wins, and only the
+	// standard email claim carries the verified signal.
+	idToken := verifiedIDToken(t, jwt.MapClaims{
+		"email":              "primary@example.com",
+		"email_verified":     true,
+		"preferred_username": "upn-style@example.com",
+		"upn":                "upn@example.com",
+		"unique_name":        "uniquename@example.com",
+		"name":               "Primary User",
+	})
+	sub, email, name, verified, err := (&Provider{}).ExtractUserInfo(idToken)
+	if err != nil {
+		t.Fatalf("ExtractUserInfo: %v", err)
+	}
+	if sub != "user-123" {
+		t.Errorf("sub = %q, want user-123", sub)
+	}
+	if email != "primary@example.com" {
+		t.Errorf("email = %q, want the standard email claim to win", email)
+	}
+	if name != "Primary User" {
+		t.Errorf("name = %q, want Primary User", name)
+	}
+	if !verified {
+		t.Error("emailVerified = false, want true (email_verified=true on the standard email claim)")
+	}
+}
+
+func TestExtractUserInfo_FallsBackToPreferredUsername(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{
+		"preferred_username": "upn-style@example.com",
+		"upn":                "upn@example.com",
+		"unique_name":        "uniquename@example.com",
+	})
+	_, email, _, verified, err := (&Provider{}).ExtractUserInfo(idToken)
+	if err != nil {
+		t.Fatalf("ExtractUserInfo: %v", err)
+	}
+	if email != "upn-style@example.com" {
+		t.Errorf("email = %q, want preferred_username fallback", email)
+	}
+	if verified {
+		t.Error("emailVerified = true, want false (UPN-family fallbacks are never verified)")
+	}
+}
+
+func TestExtractUserInfo_FallsBackToUPN(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{
+		"upn":         "upn@example.com",
+		"unique_name": "uniquename@example.com",
+	})
+	_, email, _, _, err := (&Provider{}).ExtractUserInfo(idToken)
+	if err != nil {
+		t.Fatalf("ExtractUserInfo: %v", err)
+	}
+	if email != "upn@example.com" {
+		t.Errorf("email = %q, want upn fallback", email)
+	}
+}
+
+func TestExtractUserInfo_FallsBackToUniqueName(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{
+		"unique_name": "uniquename@example.com",
+	})
+	_, email, _, _, err := (&Provider{}).ExtractUserInfo(idToken)
+	if err != nil {
+		t.Fatalf("ExtractUserInfo: %v", err)
+	}
+	if email != "uniquename@example.com" {
+		t.Errorf("email = %q, want unique_name fallback", email)
+	}
+}
+
+func TestExtractUserInfo_MissingEmailIdentifier(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{})
+	_, _, _, _, err := (&Provider{}).ExtractUserInfo(idToken)
+	if err == nil {
+		t.Fatal("expected an error when no email-shaped claim is present")
+	}
+	if !strings.Contains(err.Error(), "missing email identifier") {
+		t.Errorf("error = %q, want it to mention the missing email identifier", err.Error())
+	}
+}
+
+func TestExtractUserInfo_MissingSub(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{
+		"sub":   "",
+		"email": "user@example.com",
+	})
+	_, _, _, _, err := (&Provider{}).ExtractUserInfo(idToken)
+	if err == nil {
+		t.Fatal("expected an error for a missing 'sub' claim")
+	}
+	if !strings.Contains(err.Error(), "sub") {
+		t.Errorf("error = %q, want it to mention the missing sub claim", err.Error())
+	}
+}
+
+func TestExtractUserInfo_NameDefaultsToEmail(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{
+		"email": "user@example.com",
+		// name intentionally omitted
+	})
+	_, email, name, _, err := (&Provider{}).ExtractUserInfo(idToken)
+	if err != nil {
+		t.Fatalf("ExtractUserInfo: %v", err)
+	}
+	if name != email {
+		t.Errorf("name = %q, want it to default to email %q", name, email)
+	}
+}
+
+func TestExtractUserInfo_EmailVerifiedStringVariant(t *testing.T) {
+	// Some IdPs emit email_verified as a string rather than a JSON boolean.
+	idToken := verifiedIDToken(t, jwt.MapClaims{
+		"email":          "user@example.com",
+		"email_verified": "true",
+	})
+	_, _, _, verified, err := (&Provider{}).ExtractUserInfo(idToken)
+	if err != nil {
+		t.Fatalf("ExtractUserInfo: %v", err)
+	}
+	if !verified {
+		t.Error("emailVerified = false, want true for a string \"true\" email_verified claim")
+	}
+}
+
+func TestExtractUserInfo_EmailVerifiedAbsentDefaultsFalse(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{
+		"email": "user@example.com",
+		// email_verified intentionally omitted
+	})
+	_, _, _, verified, err := (&Provider{}).ExtractUserInfo(idToken)
+	if err != nil {
+		t.Fatalf("ExtractUserInfo: %v", err)
+	}
+	if verified {
+		t.Error("emailVerified = true, want false when the claim is absent")
+	}
+}
+
+func TestExtractGroups_AbsentClaim(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{"email": "user@example.com"})
+	if got := (&Provider{}).ExtractGroups(idToken, "groups"); got != nil {
+		t.Errorf("ExtractGroups() = %v, want nil for an absent claim", got)
+	}
+}
+
+func TestExtractGroups_EmptyClaimName(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{"groups": []string{"admins"}})
+	if got := (&Provider{}).ExtractGroups(idToken, ""); got != nil {
+		t.Errorf("ExtractGroups() = %v, want nil for an empty claim name", got)
+	}
+}
+
+func TestExtractGroups_NonArrayClaim(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{"groups": "not-an-array"})
+	if got := (&Provider{}).ExtractGroups(idToken, "groups"); got != nil {
+		t.Errorf("ExtractGroups() = %v, want nil for a non-array claim", got)
+	}
+}
+
+func TestExtractGroups_ArrayOfStrings(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{"groups": []string{"admins", "developers"}})
+	got := (&Provider{}).ExtractGroups(idToken, "groups")
+	if len(got) != 2 || got[0] != "admins" || got[1] != "developers" {
+		t.Errorf("ExtractGroups() = %v, want [admins developers]", got)
+	}
+}
+
+func TestExtractGroups_MixedTypeArrayKeepsOnlyStrings(t *testing.T) {
+	idToken := verifiedIDToken(t, jwt.MapClaims{
+		"groups": []any{"admins", 123, "developers", true, ""},
+	})
+	got := (&Provider{}).ExtractGroups(idToken, "groups")
+	if len(got) != 2 || got[0] != "admins" || got[1] != "developers" {
+		t.Errorf("ExtractGroups() = %v, want only the string elements [admins developers] (non-strings and empty string dropped)", got)
+	}
 }
