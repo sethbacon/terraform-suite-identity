@@ -17,6 +17,16 @@ updates:
       go-dependencies:
         patterns:
           - "*"
+        # Security-sensitive direct dependencies are excluded from the catch-all
+        # group so a CVE fix for one of them can merge and be reviewed on its own,
+        # rather than riding along with (and being reviewed no more carefully
+        # than) unrelated routine version bumps in the same combined PR.
+        exclude-patterns:
+          - "github.com/coreos/go-oidc/*"
+          - "github.com/golang-jwt/jwt/*"
+          - "golang.org/x/crypto"
+          - "golang.org/x/oauth2"
+          - "golang.org/x/net"
 
   - package-ecosystem: github-actions
     directory: /
