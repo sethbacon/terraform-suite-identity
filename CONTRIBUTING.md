@@ -182,7 +182,10 @@ See [docs/schema.md](docs/schema.md) for the full table and migration reference.
 - Use idempotent, attach-safe DDL: `CREATE … IF NOT EXISTS`,
   `ON CONFLICT DO NOTHING`. The runner takes an advisory lock so concurrent
   detect-and-attach by two apps is safe (`identity.RunMigrations`).
-- The `.down.sql` must fully reverse the `.up.sql`.
+- The `.down.sql` must fully reverse the `.up.sql`. (The one existing exception is
+  migration `000003`, whose `TEXT[]`↔`JSONB` column-type round-trip is best-effort
+  rather than an exact reversal — see [docs/schema.md](docs/schema.md). This is
+  not a precedent: new migrations must still fully reverse.)
 
 There is no migration CLI in this repo. Exercise both directions through a
 consuming app, or in a throwaway database via `identity.RunMigrations(db, "up")`
