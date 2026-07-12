@@ -239,7 +239,13 @@ self := suite.Manifest{
 
 // Poll the configured sibling's manifest (construct ONLY when an operator set a
 // sibling URL). Snapshot() is cheap and safe per request.
-dc := suite.NewDiscoveryClient("https://tfstate.example.com", self, 0) // 0 → default 60s
+//
+// NewDiscoveryClient fails closed on a plaintext http:// siblingURL — use
+// suite.NewInsecureDiscoveryClient instead for a local/dev loopback sibling.
+dc, err := suite.NewDiscoveryClient("https://tfstate.example.com", self, 0) // 0 → default 60s
+if err != nil {
+    log.Fatal(err)
+}
 go dc.Start(ctx)
 state, sibling := dc.Snapshot() // active / degraded / unreachable / unknown
 ```

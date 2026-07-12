@@ -85,7 +85,9 @@ func TestDiscoveryClient_ActiveThenUnreachable(t *testing.T) {
 	}))
 
 	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
-	d := NewDiscoveryClient(srv.URL, self, time.Second)
+	// srv is a plain-HTTP httptest server (a local/dev-style loopback target),
+	// so the explicit insecure opt-out is the right constructor here.
+	d := NewInsecureDiscoveryClient(srv.URL, self, time.Second)
 
 	d.pollOnce(context.Background())
 	if st, m := d.Snapshot(); st != StateActive || m == nil || m.App != "terraform-state-manager" {
@@ -104,7 +106,10 @@ func TestDiscoveryClient_ActiveThenUnreachable(t *testing.T) {
 
 func TestDiscoveryClient_DegradedWithinGrace(t *testing.T) {
 	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
-	d := NewDiscoveryClient("http://127.0.0.1:0", self, time.Second)
+	// Deliberately unreachable (port 0); http:// here needs the insecure
+	// opt-out since this test is about the degraded-transition logic, not
+	// the scheme guard.
+	d := NewInsecureDiscoveryClient("http://127.0.0.1:0", self, time.Second)
 	d.mu.Lock()
 	d.lastOKAt = time.Now()
 	d.mu.Unlock()
@@ -116,7 +121,10 @@ func TestDiscoveryClient_DegradedWithinGrace(t *testing.T) {
 
 func TestDiscoveryClient_SnapshotReturnsIsolatedCopy(t *testing.T) {
 	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
-	d := NewDiscoveryClient("https://sibling.example", self, time.Second)
+	d, err := NewDiscoveryClient("https://sibling.example", self, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error for an https:// siblingURL: %v", err)
+	}
 	d.mu.Lock()
 	d.state = StateActive
 	d.lastGood = &Manifest{
@@ -165,7 +173,7 @@ func TestDiscoveryClient_DoesNotFollowRedirects(t *testing.T) {
 	defer srv.Close()
 
 	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
-	d := NewDiscoveryClient(srv.URL, self, time.Second)
+	d := NewInsecureDiscoveryClient(srv.URL, self, time.Second)
 	d.pollOnce(context.Background())
 
 	if st, m := d.Snapshot(); st != StateUnreachable || m != nil {
@@ -203,7 +211,7 @@ func TestDiscoveryClient_IncompatibleManifestBecomesUnreachableButKeepsStaleLast
 	defer srv.Close()
 
 	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
-	d := NewDiscoveryClient(srv.URL, self, time.Second)
+	d := NewInsecureDiscoveryClient(srv.URL, self, time.Second)
 
 	d.pollOnce(context.Background())
 	st, m := d.Snapshot()
@@ -219,6 +227,100 @@ func TestDiscoveryClient_IncompatibleManifestBecomesUnreachableButKeepsStaleLast
 	}
 	if m == nil || m.App != "terraform-state-manager" {
 		t.Fatalf("Snapshot() after incompatible transition = %v, want the STALE prior-good manifest still returned (pinned known behavior)", m)
+	}
+}
+
+func TestNewDiscoveryClient_RejectsPlaintextHTTP(t *testing.T) {
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d, err := NewDiscoveryClient("http://sibling.example", self, time.Second)
+	if err == nil {
+		t.Fatal("expected an error for a plaintext http:// siblingURL, got nil")
+	}
+	if d != nil {
+		t.Fatalf("expected a nil client on rejection, got %+v", d)
+	}
+	if !strings.Contains(err.Error(), "http://sibling.example") {
+		t.Errorf("error message should reference the rejected URL, got: %v", err)
+	}
+}
+
+func TestNewDiscoveryClient_RejectsPlaintextHTTP_CaseInsensitiveAndTrailingSlash(t *testing.T) {
+	// Mirrors NewDiscoveryClient's own TrimRight(siblingURL, "/") normalization
+	// and case-insensitive scheme check, so an uppercase scheme or a trailing
+	// slash cannot slip past the guard.
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d, err := NewDiscoveryClient("HTTP://sibling.example/", self, time.Second)
+	if err == nil || d != nil {
+		t.Fatalf("expected rejection for uppercase-scheme plaintext URL, got client=%+v err=%v", d, err)
+	}
+}
+
+func TestNewDiscoveryClient_AcceptsHTTPS(t *testing.T) {
+	sibling := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
+		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != manifestPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(sibling)
+	}))
+	defer srv.Close()
+	// httptest.NewServer is plain HTTP; swap the scheme to https:// to exercise
+	// the accept path without standing up a TLS listener — NewDiscoveryClient
+	// only inspects the scheme prefix, it does not itself dial the sibling.
+	httpsURL := "https://" + strings.TrimPrefix(srv.URL, "http://")
+
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d, err := NewDiscoveryClient(httpsURL, self, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error for an https:// siblingURL: %v", err)
+	}
+	if d == nil {
+		t.Fatal("expected a non-nil client for an https:// siblingURL")
+	}
+
+	want := NewInsecureDiscoveryClient(httpsURL, self, time.Second)
+	if d.siblingURL != want.siblingURL || d.pollInterval != want.pollInterval ||
+		d.graceWindow != want.graceWindow || d.state != want.state ||
+		d.self.App != want.self.App || d.self.SchemaVersion != want.self.SchemaVersion {
+		t.Fatalf("NewDiscoveryClient result diverges from NewInsecureDiscoveryClient given the same https:// URL: got %+v, want-equivalent %+v", d, want)
+	}
+}
+
+func TestNewInsecureDiscoveryClient_PlaintextHTTPStillWarnsAndConstructs(t *testing.T) {
+	// NewInsecureDiscoveryClient is the explicit, named opt-out: it must still
+	// only warn (never reject) on a plaintext sibling, and return a working,
+	// non-nil client that a caller can Start()/poll normally.
+	sibling := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
+		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != manifestPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(sibling)
+	}))
+	defer srv.Close()
+
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d := NewInsecureDiscoveryClient(srv.URL, self, time.Second) // srv.URL is plain http://
+	if d == nil {
+		t.Fatal("NewInsecureDiscoveryClient must still construct a client for a plaintext sibling URL")
+	}
+	d.pollOnce(context.Background())
+	if st, m := d.Snapshot(); st != StateActive || m == nil || m.App != "terraform-state-manager" {
+		t.Fatalf("plaintext-sibling client must still operate normally: state=%v manifest=%v", st, m)
+	}
+}
+
+func TestNewInsecureDiscoveryClient_AcceptsHTTPS(t *testing.T) {
+	// The insecure opt-out must not itself become "insecure-only" — an https://
+	// siblingURL passed to it works exactly as it would via NewDiscoveryClient.
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d := NewInsecureDiscoveryClient("https://sibling.example", self, time.Second)
+	if d == nil || d.siblingURL != "https://sibling.example" {
+		t.Fatalf("expected a working client for an https:// siblingURL, got %+v", d)
 	}
 }
 
@@ -242,7 +344,7 @@ func TestDiscoveryClient_OversizedBodyRejected(t *testing.T) {
 	defer srv.Close()
 
 	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
-	d := NewDiscoveryClient(srv.URL, self, time.Second)
+	d := NewInsecureDiscoveryClient(srv.URL, self, time.Second)
 	d.pollOnce(context.Background())
 
 	if st, m := d.Snapshot(); st != StateUnreachable || m != nil {
