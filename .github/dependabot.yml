@@ -4,7 +4,11 @@ updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
-      interval: biweekly
+      # "biweekly" is not a valid Dependabot interval (allowed: daily, weekly,
+      # monthly, quarterly, semiannually, yearly, cron) — this file was failing
+      # GitHub's dependabot.yml schema validation. Standard cron has no native
+      # "every 2 weeks" construct either, so weekly is the closest valid cadence.
+      interval: weekly
       day: monday
       time: "09:00"
       timezone: UTC
@@ -17,11 +21,21 @@ updates:
       go-dependencies:
         patterns:
           - "*"
+        # Security-sensitive direct dependencies are excluded from the catch-all
+        # group so a CVE fix for one of them can merge and be reviewed on its own,
+        # rather than riding along with (and being reviewed no more carefully
+        # than) unrelated routine version bumps in the same combined PR.
+        exclude-patterns:
+          - "github.com/coreos/go-oidc/*"
+          - "github.com/golang-jwt/jwt/*"
+          - "golang.org/x/crypto"
+          - "golang.org/x/oauth2"
+          - "golang.org/x/net"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: biweekly
+      interval: weekly
       day: monday
       time: "09:00"
       timezone: UTC
