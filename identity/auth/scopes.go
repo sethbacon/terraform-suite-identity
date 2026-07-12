@@ -2,6 +2,8 @@
 // shared across all apps in the Terraform suite.
 package auth
 
+import "fmt"
+
 // Identity-core scope constants owned by the suite identity layer.
 // Apps re-export these as their own typed constants and add app-specific scopes.
 const (
@@ -15,6 +17,15 @@ const (
 	ScopeSettingsWrite      = "settings:write"
 
 	// ScopeAdmin is the wildcard scope that grants all permissions.
+	//
+	// ScopeAdmin MUST only ever originate from a trusted, admin-seeded
+	// role_template — never from an external claim, IdP group mapping, or any
+	// other lower-trust source, since HasScope treats its literal presence in a
+	// scope list as a grant-all wildcard with no further checks. A consuming
+	// backend that maps externally-sourced data (e.g. an OIDC IdP group claim)
+	// onto a scope list before persisting or trusting it should call
+	// ValidateProvisionableScopes to reject the literal "admin" string from
+	// that lower-trust path.
 	ScopeAdmin = "admin"
 )
 
@@ -73,4 +84,28 @@ func HasAllScopes(userScopes []string, required []string, rwPairs ReadWritePairs
 		}
 	}
 	return true
+}
+
+// ValidateProvisionableScopes returns an error if scopes contains ScopeAdmin,
+// naming it specifically, and nil otherwise.
+//
+// It is intended for a consuming backend to call when mapping
+// externally-sourced data (e.g. an OIDC IdP group claim, a SCIM attribute, or
+// any other value an external actor influences) onto a scope list, BEFORE
+// persisting or trusting that list. Because HasScope treats the literal
+// string "admin" anywhere in a scope list as a grant-all wildcard with no
+// further checks, allowing it to flow in unchecked from a lower-trust source
+// would let an external actor smuggle in full privilege.
+//
+// Do NOT call ValidateProvisionableScopes on scopes read back from an
+// already-trusted, admin-seeded role_template — legitimate admin grants are
+// expected to carry ScopeAdmin, and rejecting them there would break the
+// intended feature.
+func ValidateProvisionableScopes(scopes []string) error {
+	for _, s := range scopes {
+		if s == ScopeAdmin {
+			return fmt.Errorf("scope %q is not permitted from this source: %s is a grant-all wildcard reserved for trusted, admin-seeded role_template assignment", ScopeAdmin, ScopeAdmin)
+		}
+	}
+	return nil
 }
