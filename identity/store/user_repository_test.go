@@ -7,6 +7,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/lib/pq"
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 )
 
@@ -437,6 +438,88 @@ func TestGetOrCreateUserFromOIDC_NewUser(t *testing.T) {
 	}
 	if user == nil {
 		t.Fatal("expected user, got nil")
+	}
+}
+
+func TestGetOrCreateUserFromOIDC_NewUser_ConcurrentCreateLostViaZeroRowsAffected(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-race").
+		WillReturnRows(emptyUserRow())
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("race@example.com").
+		WillReturnRows(emptyUserRow())
+	// A concurrent goroutine already created this identity: ON CONFLICT (oidc_sub)
+	// DO NOTHING suppresses our insert, so RowsAffected is 0 (no error).
+	mock.ExpectExec("INSERT INTO users").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// The fallback re-read finds the concurrent winner's row.
+	winnerSub := "sub-race"
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-race").
+		WillReturnRows(sqlmock.NewRows(userCols).
+			AddRow("winner-id", "race@example.com", "Race Winner", &winnerSub, time.Now(), time.Now()))
+
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-race", "race@example.com", "New User", true)
+	if err != nil {
+		t.Fatalf("expected the race to resolve without error, got: %v", err)
+	}
+	if user == nil || user.ID != "winner-id" {
+		t.Fatalf("expected the concurrent winner's row, got %+v", user)
+	}
+}
+
+func TestGetOrCreateUserFromOIDC_NewUser_ConcurrentCreateLostViaUniqueViolation(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-race2").
+		WillReturnRows(emptyUserRow())
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("race2@example.com").
+		WillReturnRows(emptyUserRow())
+	// The concurrent winner's row was already visible to a DIFFERENT unique index
+	// (e.g. email) before the oidc_sub arbiter, surfacing as a raw unique-violation
+	// rather than a suppressed (0 rows affected) conflict. Must be treated the
+	// same way: fall back to the winner's row instead of propagating the error.
+	mock.ExpectExec("INSERT INTO users").
+		WillReturnError(&pq.Error{Code: "23505", Message: "duplicate key value violates unique constraint"})
+	winnerSub := "sub-race2"
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-race2").
+		WillReturnRows(sqlmock.NewRows(userCols).
+			AddRow("winner-id-2", "race2@example.com", "Race Winner", &winnerSub, time.Now(), time.Now()))
+
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-race2", "race2@example.com", "New User", true)
+	if err != nil {
+		t.Fatalf("expected the race to resolve without error, got: %v", err)
+	}
+	if user == nil || user.ID != "winner-id-2" {
+		t.Fatalf("expected the concurrent winner's row, got %+v", user)
+	}
+}
+
+func TestGetOrCreateUserFromOIDC_NewUser_NonUniqueViolationErrorPropagates(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-err").
+		WillReturnRows(emptyUserRow())
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("err@example.com").
+		WillReturnRows(emptyUserRow())
+	// A non-unique-violation error (e.g. connection loss) must propagate as-is,
+	// not be swallowed by the race-recovery fallback.
+	mock.ExpectExec("INSERT INTO users").
+		WillReturnError(errDB)
+
+	_, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-err", "err@example.com", "New User", true)
+	if err == nil {
+		t.Fatal("expected the non-unique-violation error to propagate")
+	}
+	if mockErr := mock.ExpectationsWereMet(); mockErr != nil {
+		t.Errorf("unexpected DB calls (a re-read would indicate the race-fallback fired incorrectly): %v", mockErr)
 	}
 }
 

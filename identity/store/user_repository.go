@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -23,6 +24,13 @@ type UserRepository struct {
 // NewUserRepository creates a new UserRepository
 func NewUserRepository(db *sql.DB) *UserRepository {
 	return &UserRepository{db: db}
+}
+
+// isUniqueViolation reports whether err is a Postgres unique-constraint
+// violation (SQLSTATE 23505).
+func isUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23505"
 }
 
 // CreateUser creates a new user
@@ -273,19 +281,57 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 		return nil, fmt.Errorf("oidc account creation refused: email %q is not verified by the identity provider", email)
 	}
 
-	// User doesn't exist, create new one
+	// Create the new user. This INSERT (rather than a call to CreateUser) uses
+	// ON CONFLICT (oidc_sub) DO NOTHING so that two concurrent first logins for
+	// the SAME brand-new identity (double-tab, browser back/forward replay of the
+	// callback URL, or a client retry after a timeout — realistic triggers since
+	// there is no transaction or SELECT ... FOR UPDATE around the two prior
+	// existence checks) don't surface a raw unique-constraint error to the login
+	// flow: the losing goroutine falls back to re-reading and returning the
+	// winner's row, making GetOrCreateUserFromOIDC idempotent under this race.
 	newUser := &models.User{
-		Email:   email,
-		Name:    name,
-		OIDCSub: &oidcSub,
+		ID:        uuid.New().String(),
+		Email:     email,
+		Name:      name,
+		OIDCSub:   &oidcSub,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
-
-	err = r.CreateUser(ctx, newUser)
+	insert := `
+		INSERT INTO users (id, email, name, oidc_sub, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (oidc_sub) DO NOTHING
+	`
+	result, err := r.db.ExecContext(ctx, insert,
+		newUser.ID, newUser.Email, newUser.Name, newUser.OIDCSub, newUser.CreatedAt, newUser.UpdatedAt,
+	)
 	if err != nil {
-		return nil, err
+		// The ON CONFLICT arbiter above only covers oidc_sub; if the concurrent
+		// winner's row is visible to this constraint check before oidc_sub's (an
+		// implementation-defined ordering), the same race can instead surface as a
+		// unique-violation on email — since both rows are the SAME login retried,
+		// that still means "someone else already created this identity", so fall
+		// back the same way rather than treating it as a distinct error.
+		if !isUniqueViolation(err) {
+			return nil, err
+		}
+	} else if n, _ := result.RowsAffected(); n > 0 {
+		return newUser, nil
 	}
 
-	return newUser, nil
+	// Either RowsAffected was 0 (ON CONFLICT suppressed our insert) or the insert
+	// hit the unique-violation fallback above: a concurrent request already
+	// created this identity. Return the winner's row instead of erroring.
+	winner, werr := r.GetUserByOIDCSub(ctx, oidcSub)
+	if werr != nil {
+		return nil, werr
+	}
+	if winner != nil {
+		return winner, nil
+	}
+	// Exceptionally unlikely: the conflict was detected but the row is gone by
+	// the time we re-read (e.g. deleted between the conflict and this SELECT).
+	return nil, fmt.Errorf("oidc user creation: conflicting row for oidc_sub %q not found on re-read", oidcSub)
 }
 
 // Create is an alias for CreateUser to match the admin handlers

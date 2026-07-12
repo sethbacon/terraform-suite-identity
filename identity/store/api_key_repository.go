@@ -120,7 +120,14 @@ func (r *APIKeyRepository) CreateAPIKey(ctx context.Context, apiKey *models.APIK
 	return err
 }
 
-// GetAPIKeyByHash retrieves an API key by its hash (for authentication)
+// GetAPIKeyByHash retrieves an API key by its hash (for authentication).
+//
+// Returns (nil, nil) — not an error — when no key matches keyHash. This is NOT
+// the real authentication entry point (see GetAPIKeysByPrefix, used by the
+// prefix-then-bcrypt-compare auth path); callers of THIS function specifically
+// must check `key == nil` before dereferencing, since `if err != nil { return
+// err }; use(key.UserID)` panics with a nil-pointer dereference on any miss
+// (e.g. a probed/garbage hash) instead of cleanly denying the request.
 func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) (*models.APIKey, error) {
 	query := `
 		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
