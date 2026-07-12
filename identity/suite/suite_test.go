@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -168,5 +170,82 @@ func TestDiscoveryClient_DoesNotFollowRedirects(t *testing.T) {
 
 	if st, m := d.Snapshot(); st != StateUnreachable || m != nil {
 		t.Fatalf("redirect must not be followed (want unreachable/nil), got state=%v manifest=%v", st, m)
+	}
+}
+
+func TestDiscoveryClient_IncompatibleManifestBecomesUnreachableButKeepsStaleLastGood(t *testing.T) {
+	// Unlike a connection failure, a 200 response with a well-formed but
+	// INCOMPATIBLE manifest (different app id here) fails NegotiateCompat.
+	// pollOnce's incompatible branch only sets d.state — it does not clear
+	// d.lastGood/d.lastOKAt (discovery.go's pollOnce, the `if ok, _ :=
+	// NegotiateCompat(...); !ok` branch returns without touching either) — so
+	// Snapshot() keeps returning the stale prior-good manifest indefinitely
+	// once a sibling degrades to incompatible. Pinned here as a known,
+	// intentionally-untouched behavior (a testing-coverage gap, not something
+	// this test changes).
+	var compatible atomic.Bool
+	compatible.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != manifestPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if compatible.Load() {
+			_ = json.NewEncoder(w).Encode(Manifest{
+				SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
+				Identity: IdentityInfo{Issuer: "terraform-state-manager"},
+			})
+			return
+		}
+		// Well-formed manifest, but incompatible (major schema mismatch).
+		_ = json.NewEncoder(w).Encode(Manifest{SchemaVersion: "suite/v2", App: "terraform-state-manager"})
+	}))
+	defer srv.Close()
+
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d := NewDiscoveryClient(srv.URL, self, time.Second)
+
+	d.pollOnce(context.Background())
+	st, m := d.Snapshot()
+	if st != StateActive || m == nil || m.App != "terraform-state-manager" {
+		t.Fatalf("after good poll: state=%v manifest=%v", st, m)
+	}
+
+	compatible.Store(false)
+	d.pollOnce(context.Background())
+	st, m = d.Snapshot()
+	if st != StateUnreachable {
+		t.Fatalf("after incompatible manifest: state=%v, want unreachable", st)
+	}
+	if m == nil || m.App != "terraform-state-manager" {
+		t.Fatalf("Snapshot() after incompatible transition = %v, want the STALE prior-good manifest still returned (pinned known behavior)", m)
+	}
+}
+
+func TestDiscoveryClient_OversizedBodyRejected(t *testing.T) {
+	// maxManifestBytes (1 MiB) caps the response body read. A sibling streaming
+	// more than that must be truncated/rejected (a decode failure -> fetch
+	// error -> unreachable) rather than hanging or succeeding on a partial body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != manifestPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Emit a JSON object whose single field value exceeds 1 MiB, so the
+		// object is truncated mid-value at the cap and never valid JSON.
+		_, _ = w.Write([]byte(`{"schemaVersion":"suite/v1","app":"terraform-state-manager","padding":"`))
+		padding := strings.Repeat("x", 2<<20) // 2 MiB, well past the 1 MiB cap
+		_, _ = w.Write([]byte(padding))
+		_, _ = w.Write([]byte(`"}`))
+	}))
+	defer srv.Close()
+
+	self := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-registry"}
+	d := NewDiscoveryClient(srv.URL, self, time.Second)
+	d.pollOnce(context.Background())
+
+	if st, m := d.Snapshot(); st != StateUnreachable || m != nil {
+		t.Fatalf("oversized body must be rejected (want unreachable/nil), got state=%v manifest=%v", st, m)
 	}
 }

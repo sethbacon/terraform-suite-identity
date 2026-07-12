@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"testing"
 	"time"
 
@@ -170,6 +172,54 @@ func TestTokenManager_RejectsNonHS256(t *testing.T) {
 
 	if _, err := tm.Validate(signed); err == nil {
 		t.Error("expected an HS384 token to be rejected (strict HS256 only)")
+	}
+}
+
+func TestTokenManager_RejectsNoneAlgorithm(t *testing.T) {
+	// The classic critical-severity JWT bug: an attacker-supplied token asserting
+	// alg="none" (no signature at all). jwt/v5 requires the explicit
+	// UnsafeAllowNoneSignatureType opt-in to even construct one, matching how an
+	// attacker would have to craft the raw token by hand.
+	const secret = "test-secret-key-that-is-long-enough-32+"
+	tm := NewTokenManager(secret, "test-issuer")
+
+	noneTok := jwt.NewWithClaims(jwt.SigningMethodNone, jwt.RegisteredClaims{
+		Issuer:    "test-issuer",
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	})
+	signed, err := noneTok.SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatalf("sign none-alg token: %v", err)
+	}
+
+	if _, err := tm.Validate(signed); err == nil {
+		t.Error("expected an alg=none token to be rejected")
+	}
+}
+
+func TestTokenManager_RejectsRS256(t *testing.T) {
+	// The CVE-2015-9235-style confusion: an RS256 token whose "signature" an
+	// attacker hopes gets checked against the HMAC secret misused as an RSA
+	// public key. The keyfunc's exact-type check (t.Method != jwt.SigningMethodHS256)
+	// must reject this regardless of what key material the attacker signed with.
+	const secret = "test-secret-key-that-is-long-enough-32+"
+	tm := NewTokenManager(secret, "test-issuer")
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	rsaTok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.RegisteredClaims{
+		Issuer:    "test-issuer",
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	})
+	signed, err := rsaTok.SignedString(rsaKey)
+	if err != nil {
+		t.Fatalf("sign RS256 token: %v", err)
+	}
+
+	if _, err := tm.Validate(signed); err == nil {
+		t.Error("expected an RS256 token to be rejected (strict HS256 only)")
 	}
 }
 

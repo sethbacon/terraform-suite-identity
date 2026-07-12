@@ -36,6 +36,17 @@ func TestCanonicalHost(t *testing.T) {
 		{"ipv6 default port", "[::1]:443", "::1"},
 		{"ipv6 non-default port", "[::1]:8080", "[::1]:8080"},
 		{"ipv6 uppercase + default port", "[2001:DB8::1]:443", "2001:db8::1"},
+		// Adversarial input shapes not exploitable beyond join-key mismatch (this
+		// is a normalization helper, not an auth check) but worth pinning since a
+		// real consumer (parsing a user-editable module source address or a
+		// config-file host string) could hand these to the function.
+		{"userinfo-prefixed host passes through unmodified", "attacker@reg.example.com", "attacker@reg.example.com"},
+		{"non-numeric port re-emitted verbatim (Atoi fails silently)", "reg.example.com:notaport", "reg.example.com:notaport"},
+		// A malformed double-scheme URL is NOT handled gracefully: url.Parse
+		// misreads "https:" (from the second scheme) as the host, so the real
+		// host "evil.com" is silently DROPPED — contradicting this function's own
+		// doc comment ("never drops or mangles input"). Pinned as a known gap.
+		{"double scheme drops the real host", "https://https://evil.com", "https"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
