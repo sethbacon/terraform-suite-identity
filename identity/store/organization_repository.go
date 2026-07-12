@@ -653,8 +653,27 @@ func (r *OrganizationRepository) GetUserMemberships(ctx context.Context, userID 
 	return memberships, rows.Err()
 }
 
-// GetUserCombinedScopes retrieves all unique scopes for a user across all their organization memberships.
-// This is used for JWT authentication where we need to know what the user can do globally.
+// GetUserCombinedScopes retrieves all unique scopes for a user, unioned across
+// ALL of their organization memberships into one flat, GLOBAL set that carries
+// NO per-organization qualifier.
+//
+// Do NOT feed this directly into a JWT (or any other authorization decision) as
+// "what the user can do" for a specific organization: a user who is admin in
+// one organization and merely a viewer in another gets admin-level scopes in
+// this set, because nothing in it distinguishes which organization granted
+// which scope — that is exactly the cross-org privilege-escalation primitive
+// this accessor must not be used to build. If the decision is scoped to a
+// single organization — the common case for any multi-tenant, per-resource
+// check — use GetUserScopesForOrg instead, paired with
+// auth.TokenManager.GenerateForOrg (to mint the token) and auth.HasScopeInOrg /
+// auth.HasAnyScopeInOrg / auth.HasAllScopesInOrg (to check it), so the org
+// binding is enforceable from the token itself rather than trusted from a flat
+// scope list.
+//
+// The only legitimate use of this GLOBAL set is a deliberately suite-wide,
+// org-independent decision (e.g. a system/superuser scope check that by design
+// applies across every organization); it must never stand in for a per-org
+// authorization check.
 func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, userID string) ([]string, error) {
 	memberships, err := r.GetUserMemberships(ctx, userID)
 	if err != nil {
@@ -670,6 +689,46 @@ func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, user
 	}
 
 	// Convert map to slice
+	scopes := make([]string, 0, len(scopeMap))
+	for scope := range scopeMap {
+		scopes = append(scopes, scope)
+	}
+
+	return scopes, nil
+}
+
+// GetUserScopesForOrg retrieves the scopes granted to a user by their role template within a
+// SINGLE target organization (orgID), rather than unioning across every organization the user
+// belongs to. The organization_members table enforces UNIQUE(organization_id, user_id), so a
+// user has at most one membership row — and therefore at most one role template — per
+// organization; this returns that membership's deduplicated RoleTemplateScopes.
+//
+// If the user has no membership in orgID, this returns an empty (non-nil) slice and a nil
+// error — mirroring GetMember/GetMemberWithRole's "no rows -> empty result, not error"
+// convention in this file, rather than returning sql.ErrNoRows.
+//
+// Use this (or models.UserWithOrgRoles.GetScopesForOrg) whenever an authorization decision is
+// scoped to a specific organization — pair the result with
+// auth.TokenManager.GenerateForOrg to mint the token and auth.HasScopeInOrg /
+// auth.HasAnyScopeInOrg / auth.HasAllScopesInOrg to check it, so the org binding
+// is enforceable from the token itself. See the doc on GetUserCombinedScopes for
+// why that global accessor must not be used for this purpose.
+func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID, orgID string) ([]string, error) {
+	member, err := r.GetMemberWithRole(ctx, orgID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if member == nil {
+		return []string{}, nil
+	}
+
+	// Deduplicate defensively, mirroring GetUserCombinedScopes, in case the role template's
+	// scopes ever contain duplicates.
+	scopeMap := make(map[string]bool, len(member.RoleTemplateScopes))
+	for _, scope := range member.RoleTemplateScopes {
+		scopeMap[scope] = true
+	}
+
 	scopes := make([]string, 0, len(scopeMap))
 	for scope := range scopeMap {
 		scopes = append(scopes, scope)
