@@ -426,6 +426,50 @@ func TestNewCoupledTokenManager_SameSuiteTokenValidates(t *testing.T) {
 	}
 }
 
+func TestNewCoupledTokenManager_IssuerPinRejectsUntrustedIssuer_SameAudience(t *testing.T) {
+	// Isolates the issuer-pin half of NewCoupledTokenManager's contract from the
+	// audience check. Both managers below share the SAME audience
+	// ("terraform-suite"), so the pre-existing audience check alone cannot
+	// explain a rejection here — only SetAllowedIssuers can. Without this test,
+	// TestNewCoupledTokenManager_CrossAppReplayRejected uses DIFFERENT audiences
+	// and TestNewCoupledTokenManager_SameSuiteTokenValidates never presents an
+	// untrusted issuer, so neither actually proves the issuer pin is wired up:
+	// a build that dropped or no-op'd the SetAllowedIssuers(allowedIssuers) call
+	// inside NewCoupledTokenManager would still pass both of them.
+	secret := []byte("shared-suite-secret-32-bytes-minimum!!")
+
+	victim, err := NewCoupledTokenManager(
+		secret,
+		"registry-backend",
+		[]string{"registry-backend", "state-manager-backend"}, // does NOT trust "rogue-app"
+		"terraform-suite",
+	)
+	if err != nil {
+		t.Fatalf("NewCoupledTokenManager (victim): %v", err)
+	}
+
+	// Some other holder of the shared secret, configured with an issuer the
+	// victim does not trust, but the SAME audience as the victim.
+	rogue, err := NewCoupledTokenManager(
+		secret,
+		"rogue-app",
+		[]string{"rogue-app"}, // self-trust only, required by the constructor
+		"terraform-suite",     // same audience as victim — holds that variable constant
+	)
+	if err != nil {
+		t.Fatalf("NewCoupledTokenManager (rogue): %v", err)
+	}
+
+	tok, err := rogue.Generate("u", "e", nil, time.Hour)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	if _, err := victim.Validate(tok); err == nil {
+		t.Error("expected a token from an untrusted issuer to be rejected even though its audience matches")
+	}
+}
+
 func TestTokenManager_RotateSecret_OverlapThenClear(t *testing.T) {
 	tm := newTM()
 	// Token signed with the original secret.
