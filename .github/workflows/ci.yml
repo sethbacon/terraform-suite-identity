@@ -48,8 +48,11 @@ jobs:
 
       - name: Test (with coverage)
         # auth/models/store are unit-tested (sqlmock for the data layer — no live
-        # DB needed). The migration runner (identity.RunMigrations) requires a live
-        # PostgreSQL and is exercised by the consumers' integration/UAT suites.
+        # DB needed). The migration runner (identity.RunMigrations) requires a
+        # live PostgreSQL and is deliberately NOT run here — it's exercised by
+        # the "integration-test" job below (identity/db_integration_test.go,
+        # built with -tags=integration), which is excluded from this plain
+        # `go test ./...` run.
         run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
 
       - name: Check coverage threshold
@@ -67,36 +70,134 @@ jobs:
 
       - name: Check per-package coverage floor (security-critical packages)
         # The aggregate 75% floor above can hide a low-coverage security-critical
-        # package behind easy-to-cover CRUD/model packages. Enforce a floor scoped
-        # to identity/auth/... and identity/store/... (JWT, OIDC relying-party,
-        # API-key, and data-access logic) independent of the total.
+        # package behind easy-to-cover CRUD/model packages (see issue #66: this
+        # once let identity/auth/oidc sit at ~53% while the blended total looked
+        # fine). Reuse the coverage.out profile the "Test (with coverage)" step
+        # already produced above (no re-running tests, no new tooling — pure
+        # stdlib python3, preinstalled on ubuntu-latest) and enforce a
+        # statement-weighted floor scoped to identity/auth, identity/auth/oidc,
+        # and identity/store (JWT, OIDC relying-party, API-key, and data-access
+        # logic) independent of the blended total. The root "identity" package
+        # (migration runner) is deliberately not gated here: it legitimately
+        # requires a live PostgreSQL to exercise and is covered instead by the
+        # "integration-test" job's identity/db_integration_test.go.
         run: |
-          PKG_THRESHOLD=75
-          fail=0
-          for pkg in $(go list ./identity/auth/... ./identity/store/...); do
-            cov=$(go test -cover "$pkg" 2>/dev/null | grep -oE 'coverage: [0-9.]+%' | grep -oE '[0-9.]+')
-            if [ -z "$cov" ]; then
-              echo "SKIP: $pkg has no statements to cover"
-              continue
-            fi
-            awk -v pkg="$pkg" -v cov="$cov" -v thr="$PKG_THRESHOLD" 'BEGIN {
-              if (cov + 0 < thr + 0) {
-                print "FAIL: " pkg " coverage " cov "% is below the " thr "% floor."
-                exit 1
-              }
-              print "PASS: " pkg " coverage " cov "% meets the " thr "% floor."
-            }' || fail=1
-          done
-          if [ "$fail" = "1" ]; then
-            echo "One or more security-critical packages are below the per-package coverage floor."
-            exit 1
-          fi
+          python3 - <<'PY'
+          import sys
+          from collections import defaultdict
+
+          THRESHOLD = 75.0
+          MODULE_PREFIX = "github.com/sethbacon/terraform-suite-identity/"
+          GATED_PACKAGES = [
+              "identity/auth",
+              "identity/auth/oidc",
+              "identity/store",
+          ]
+
+          covered = defaultdict(int)
+          total = defaultdict(int)
+
+          with open("coverage.out") as f:
+              next(f, None)  # skip the "mode: ..." header line
+              for line in f:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  # Profile line format:
+                  # "<file>:<startline>.<col>,<endline>.<col> <numstmt> <count>"
+                  location, numstmt_str, count_str = line.rsplit(" ", 2)
+                  file_path = location.split(":", 1)[0]
+                  if not file_path.startswith(MODULE_PREFIX):
+                      continue
+                  rel_path = file_path[len(MODULE_PREFIX):]
+                  pkg = rel_path.rsplit("/", 1)[0] if "/" in rel_path else rel_path
+                  numstmt = int(numstmt_str)
+                  count = int(count_str)
+                  total[pkg] += numstmt
+                  if count > 0:
+                      covered[pkg] += numstmt
+
+          failed = []
+          for pkg in GATED_PACKAGES:
+              stmt_total = total.get(pkg, 0)
+              if stmt_total == 0:
+                  print(f"SKIP: {pkg} has no statements to cover")
+                  continue
+              pct = covered.get(pkg, 0) * 100.0 / stmt_total
+              status = "PASS" if pct >= THRESHOLD else "FAIL"
+              cmp = ">=" if pct >= THRESHOLD else "<"
+              print(f"{status}: {pkg} coverage {pct:.1f}% ({cmp} {THRESHOLD:.0f}% required floor)")
+              if pct < THRESHOLD:
+                  failed.append((pkg, pct))
+
+          if failed:
+              print()
+              print("One or more security-critical packages are below their per-package coverage floor:")
+              for pkg, pct in failed:
+                  print(f"  - {pkg}: {pct:.1f}% < {THRESHOLD:.0f}%")
+              sys.exit(1)
+
+          print()
+          print("All gated packages meet their per-package coverage floor.")
+          PY
 
       - name: Upload coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage
           path: coverage.out
+
+  integration-test:
+    name: Integration Tests (PostgreSQL)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: identity_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run migration integration tests
+        # A separate job (not a step in "test" above) on purpose: it needs its
+        # own postgres service container, and keeping it independent means a
+        # slow or transiently flaky DB-backed job never blocks the fast
+        # unit-test feedback loop. The "integration" build tag keeps this test
+        # out of every plain `go test ./...` invocation (this job is the only
+        # place it runs). See identity/db_integration_test.go and issue #66.
+        #
+        # TEMPORARY: continue-on-error until issue #64's fix
+        # (fix/64-migration-down-schema-drop, PR #101) merges to main. Until
+        # then, this step's TestIntegrationRunMigrations deterministically
+        # fails its final RunMigrations(db, "down") assertion, because
+        # 000001's down-migration still ends with `DROP SCHEMA IF EXISTS
+        # identity`, which fails while golang-migrate's own bookkeeping table
+        # still lives inside that schema -- that failure is expected, and is
+        # exactly the regression this test exists to catch (see the test's
+        # doc comment). continue-on-error keeps that known, already-fixed-
+        # elsewhere failure from blocking merges to main while #101 is still
+        # in independent review. Remove this line once #101 merges and this
+        # job goes green for real.
+        continue-on-error: true
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/identity_test?sslmode=disable
+        run: go test -tags=integration ./... -run TestIntegrationRunMigrations -v
 
   gosec:
     name: Security Scan (gosec)

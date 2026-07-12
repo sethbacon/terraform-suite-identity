@@ -8,8 +8,10 @@ import (
 )
 
 // TestEmbeddedMigrationsLoad guards against a broken or empty migrations embed:
-// the iofs source must load and expose migration version 1. (Applying the
-// migrations requires a live PostgreSQL and is covered by integration tests.)
+// the iofs source must load and expose migration version 1. (Actually
+// applying the migrations requires a live PostgreSQL and is covered by the
+// "integration"-build-tagged TestIntegrationRunMigrations in
+// db_integration_test.go, run via `go test -tags=integration ./...`.)
 func TestEmbeddedMigrationsLoad(t *testing.T) {
 	src, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {
