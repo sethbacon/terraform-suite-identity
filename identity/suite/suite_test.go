@@ -73,6 +73,24 @@ func TestNegotiateCompat(t *testing.T) {
 	}
 }
 
+// TestNegotiateCompat_EmptySchemaVersion guards against a silent empty-vs-empty
+// pass: Major("") returns "" (see TestMajor), so without an explicit guard two
+// manifests that both happen to have an empty/unset SchemaVersion would satisfy
+// the "" == "" equality check and be reported compatible. Both self and sibling
+// having an empty SchemaVersion must instead be an explicit incompatibility.
+func TestNegotiateCompat_EmptySchemaVersion(t *testing.T) {
+	self := Manifest{SchemaVersion: "", App: "terraform-registry"}
+	sibling := Manifest{SchemaVersion: "", App: "terraform-state-manager"}
+
+	ok, reason := NegotiateCompat(self, sibling)
+	if ok {
+		t.Fatalf("both empty SchemaVersion: got ok=true, want false (silent empty-vs-empty pass)")
+	}
+	if reason == "" {
+		t.Fatalf("both empty SchemaVersion: got empty reason, want a descriptive non-empty reason")
+	}
+}
+
 func TestDiscoveryClient_ActiveThenUnreachable(t *testing.T) {
 	sibling := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
 		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}

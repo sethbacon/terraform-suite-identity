@@ -78,7 +78,8 @@ func Major(schemaVersion string) string {
 
 // NegotiateCompat reports whether a sibling manifest is compatible with self.
 // Incompatible (false) when: the sibling app id is empty, equals self (a
-// pointing-at-yourself misconfiguration), or its schema MAJOR differs.
+// pointing-at-yourself misconfiguration), either side's schema MAJOR is empty,
+// or the schema MAJORs differ.
 func NegotiateCompat(self, sibling Manifest) (bool, string) {
 	if sibling.App == "" {
 		return false, "sibling manifest has empty app id"
@@ -86,7 +87,19 @@ func NegotiateCompat(self, sibling Manifest) (bool, string) {
 	if sibling.App == self.App {
 		return false, "sibling app equals self (pointing at self?)"
 	}
-	if Major(sibling.SchemaVersion) != Major(self.SchemaVersion) {
+	selfMajor := Major(self.SchemaVersion)
+	siblingMajor := Major(sibling.SchemaVersion)
+	// Major("") == "", so without this guard two manifests that both happen to
+	// have an empty/unset SchemaVersion would silently pass the equality check
+	// below ("" == ""). Treat that as an explicit incompatibility rather than
+	// a silent pass.
+	if selfMajor == "" {
+		return false, "schema version missing on self"
+	}
+	if siblingMajor == "" {
+		return false, "sibling manifest has empty schema version"
+	}
+	if siblingMajor != selfMajor {
 		return false, "schema major mismatch: " + sibling.SchemaVersion + " vs " + self.SchemaVersion
 	}
 	return true, ""

@@ -40,6 +40,9 @@ func TestCanonicalHost(t *testing.T) {
 		// is a normalization helper, not an auth check) but worth pinning since a
 		// real consumer (parsing a user-editable module source address or a
 		// config-file host string) could hand these to the function.
+		//
+		// No colon at all: this is the bare-hostname fast path, unaffected by
+		// the userinfo/multi-colon fallback below (there's no port to recover).
 		{"userinfo-prefixed host passes through unmodified", "attacker@reg.example.com", "attacker@reg.example.com"},
 		{"non-numeric port re-emitted verbatim (Atoi fails silently)", "reg.example.com:notaport", "reg.example.com:notaport"},
 		// A malformed double-scheme URL is NOT handled gracefully: url.Parse
@@ -47,6 +50,21 @@ func TestCanonicalHost(t *testing.T) {
 		// host "evil.com" is silently DROPPED — contradicting this function's own
 		// doc comment ("never drops or mangles input"). Pinned as a known gap.
 		{"double scheme drops the real host", "https://https://evil.com", "https"},
+		// Userinfo combined with a port: net.SplitHostPort rejects this
+		// ("too many colons"), and the url.Parse fallback recovers a non-nil
+		// User, so this is now explicitly REJECTED (returns "") rather than
+		// silently passed through as garbage.
+		{"userinfo + port rejected outright", "user:pass@host:1234", ""},
+		// Trailing junk after a valid host:port. net.SplitHostPort rejects this
+		// ("too many colons"), and url.Parse's fallback also fails (invalid
+		// port after host), so this is rejected outright (returns "") rather
+		// than silently passing "host:443:extra" through unchanged.
+		{"trailing junk after host:port rejected outright", "host:443:extra", ""},
+		// Regression guard: a normal full-URL sibling address (scheme + mixed
+		// case + default port + trailing slash) must still canonicalize exactly
+		// as before — unaffected by the userinfo/multi-colon fallback, since
+		// SplitHostPort accepts "Sibling.Example.com:443" cleanly on its own.
+		{"full URL with default port unaffected", "https://Sibling.Example.com:443/", "sibling.example.com"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

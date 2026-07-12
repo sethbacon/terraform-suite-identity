@@ -25,6 +25,10 @@ import (
 //
 // Note: :80 and :443 both fold to the bare host by design — the join key is a
 // host identity, not an origin, and the scheme is intentionally stripped.
+// Because this folding intentionally discards scheme, any code that extends
+// cross-app trust based on CanonicalHost equality (e.g. the suite discovery
+// client) MUST independently enforce HTTPS on the connection itself — see
+// suite.NewSecureDiscoveryClient.
 func CanonicalHost(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -37,9 +41,37 @@ func CanonicalHost(raw string) string {
 			raw = u.Host
 		}
 	}
-	host, port := raw, ""
-	if h, p, err := net.SplitHostPort(raw); err == nil {
+	var host, port string
+	if !strings.Contains(raw, ":") {
+		// Fast path: the overwhelmingly common case is a bare hostname with no
+		// port and no colon at all. net.SplitHostPort always errors on this
+		// shape (there's no port to split off), so historically the code fell
+		// back to treating the whole string as the host — which is correct
+		// here and must not change.
+		host = raw
+	} else if h, p, err := net.SplitHostPort(raw); err == nil {
 		host, port = h, p
+	} else {
+		// raw contains a colon, but it isn't a clean "host:port" or
+		// "[ipv6]:port" that net.SplitHostPort accepts. This is either a shape
+		// net/url's authority parser can still recover cleanly (e.g. a bare,
+		// unbracketed IPv6 literal) or genuinely malformed input carrying
+		// userinfo ("user:pass@host:1234") or extra junk ("host:443:extra") —
+		// never legitimate for a bare host-identity join key. Recover via
+		// url.Parse against a synthesized authority; anything that doesn't
+		// come back clean (parse failure, or userinfo present) is rejected
+		// outright (returns "") rather than silently passed through as
+		// garbage.
+		u, err := url.Parse("//" + raw)
+		if err != nil || u.User != nil || u.Host == "" {
+			return ""
+		}
+		raw = u.Host
+		if h, p, err := net.SplitHostPort(raw); err == nil {
+			host, port = h, p
+		} else {
+			host = raw
+		}
 	}
 	// Unwrap IPv6 brackets so bracketed and unbracketed spellings of the same
 	// literal fold together (e.g. "[::1]" and "[::1]:443" both → "::1").
