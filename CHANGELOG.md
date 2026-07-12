@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.17.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.16.1...v0.17.0) (2026-07-12)
+
+
+### Features
+
+* **security:** OIDC nonce/PKCE and identity auth hardening ([#49](https://github.com/sethbacon/terraform-suite-identity/issues/49)) ([cfcd965](https://github.com/sethbacon/terraform-suite-identity/commit/cfcd965bd3a3a84edd4775dbeec60fe0e6c98bb3))
+
+
+### Bug Fixes
+
+* **auth/oidc:** bound provider HTTP calls with a timeout and reject non-HTTPS redirect URLs when required ([#97](https://github.com/sethbacon/terraform-suite-identity/issues/97)) ([1752515](https://github.com/sethbacon/terraform-suite-identity/commit/1752515dfb46517e6375a48ee5077115d2c56498))
+* **auth:** add NewCoupledTokenManager to make issuer pin and audience mandatory ([#93](https://github.com/sethbacon/terraform-suite-identity/issues/93)) ([e9e5181](https://github.com/sethbacon/terraform-suite-identity/commit/e9e5181eb4eda7513803d07bf44bbbc13e17b8f0))
+* **auth:** bind JWTs to a single organization and add org-aware scope checks ([8682bfd](https://github.com/sethbacon/terraform-suite-identity/commit/8682bfd6f33af3b4ca5bb3d273dbb6a3b19e0712))
+* **auth:** document ScopeAdmin trust boundary and add provisioning guard ([#95](https://github.com/sethbacon/terraform-suite-identity/issues/95)) ([1aa2475](https://github.com/sethbacon/terraform-suite-identity/commit/1aa24759392e4b189f5f452a9eac10b660943678))
+* **ci:** correct invalid dependabot.yml schedule interval (biweekly -&gt; weekly) ([#85](https://github.com/sethbacon/terraform-suite-identity/issues/85)) ([ca938c4](https://github.com/sethbacon/terraform-suite-identity/commit/ca938c4651104251e58863c8e4437890ca9eae04))
+* **ci:** gate per-package coverage on identity/auth(/oidc)/store and add live-Postgres migration integration test ([#106](https://github.com/sethbacon/terraform-suite-identity/issues/106)) ([b577e55](https://github.com/sethbacon/terraform-suite-identity/commit/b577e5562a72d81d56b1dc8c2904376d0f194359))
+* **identity:** stop full migration down-unwind from bricking state ([#101](https://github.com/sethbacon/terraform-suite-identity/issues/101)) ([f5a49ab](https://github.com/sethbacon/terraform-suite-identity/commit/f5a49ab222ad76abcb9eab44d9e467fc79e05a92)), closes [#64](https://github.com/sethbacon/terraform-suite-identity/issues/64)
+* **migrations:** drop vestigial is_active columns on organizations/users/api_keys ([#96](https://github.com/sethbacon/terraform-suite-identity/issues/96)) ([76a2faf](https://github.com/sethbacon/terraform-suite-identity/commit/76a2fafc392f96da18c26586b66fd00c600411bb))
+* **oidc:** guard discovery-free Provider methods against nil panic ([#76](https://github.com/sethbacon/terraform-suite-identity/issues/76)) ([c48e451](https://github.com/sethbacon/terraform-suite-identity/commit/c48e4511eddc735520a97bbd949429ddef644a45))
+* **scopes:** add per-organization scope accessors alongside global union ([4f2b752](https://github.com/sethbacon/terraform-suite-identity/commit/4f2b752e2ea270e8a0c7d00919ba48280b540f6a))
+* **security:** rename ClientSecretEncrypted; document module performs no crypto ([#81](https://github.com/sethbacon/terraform-suite-identity/issues/81)) ([45f10d2](https://github.com/sethbacon/terraform-suite-identity/commit/45f10d2fbd1b77b8a3396b59cb6444171a0ebd9c))
+* **security:** require verified email for OIDC account linking/creation ([#80](https://github.com/sethbacon/terraform-suite-identity/issues/80)) ([7ffede0](https://github.com/sethbacon/terraform-suite-identity/commit/7ffede0ac1c0bbaa7a095fa76c3e1ab846266cd4))
+* **store,auth:** harden API-key contract — expiry filter, doc fixes, prefix cap ([#98](https://github.com/sethbacon/terraform-suite-identity/issues/98)) ([7e09ec1](https://github.com/sethbacon/terraform-suite-identity/commit/7e09ec14bf98c7a2f105d19e317aac91a60f9a91))
+* **store:** enforce single-active OIDC config invariant on create ([#100](https://github.com/sethbacon/terraform-suite-identity/issues/100)) ([fc1c829](https://github.com/sethbacon/terraform-suite-identity/commit/fc1c829eb3714ec30c4b5f7f836b7346e975365b))
+* **store:** escape LIKE metacharacters in ILIKE search patterns ([#75](https://github.com/sethbacon/terraform-suite-identity/issues/75)) ([d1a919f](https://github.com/sethbacon/terraform-suite-identity/commit/d1a919f99edf4473bcd0a6453c973781402648c9))
+* **store:** race-safe OIDC user creation; document cache staleness and not-found contract ([#84](https://github.com/sethbacon/terraform-suite-identity/issues/84)) ([e0300fc](https://github.com/sethbacon/terraform-suite-identity/commit/e0300fc73df8e91b00ea3cb8adeaed36b04073aa))
+* **store:** surface silent no-op guards as errors ([#78](https://github.com/sethbacon/terraform-suite-identity/issues/78)) ([f62e6ad](https://github.com/sethbacon/terraform-suite-identity/commit/f62e6adb57c4f5ee2c79624e01c79e9fd3dde3bf))
+* **suite:** make NewDiscoveryClient fail closed by default on plaintext HTTP ([#99](https://github.com/sethbacon/terraform-suite-identity/issues/99)) ([525b54f](https://github.com/sethbacon/terraform-suite-identity/commit/525b54f2382707fd13c1496943f7b27d8fb6da1e))
+* **suite:** reject unrecoverable userinfo/multi-colon host input; guard empty-schema NegotiateCompat ([#102](https://github.com/sethbacon/terraform-suite-identity/issues/102)) ([da37ef6](https://github.com/sethbacon/terraform-suite-identity/commit/da37ef68160f92fc676d362dfd9bc9e747f44c61))
+* **suite:** return an isolated copy from DiscoveryClient.Snapshot ([#77](https://github.com/sethbacon/terraform-suite-identity/issues/77)) ([8f53510](https://github.com/sethbacon/terraform-suite-identity/commit/8f53510cf66c685929c0f8beb0995ffcc6dbab88))
+
+
+### Documentation
+
+* **readme:** document SetAudience and warn on per-org scope re-checks ([8394180](https://github.com/sethbacon/terraform-suite-identity/commit/83941806dfd4f46ababb1741ff24788490d99334))
+* **security:** add SECURITY.md and fix doc/behavior mismatches ([#83](https://github.com/sethbacon/terraform-suite-identity/issues/83)) ([d89db1a](https://github.com/sethbacon/terraform-suite-identity/commit/d89db1a2a4e537b421d98339e195a9435f88ad55))
+
+
+### Refactor
+
+* **models:** reference canonical auth.ScopeAdmin in HasAdminScope ([#74](https://github.com/sethbacon/terraform-suite-identity/issues/74)) ([3b196d1](https://github.com/sethbacon/terraform-suite-identity/commit/3b196d12901b1bed75c6e05462cfa511aa790f81))
+* **store:** dedupe API-key scan logic and role-template lookup; remove unreachable oidc case ([#91](https://github.com/sethbacon/terraform-suite-identity/issues/91)) ([1861108](https://github.com/sethbacon/terraform-suite-identity/commit/1861108f48e554b439d4ad66e290a1212264a21f))
+
 ## [0.16.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.16.0...v0.16.1) (2026-06-18)
 
 
