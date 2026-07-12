@@ -4,7 +4,11 @@ updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
-      interval: biweekly
+      # "biweekly" is not a valid Dependabot interval (allowed: daily, weekly,
+      # monthly, quarterly, semiannually, yearly, cron) — this file was failing
+      # GitHub's dependabot.yml schema validation. Standard cron has no native
+      # "every 2 weeks" construct either, so weekly is the closest valid cadence.
+      interval: weekly
       day: monday
       time: "09:00"
       timezone: UTC
@@ -31,7 +35,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: biweekly
+      interval: weekly
       day: monday
       time: "09:00"
       timezone: UTC

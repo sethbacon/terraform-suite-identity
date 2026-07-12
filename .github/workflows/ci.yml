@@ -6,9 +6,9 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Independent of Dependabot's biweekly cadence: re-scan the currently-pinned
-    # dependency versions weekly so a CVE disclosed against an already-fetched,
-    # checksum-valid dependency doesn't sit undetected for up to two weeks.
+    # Independent of Dependabot's own weekly cadence: this re-scan runs on a
+    # separate schedule so a CVE disclosed against an already-fetched,
+    # checksum-valid dependency doesn't sit undetected between Dependabot runs.
     - cron: "0 6 * * 1"
   workflow_dispatch: {}
 
