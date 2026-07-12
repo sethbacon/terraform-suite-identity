@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/auth"
@@ -89,5 +90,38 @@ func TestHasAllScopes(t *testing.T) {
 				t.Errorf("HasAllScopes(%v, %v) = %v, want %v", tt.userScopes, tt.required, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestValidateProvisionableScopes(t *testing.T) {
+	tests := []struct {
+		name    string
+		scopes  []string
+		wantErr bool
+	}{
+		{"clean scope list", []string{"users:read", "organizations:write"}, false},
+		{"empty scope list", []string{}, false},
+		{"nil scope list", nil, false},
+		{"admin present alone", []string{auth.ScopeAdmin}, true},
+		{"admin present among other legitimate scopes", []string{"users:read", auth.ScopeAdmin, "organizations:write"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := auth.ValidateProvisionableScopes(tt.scopes)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateProvisionableScopes(%v) error = %v, wantErr %v", tt.scopes, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateProvisionableScopes_ErrorNamesAdmin(t *testing.T) {
+	err := auth.ValidateProvisionableScopes([]string{auth.ScopeAdmin})
+	if err == nil {
+		t.Fatal("ValidateProvisionableScopes([admin]) = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "admin") {
+		t.Errorf("ValidateProvisionableScopes error %q does not name %q, making it hard to debug", err.Error(), "admin")
 	}
 }
