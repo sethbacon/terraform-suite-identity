@@ -207,8 +207,16 @@ func (r *UserRepository) ListUsers(ctx context.Context, limit, offset int) ([]*m
 	return users, total, rows.Err()
 }
 
-// GetOrCreateUserFromOIDC gets or creates a user from OIDC authentication
-func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, email, name string) (*models.User, error) {
+// GetOrCreateUserFromOIDC gets or creates a user from OIDC authentication.
+//
+// emailVerified MUST carry the identity provider's `email_verified` signal for
+// the incoming login (see oidc.Provider.ExtractUserInfo). It gates the two paths
+// that establish a NEW email-to-identity binding: linking a pre-provisioned
+// account and creating a brand-new account. A returning user (matched by
+// oidc_sub) is unaffected. Refusing an unverified email closes the pre-
+// provisioned-account takeover path where an IdP lets a principal assert an
+// unverified email that matches an existing account.
+func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, email, name string, emailVerified bool) (*models.User, error) {
 	// Try to find existing user by OIDC sub
 	user, err := r.GetUserByOIDCSub(ctx, oidcSub)
 	if err != nil {
@@ -245,6 +253,11 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 		if emailUser.OIDCSub != nil && *emailUser.OIDCSub != oidcSub {
 			return nil, fmt.Errorf("oidc account linking refused: email %q is already linked to a different OIDC subject", email)
 		}
+		// Linking a pre-provisioned account to this identity establishes a new
+		// email->identity binding, so require a verified email.
+		if !emailVerified {
+			return nil, fmt.Errorf("oidc account linking refused: email %q is not verified by the identity provider", email)
+		}
 		// Link the OIDC identity to the pre-provisioned (or same-sub) account.
 		emailUser.OIDCSub = &oidcSub
 		emailUser.Name = name
@@ -252,6 +265,12 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 			return nil, err
 		}
 		return emailUser, nil
+	}
+
+	// Creating a brand-new account keyed on this email also establishes a new
+	// email->identity binding; require a verified email to prevent squatting.
+	if !emailVerified {
+		return nil, fmt.Errorf("oidc account creation refused: email %q is not verified by the identity provider", email)
 	}
 
 	// User doesn't exist, create new one
@@ -365,8 +384,8 @@ func (r *UserRepository) Search(ctx context.Context, query string, limit, offset
 }
 
 // GetOrCreateUserByOIDC is an alias for GetOrCreateUserFromOIDC
-func (r *UserRepository) GetOrCreateUserByOIDC(ctx context.Context, oidcSub, email, name string) (*models.User, error) {
-	return r.GetOrCreateUserFromOIDC(ctx, oidcSub, email, name)
+func (r *UserRepository) GetOrCreateUserByOIDC(ctx context.Context, oidcSub, email, name string, emailVerified bool) (*models.User, error) {
+	return r.GetOrCreateUserFromOIDC(ctx, oidcSub, email, name, emailVerified)
 }
 
 // GetUserWithOrgRoles retrieves a user with their per-organization role template information
