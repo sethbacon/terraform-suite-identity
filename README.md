@@ -137,13 +137,46 @@ tm := auth.NewTokenManager([]byte(secret), "terraform-registry")
 token, _ := tm.Generate(userID, email, scopes, 24*time.Hour)
 claims, _ := tm.Validate(token) // tries current then previous secret (rotation)
 
-// Issuer pinning — OFF by default (Validate accepts any issuer). In a coupled
-// suite that shares one signing secret, pin the trusted issuers so a shared
-// secret cannot be replayed from an untrusted minter:
-tm.SetAllowedIssuers([]string{"terraform-registry", "terraform-state-manager"})
-
 // API keys
 key, hash, prefix, _ := auth.GenerateAPIKey("tfr")
+```
+
+**`NewTokenManager`'s issuer pin and audience check are both OFF by default**
+(`Validate` accepts any issuer and skips the `aud` check unless you opt in via
+`SetAllowedIssuers`/`SetAudience`). That default is fine for a single
+standalone app, but is a real gap for a **coupled suite that shares one
+signing secret** — today that's `terraform-registry-backend` and
+`terraform-state-manager-backend` — because with the defaults left alone, a
+token minted by one app validates unchanged at the other.
+
+**If your app shares a secret with another app in the suite, use
+`NewCoupledTokenManager` instead of `NewTokenManager`.** It requires
+issuer/audience/allowedIssuers up front (returning an error rather than a
+misconfigured manager) and calls `SetAllowedIssuers`/`SetAudience` for you, so
+the secure configuration is the default path instead of two follow-up calls
+you have to remember:
+
+```go
+// RECOMMENDED for any app in the shared-secret coupled suite. secret is the
+// same secret every sibling app signs/validates with; audience is THIS app's
+// own identity; allowedIssuers is {self} plus the trusted sibling issuers.
+tm, err := auth.NewCoupledTokenManager(
+    []byte(secret),
+    "terraform-registry",                                        // this app's issuer
+    []string{"terraform-registry", "terraform-state-manager"},    // trusted issuers, incl. self
+    "terraform-registry",                                        // this app's audience
+)
+token, _ := tm.Generate(userID, email, scopes, 24*time.Hour)
+claims, _ := tm.Validate(token) // rejects tokens from untrusted issuers or the wrong audience
+```
+
+If you'd rather configure an existing `*TokenManager` manually (or need to
+change the pin/audience at runtime), the underlying calls are still available
+directly:
+
+```go
+tm.SetAllowedIssuers([]string{"terraform-registry", "terraform-state-manager"})
+tm.SetAudience("terraform-registry")
 ```
 
 **Revocation is entirely host-enforced.** The module provides no revocation of its own —
