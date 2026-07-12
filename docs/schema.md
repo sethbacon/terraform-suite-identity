@@ -122,8 +122,9 @@ new sequential pair instead.
 | `000001` | `000001_identity_schema` | Creates the full base schema: `organizations`, `users`, `role_templates`, `organization_members`, `api_keys` (+ prefix index), `audit_logs` (+ created-at/user-id indexes), `oidc_config`, `system_settings`, `revoked_tokens` (+ expires-at index). Seeds the four system role templates (`admin`, `analyst`, `viewer`, `operator`), the `default` organization, and `setup_completed=false`. |
 | `000002` | `000002_org_quota_and_identity_core_roles` | Adds `org_quotas` (per-org `max_members` / `max_api_keys`). Reconciles the seeded role templates to **identity-core scopes only** so the library stays app-agnostic — `admin` keeps the wildcard `admin`, and `operator`/`analyst`/`viewer` are trimmed to identity scopes (`users:read`, `organizations:read`, `api_keys:*`, `audit:read`, `settings:read`, etc.). |
 | `000003` | `000003_registry_canonical_identity` | Reconciles the schema to the suite's canonical identity shape. Adds per-org IdP binding (`organizations.idp_type`, `idp_name`); converts `role_templates.scopes` and `api_keys.scopes` from `TEXT[]` to `JSONB`; adds `api_keys.expiry_notification_sent_at`; and widens `oidc_config` to multi-provider (`name`, `provider_type`, `extra_config`, `created_by`, `updated_by`) with `scopes` as a JSON array. Safe in place because these tables hold only seed data until an app cuts over (the `USING` clauses convert seeded values losslessly). |
+| `000004` | `000004_drop_vestigial_is_active` | Drops `is_active` from `organizations`, `users`, and `api_keys`. An audit confirmed no Go code (models or store, in this library or either consuming app) ever read or wrote these columns — see [README.md](../README.md#notable-modelling-choices) — so the column was a silent no-op rather than a working kill-switch. `oidc_config.is_active` is untouched; it is genuinely used. |
 
-The current version is `000003`. Each migration has a matching `.down.sql` that
+The current version is `000004`. Each migration has a matching `.down.sql` that
 fully reverses it (migration 1's down drops every table and the schema), **except
 `000003`**: its `TEXT[]`↔`JSONB` column-type round-trip is best-effort (the
 migration's own `.down.sql` self-labels it as such) rather than a guaranteed exact
@@ -132,6 +133,15 @@ in-place `ALTER COLUMN … TYPE` rather than a purely additive change — safe h
 only because those columns held nothing but seed data at the time it ran (see the
 table above); it is not a precedent for future migrations, which must stay
 additive per [CONTRIBUTING.md](../CONTRIBUTING.md#database-migrations).
+
+`000004` is a second, narrower documented exception to that additive rule: it is a
+`DROP COLUMN`, not an additive change, but it is safe for the same reason `000003`
+was safe in place — the affected columns held no meaningful data (here, because
+nothing ever wrote anything but the schema default). Unlike `000003`, `000004`'s
+`.down.sql` **is** an exact reversal (`ADD COLUMN … DEFAULT true` restores the
+original shape precisely, since no row could ever have held a non-default value).
+This still is not a precedent for future migrations to drop columns without the
+same level of verification across every consumer.
 
 ### Applying and inspecting
 

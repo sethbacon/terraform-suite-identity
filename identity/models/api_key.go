@@ -6,7 +6,8 @@ import "time"
 //
 // A key is usable while it exists and has not passed ExpiresAt. Revocation is a
 // hard delete (there is no soft-active flag); expiry warnings are tracked via
-// ExpiryNotificationSentAt.
+// ExpiryNotificationSentAt. (The api_keys.is_active column has been removed —
+// see migration 000004 — after an audit found it was never read or written.)
 type APIKey struct {
 	ID                       string     `json:"id"`
 	UserID                   *string    `json:"user_id,omitempty"`
