@@ -54,19 +54,50 @@ type DiscoveryClient struct {
 // "https://tfstate.example.com"). A non-positive pollInterval uses the default.
 //
 // The manifest fetch carries no request auth or signature — only transport
-// integrity protects it from tampering. A plaintext "http://" siblingURL is
-// accepted here (only a warning is logged) so this constructor remains usable
-// for local/dev setups where the sibling is reached over plaintext HTTP (e.g.
-// loopback). For production use, prefer NewSecureDiscoveryClient, which
-// refuses to construct a client for a plaintext sibling URL.
-func NewDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration) *DiscoveryClient {
+// integrity protects it from tampering. NewDiscoveryClient therefore fails
+// closed: it returns a non-nil error (and a nil *DiscoveryClient) when
+// siblingURL uses a plaintext "http://" scheme, rather than constructing a
+// client for it. Without this, a network-position attacker on that plaintext
+// path could inject an arbitrary spoofed Manifest — NegotiateCompat's only
+// checks (app id, schema major) are trivially satisfiable by an attacker who
+// knows the target app id, so transport security is the only real defense.
+//
+// For local/dev setups where the sibling is only reachable over plaintext
+// HTTP (e.g. loopback), use NewInsecureDiscoveryClient instead — its name is
+// the explicit, deliberate opt-out of this check. Never pass an
+// operator-configured production siblingURL to it.
+func NewDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration) (*DiscoveryClient, error) {
+	normalized := strings.TrimRight(siblingURL, "/")
+	if strings.HasPrefix(strings.ToLower(normalized), "http://") {
+		return nil, fmt.Errorf("insecure sibling URL: %q uses plaintext HTTP; suite discovery requires HTTPS to protect the manifest fetch from tampering — use NewInsecureDiscoveryClient only if you understand and accept this risk (e.g. local development)", normalized)
+	}
+	return newDiscoveryClient(normalized, self, pollInterval), nil
+}
+
+// NewInsecureDiscoveryClient builds a client exactly like NewDiscoveryClient,
+// but explicitly opts out of the HTTPS requirement: a plaintext "http://"
+// siblingURL (after the same trailing-slash normalization NewDiscoveryClient
+// applies) is accepted — only a warning is logged — rather than rejected.
+//
+// The function's name IS the opt-out: use it only for local/dev setups where
+// the sibling is reached over plaintext HTTP (e.g. loopback). Passing it an
+// operator-configured production siblingURL reintroduces the spoofing risk
+// documented on NewDiscoveryClient.
+func NewInsecureDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration) *DiscoveryClient {
+	normalized := strings.TrimRight(siblingURL, "/")
+	if strings.HasPrefix(strings.ToLower(normalized), "http://") {
+		slog.Warn("suite discovery: sibling URL uses plaintext HTTP; manifest polling is exposed to interception and tampering — use HTTPS",
+			"sibling_url", normalized)
+	}
+	return newDiscoveryClient(normalized, self, pollInterval)
+}
+
+// newDiscoveryClient builds the client itself. siblingURL must already be
+// normalized (trailing slash trimmed) — shared by NewDiscoveryClient and
+// NewInsecureDiscoveryClient after each applies its own scheme check.
+func newDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration) *DiscoveryClient {
 	if pollInterval <= 0 {
 		pollInterval = defaultPollInterval
-	}
-	siblingURL = strings.TrimRight(siblingURL, "/")
-	if strings.HasPrefix(strings.ToLower(siblingURL), "http://") {
-		slog.Warn("suite discovery: sibling URL uses plaintext HTTP; manifest polling is exposed to interception and tampering — use HTTPS",
-			"sibling_url", siblingURL)
 	}
 	return &DiscoveryClient{
 		siblingURL:   siblingURL,
@@ -85,27 +116,6 @@ func NewDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Dura
 		},
 		state: StateUnknown,
 	}
-}
-
-// NewSecureDiscoveryClient builds a client exactly like NewDiscoveryClient, but
-// fails closed on an insecure sibling: it returns an error instead of
-// constructing a client when siblingURL (after the same trailing-slash
-// normalization NewDiscoveryClient applies) uses a plaintext "http://" scheme.
-//
-// The manifest endpoint is unauthenticated and unsigned, so a plaintext fetch
-// lets any network-position attacker inject an arbitrary spoofed Manifest;
-// NegotiateCompat's checks (app id, schema major) are trivially satisfiable by
-// an attacker who knows the target app id, so transport security is the only
-// real defense. This is the preferred constructor for production use.
-//
-// NewDiscoveryClient remains available, unchanged, for local/dev use with a
-// plaintext sibling — it still only warns in that case rather than rejecting.
-func NewSecureDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration) (*DiscoveryClient, error) {
-	normalized := strings.TrimRight(siblingURL, "/")
-	if strings.HasPrefix(strings.ToLower(normalized), "http://") {
-		return nil, fmt.Errorf("insecure sibling URL: %q uses plaintext HTTP; suite discovery requires HTTPS to protect the manifest fetch from tampering — use NewDiscoveryClient directly only if you understand and accept this risk (e.g. local development)", normalized)
-	}
-	return NewDiscoveryClient(siblingURL, self, pollInterval), nil
 }
 
 // Snapshot returns the current state and a deep COPY of the last-good sibling

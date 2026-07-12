@@ -130,9 +130,21 @@ negotiates compatibility, and caches the last good result. **Construct it only
 when an operator has configured a sibling URL** — absence of a URL means
 "standalone", not "unreachable".
 
+The manifest fetch carries no request auth or signature, so `NewDiscoveryClient`
+fails closed on a plaintext `http://` siblingURL (returns an error instead of a
+client) — only transport security defends the fetch from a network-position
+attacker injecting a spoofed manifest. Use `NewInsecureDiscoveryClient` instead
+only for local/dev setups where the sibling is reached over plaintext HTTP
+(e.g. loopback); its name is the deliberate opt-out.
+
 ```go
 self := suite.Manifest{SchemaVersion: suite.SchemaVersionV1, App: "terraform-registry", /* … */}
-d := suite.NewDiscoveryClient("https://tfstate.example.com", self, 0) // 0 → default interval
+d, err := suite.NewDiscoveryClient("https://tfstate.example.com", self, 0) // 0 → default interval
+if err != nil {
+    // siblingURL used plaintext http:// — NewDiscoveryClient fails closed. Fix the
+    // config, or use suite.NewInsecureDiscoveryClient for a local/dev loopback sibling.
+    log.Fatal(err)
+}
 go d.Start(ctx)                  // poll loop until ctx is cancelled
 state, manifest := d.Snapshot()  // cheap; safe per-request
 ```
