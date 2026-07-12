@@ -269,9 +269,11 @@ func (p *Provider) ExtractGroups(idToken *oidc.IDToken, claimName string) []stri
 			}
 		}
 		return groups
-	case []string:
-		return v
 	default:
+		// idToken.Claims unmarshals JSON via encoding/json, which always decodes
+		// a JSON array into []interface{} (never []string) and any non-array
+		// value into a non-slice type — so this covers both "not an array" and
+		// any other unexpected shape.
 		return nil
 	}
 }
