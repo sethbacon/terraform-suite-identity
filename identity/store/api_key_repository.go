@@ -120,14 +120,24 @@ func (r *APIKeyRepository) CreateAPIKey(ctx context.Context, apiKey *models.APIK
 	return err
 }
 
-// GetAPIKeyByHash retrieves an API key by its hash (for authentication).
+// GetAPIKeyByHash retrieves an API key by an EXACT match on its stored
+// key_hash column.
 //
-// Returns (nil, nil) — not an error — when no key matches keyHash. This is NOT
-// the real authentication entry point (see GetAPIKeysByPrefix, used by the
-// prefix-then-bcrypt-compare auth path); callers of THIS function specifically
-// must check `key == nil` before dereferencing, since `if err != nil { return
-// err }; use(key.UserID)` panics with a nil-pointer dereference on any miss
-// (e.g. a probed/garbage hash) instead of cleanly denying the request.
+// key_hash holds a salted bcrypt digest, which is non-deterministic: hashing
+// the same plaintext key twice produces two different strings. Because of
+// that, this method can only ever find a row whose key_hash was itself
+// round-tripped verbatim out of the database — it can NEVER match a hash
+// freshly computed from an incoming plaintext API key, so it is NOT usable as
+// an authentication lookup despite what its former doc comment claimed. It
+// exists for exact-hash administrative/dedup lookups only. The real
+// authentication path is GetAPIKeysByPrefix (indexed prefix candidates)
+// followed by auth.ValidateAPIKey (bcrypt compare) against each candidate.
+//
+// Returns (nil, nil) — not an error — when no key matches keyHash. Callers of
+// THIS function specifically must check `key == nil` before dereferencing,
+// since `if err != nil { return err }; use(key.UserID)` panics with a
+// nil-pointer dereference on any miss (e.g. a probed/garbage hash) instead of
+// cleanly denying the request.
 func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) (*models.APIKey, error) {
 	query := `
 		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
@@ -278,13 +288,24 @@ func (r *APIKeyRepository) DeleteExpiredKeys(ctx context.Context) error {
 	return err
 }
 
-// GetAPIKeysByPrefix retrieves API keys matching a prefix (for authentication)
+// GetAPIKeysByPrefix retrieves the non-expired API keys matching a prefix
+// (for authentication).
+//
+// This is the real authentication lookup: callers narrow the candidate set by
+// the indexed key_prefix, then bcrypt-compare the presented key against each
+// returned candidate's key_hash (see auth.ValidateAPIKey). The query itself
+// now excludes expired rows (expires_at IS NULL OR expires_at > NOW()) so
+// expiry enforcement lives at the shared-library level instead of depending
+// on every caller remembering to re-check ExpiresAt after the fact. Any
+// caller that additionally checks ExpiresAt on the returned keys is now
+// performing a harmless redundant second check.
 func (r *APIKeyRepository) GetAPIKeysByPrefix(ctx context.Context, keyPrefix string) ([]*models.APIKey, error) {
 	query := `
 		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
 		       expires_at, last_used_at, expiry_notification_sent_at, created_at
 		FROM api_keys
 		WHERE key_prefix = $1
+		  AND (expires_at IS NULL OR expires_at > NOW())
 		ORDER BY created_at DESC
 	`
 

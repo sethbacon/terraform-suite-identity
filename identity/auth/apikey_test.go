@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -76,6 +77,48 @@ func TestValidateAPIKey_EmptyKey(t *testing.T) {
 	}
 	if ValidateAPIKey("", hash) {
 		t.Error("expected an empty key to fail validation")
+	}
+}
+
+// TestMaxAPIKeyPrefixLength_KeepsRandomPartIntact asserts, by construction,
+// that MaxAPIKeyPrefixLength keeps fullKey's fixed portion ("<prefix>_")
+// plus the 43-byte base64url-encoded random part safely under bcrypt's
+// 72-byte input limit. This is the arithmetic invariant the whole fix rests
+// on: it doesn't need to trigger real bcrypt truncation to prove that the
+// cap prevents it.
+func TestMaxAPIKeyPrefixLength_KeepsRandomPartIntact(t *testing.T) {
+	const bcryptMaxInputBytes = 72
+	randomPartLen := base64.RawURLEncoding.EncodedLen(APIKeyLength) // 43 for 32 random bytes
+
+	maxFullKeyLen := MaxAPIKeyPrefixLength + len("_") + randomPartLen
+	if maxFullKeyLen >= bcryptMaxInputBytes {
+		t.Fatalf("MaxAPIKeyPrefixLength (%d) allows a fullKey of %d bytes, which is not safely under bcrypt's %d-byte limit",
+			MaxAPIKeyPrefixLength, maxFullKeyLen, bcryptMaxInputBytes)
+	}
+}
+
+func TestGenerateAPIKey_PrefixAtMaxLength_Succeeds(t *testing.T) {
+	prefix := strings.Repeat("p", MaxAPIKeyPrefixLength)
+	key, hash, _, err := GenerateAPIKey(prefix)
+	if err != nil {
+		t.Fatalf("expected a prefix of exactly MaxAPIKeyPrefixLength to succeed, got error: %v", err)
+	}
+	if !strings.HasPrefix(key, prefix+"_") {
+		t.Errorf("expected key to start with %q, got %q", prefix+"_", key)
+	}
+	if !ValidateAPIKey(key, hash) {
+		t.Error("expected the generated key to validate against its hash")
+	}
+}
+
+func TestGenerateAPIKey_PrefixOverMaxLength_Fails(t *testing.T) {
+	prefix := strings.Repeat("p", MaxAPIKeyPrefixLength+1)
+	key, hash, displayPrefix, err := GenerateAPIKey(prefix)
+	if err == nil {
+		t.Fatal("expected an error for a prefix one byte over MaxAPIKeyPrefixLength, got nil")
+	}
+	if key != "" || hash != "" || displayPrefix != "" {
+		t.Errorf("expected empty return values on error, got key=%q hash=%q prefix=%q", key, hash, displayPrefix)
 	}
 }
 

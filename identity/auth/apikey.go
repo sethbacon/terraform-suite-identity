@@ -20,12 +20,42 @@ const (
 
 	// BcryptCost is the cost factor for bcrypt hashing of API keys.
 	BcryptCost = 12
+
+	// MaxAPIKeyPrefixLength is the maximum allowed length, in bytes, of the
+	// caller-supplied prefix passed to GenerateAPIKey.
+	//
+	// bcrypt only hashes the first 72 bytes of its input, and
+	// GenerateAPIKey builds fullKey as "<prefix>_<randomPart>" — the random,
+	// unpredictable part is at the END of the string. If the fixed prefix
+	// portion ("<prefix>_") grows too large, it starts pushing bytes of
+	// randomPart out of bcrypt's 72-byte window, silently truncating the
+	// entropy that makes each key unique; at prefix lengths >= 72 the random
+	// part is truncated away entirely, so bcrypt hashes an identical input
+	// for every key sharing that prefix (any such key would then validate
+	// against any other's stored hash).
+	//
+	// randomPart is a fixed 43-byte base64url encoding of APIKeyLength (32)
+	// random bytes. Capping the prefix at 20 bytes keeps the fixed portion
+	// ("<prefix>_") to at most 21 bytes, so fullKey's total length tops out
+	// at 21+43 = 64 bytes — safely under bcrypt's 72-byte limit with 8 bytes
+	// of headroom — meaning the full random part is always hashed intact for
+	// any caller respecting this cap.
+	MaxAPIKeyPrefixLength = 20
 )
 
 // GenerateAPIKey creates a new random API key with the given prefix.
 // It returns the full key (to show the caller once), the bcrypt hash (to
 // store), and the display prefix (safe to persist for identification).
+//
+// prefix must be at most MaxAPIKeyPrefixLength bytes; longer prefixes are
+// rejected before any random bytes are generated, to avoid bcrypt's 72-byte
+// input truncation silently weakening (or, for sufficiently long prefixes,
+// completely eliminating) the key's random entropy.
 func GenerateAPIKey(prefix string) (key string, hash string, displayPrefix string, err error) {
+	if len(prefix) > MaxAPIKeyPrefixLength {
+		return "", "", "", fmt.Errorf("api key prefix %q is %d bytes, exceeds MaxAPIKeyPrefixLength (%d)", prefix, len(prefix), MaxAPIKeyPrefixLength)
+	}
+
 	randomBytes := make([]byte, APIKeyLength)
 	if _, err = rand.Read(randomBytes); err != nil {
 		return "", "", "", fmt.Errorf("failed to generate random bytes: %w", err)
