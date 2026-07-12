@@ -276,13 +276,17 @@ func (p *Provider) ExtractGroups(idToken *oidc.IDToken, claimName string) []stri
 	}
 }
 
-// ExtractUserInfo extracts the subject, email and name from the ID token.
-// The email identifier is resolved from the standard `email` claim, falling
-// back to the Azure AD / Entra ID variants (preferred_username, upn,
-// unique_name) which carry the UPN when `email` is not configured as an
-// optional claim. If the name claim is empty it falls back to the resolved
-// email.
-func (p *Provider) ExtractUserInfo(idToken *oidc.IDToken) (sub, email, name string, err error) {
+// ExtractUserInfo extracts the subject, email, name, and email-verified signal
+// from the ID token. The email identifier is resolved from the standard `email`
+// claim; only that claim carries the `email_verified` signal, so an email
+// resolved from the Azure AD / Entra UPN-family fallbacks (preferred_username,
+// upn, unique_name) is reported as unverified. If the name claim is empty it
+// falls back to the resolved email.
+//
+// Callers MUST treat emailVerified as a trust signal for account linking: an
+// unverified email must not be used to link or create an account keyed on email
+// (see store.GetOrCreateUserFromOIDC).
+func (p *Provider) ExtractUserInfo(idToken *oidc.IDToken) (sub, email, name string, emailVerified bool, err error) {
 	var claims struct {
 		Sub               string `json:"sub"`
 		Email             string `json:"email"`
@@ -293,23 +297,27 @@ func (p *Provider) ExtractUserInfo(idToken *oidc.IDToken) (sub, email, name stri
 	}
 
 	if err := idToken.Claims(&claims); err != nil {
-		return "", "", "", fmt.Errorf("failed to parse ID token claims: %w", err)
+		return "", "", "", false, fmt.Errorf("failed to parse ID token claims: %w", err)
 	}
 
 	if claims.Sub == "" {
-		return "", "", "", fmt.Errorf("ID token missing 'sub' claim")
+		return "", "", "", false, fmt.Errorf("ID token missing 'sub' claim")
 	}
 
-	// Resolve email: standard claim first, then Azure AD UPN variants.
+	// Resolve email: the standard `email` claim carries the email_verified signal.
+	// The UPN-family fallbacks are not verified-email claims, so an email taken
+	// from them is left unverified.
 	resolved := claims.Email
-	if resolved == "" {
+	if resolved != "" {
+		emailVerified = boolClaim(idToken, "email_verified")
+	} else {
 		resolved = claims.PreferredUsername
-	}
-	if resolved == "" {
-		resolved = claims.UPN
-	}
-	if resolved == "" {
-		resolved = claims.UniqueName
+		if resolved == "" {
+			resolved = claims.UPN
+		}
+		if resolved == "" {
+			resolved = claims.UniqueName
+		}
 	}
 	if resolved == "" {
 		// Log the available claim keys so an administrator can diagnose which
@@ -323,12 +331,37 @@ func (p *Provider) ExtractUserInfo(idToken *oidc.IDToken) (sub, email, name stri
 			slog.Error("oidc: no email identifier found in ID token",
 				"available_claims", keys)
 		}
-		return "", "", "", fmt.Errorf("ID token missing email identifier (checked: email, preferred_username, upn, unique_name)")
+		return "", "", "", false, fmt.Errorf("ID token missing email identifier (checked: email, preferred_username, upn, unique_name)")
 	}
 
 	if claims.Name == "" {
 		claims.Name = resolved
 	}
 
-	return claims.Sub, resolved, claims.Name, nil
+	return claims.Sub, resolved, claims.Name, emailVerified, nil
+}
+
+// boolClaim reads a claim leniently as a boolean. Per OIDC core `email_verified`
+// is a JSON boolean, but some providers emit the string "true"/"false"; reading
+// it from the raw claims (rather than a typed field) means a type quirk cannot
+// break parsing of the surrounding claims. Absent or unrecognized values are
+// treated as false.
+func boolClaim(idToken *oidc.IDToken, name string) bool {
+	var m map[string]json.RawMessage
+	if err := idToken.Claims(&m); err != nil {
+		return false
+	}
+	raw, ok := m[name]
+	if !ok {
+		return false
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return b
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.EqualFold(s, "true")
+	}
+	return false
 }
