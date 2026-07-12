@@ -32,9 +32,40 @@ type UserWithOrgRoles struct {
 }
 
 // GetAllowedScopes returns all unique scopes across all organization memberships.
+//
+// WARNING: This returns a GLOBAL set unioned across every organization membership — it is
+// suite-wide by design and carries NO per-organization qualifier. Do not use this alone to
+// authorize an org-scoped action: a caller must independently verify the user's
+// membership/role in the SPECIFIC target organization before trusting these scopes for that
+// organization, or use GetScopesForOrg instead, which resolves scopes for exactly one target
+// organization.
 func (u *UserWithOrgRoles) GetAllowedScopes() []string {
 	scopeSet := make(map[string]bool)
 	for _, m := range u.Memberships {
+		for _, scope := range m.RoleTemplateScopes {
+			scopeSet[scope] = true
+		}
+	}
+	scopes := make([]string, 0, len(scopeSet))
+	for scope := range scopeSet {
+		scopes = append(scopes, scope)
+	}
+	return scopes
+}
+
+// GetScopesForOrg returns the scopes granted to the user by their role template within a
+// SINGLE target organization (orgID), rather than unioning across every organization
+// membership the user has (see the warning on GetAllowedScopes). Memberships holds at most
+// one entry per organization, so at most one membership's RoleTemplateScopes is returned,
+// deduplicated. If the user has no membership matching orgID, an empty (non-nil) slice is
+// returned, matching GetAllowedScopes' convention of returning make([]string, 0, ...) rather
+// than nil.
+func (u *UserWithOrgRoles) GetScopesForOrg(orgID string) []string {
+	scopeSet := make(map[string]bool)
+	for _, m := range u.Memberships {
+		if m.OrganizationID != orgID {
+			continue
+		}
 		for _, scope := range m.RoleTemplateScopes {
 			scopeSet[scope] = true
 		}

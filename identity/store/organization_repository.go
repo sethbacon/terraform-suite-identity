@@ -655,6 +655,13 @@ func (r *OrganizationRepository) GetUserMemberships(ctx context.Context, userID 
 
 // GetUserCombinedScopes retrieves all unique scopes for a user across all their organization memberships.
 // This is used for JWT authentication where we need to know what the user can do globally.
+//
+// WARNING: This returns a GLOBAL set unioned across every organization membership — it is
+// suite-wide by design and carries NO per-organization qualifier. Do not use this alone to
+// authorize an org-scoped action: a caller must independently verify the user's
+// membership/role in the SPECIFIC target organization before trusting these scopes for that
+// organization, or use GetUserScopesForOrg instead, which resolves scopes for exactly one
+// target organization.
 func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, userID string) ([]string, error) {
 	memberships, err := r.GetUserMemberships(ctx, userID)
 	if err != nil {
@@ -670,6 +677,43 @@ func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, user
 	}
 
 	// Convert map to slice
+	scopes := make([]string, 0, len(scopeMap))
+	for scope := range scopeMap {
+		scopes = append(scopes, scope)
+	}
+
+	return scopes, nil
+}
+
+// GetUserScopesForOrg retrieves the scopes granted to a user by their role template within a
+// SINGLE target organization (orgID), rather than unioning across every organization the user
+// belongs to. The organization_members table enforces UNIQUE(organization_id, user_id), so a
+// user has at most one membership row — and therefore at most one role template — per
+// organization; this returns that membership's deduplicated RoleTemplateScopes.
+//
+// If the user has no membership in orgID, this returns an empty (non-nil) slice and a nil
+// error — mirroring GetMember/GetMemberWithRole's "no rows -> empty result, not error"
+// convention in this file, rather than returning sql.ErrNoRows.
+//
+// Use this (or models.UserWithOrgRoles.GetScopesForOrg) whenever an authorization decision is
+// scoped to a specific organization. See the warning on GetUserCombinedScopes for why that
+// global accessor is unsafe for that purpose.
+func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID, orgID string) ([]string, error) {
+	member, err := r.GetMemberWithRole(ctx, orgID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if member == nil {
+		return []string{}, nil
+	}
+
+	// Deduplicate defensively, mirroring GetUserCombinedScopes, in case the role template's
+	// scopes ever contain duplicates.
+	scopeMap := make(map[string]bool, len(member.RoleTemplateScopes))
+	for _, scope := range member.RoleTemplateScopes {
+		scopeMap[scope] = true
+	}
+
 	scopes := make([]string, 0, len(scopeMap))
 	for scope := range scopeMap {
 		scopes = append(scopes, scope)

@@ -735,6 +735,116 @@ func TestGetUserCombinedScopes_UnionsAcrossDistinctOrganizations(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// GetUserScopesForOrg
+// ---------------------------------------------------------------------------
+
+func TestGetUserScopesForOrg_Found(t *testing.T) {
+	repo, mock := newOrgRepo(t)
+	mock.ExpectQuery("SELECT.*FROM organization_members").
+		WithArgs("org-1", "user-1").
+		WillReturnRows(sqlmock.NewRows(orgMemberWithRoleRepoCols).AddRow(
+			"org-1", "user-1", nil, time.Now(),
+			"Alice", "alice@example.com",
+			"admin", "Admin", []byte(`["modules:read","modules:write"]`),
+		))
+
+	scopes, err := repo.GetUserScopesForOrg(context.Background(), "user-1", "org-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := make(map[string]bool, len(scopes))
+	for _, s := range scopes {
+		got[s] = true
+	}
+	want := []string{"modules:read", "modules:write"}
+	if len(got) != len(want) {
+		t.Fatalf("scopes = %v, want exactly %v", scopes, want)
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("missing expected scope %q in result %v", w, scopes)
+		}
+	}
+}
+
+func TestGetUserScopesForOrg_NotFound(t *testing.T) {
+	repo, mock := newOrgRepo(t)
+	mock.ExpectQuery("SELECT.*FROM organization_members").
+		WithArgs("org-1", "user-1").
+		WillReturnRows(sqlmock.NewRows(orgMemberWithRoleRepoCols))
+
+	scopes, err := repo.GetUserScopesForOrg(context.Background(), "user-1", "org-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(scopes) != 0 {
+		t.Errorf("scopes = %v, want empty", scopes)
+	}
+}
+
+func TestGetUserScopesForOrg_DBError(t *testing.T) {
+	repo, mock := newOrgRepo(t)
+	mock.ExpectQuery("SELECT.*FROM organization_members").
+		WithArgs("org-1", "user-1").
+		WillReturnError(errDB)
+
+	_, err := repo.GetUserScopesForOrg(context.Background(), "user-1", "org-1")
+	if err == nil {
+		t.Error("expected error")
+	}
+}
+
+func TestGetUserScopesForOrg_ExcludesOtherOrgScopes(t *testing.T) {
+	// This is the key regression test for issue #54: GetUserCombinedScopes unions scopes
+	// across ALL of a user's org memberships into one flat, org-less set. A user who is
+	// admin in org-1 and viewer in org-2 must NOT have org-2's (or org-1's) scopes leak
+	// into a lookup scoped to the OTHER organization. GetUserScopesForOrg must resolve
+	// scopes for exactly one target organization at a time.
+	repo, mock := newOrgRepo(t)
+	mock.ExpectQuery("SELECT.*FROM organization_members").
+		WithArgs("org-1", "user-1").
+		WillReturnRows(sqlmock.NewRows(orgMemberWithRoleRepoCols).AddRow(
+			"org-1", "user-1", nil, time.Now(),
+			"Alice", "alice@example.com",
+			"admin", "Admin", []byte(`["org1:admin","shared:read"]`),
+		))
+	mock.ExpectQuery("SELECT.*FROM organization_members").
+		WithArgs("org-2", "user-1").
+		WillReturnRows(sqlmock.NewRows(orgMemberWithRoleRepoCols).AddRow(
+			"org-2", "user-1", nil, time.Now(),
+			"Alice", "alice@example.com",
+			"viewer", "Viewer", []byte(`["org2:viewer","shared:read"]`),
+		))
+
+	org1Scopes, err := repo.GetUserScopesForOrg(context.Background(), "user-1", "org-1")
+	if err != nil {
+		t.Fatalf("unexpected error for org-1: %v", err)
+	}
+	for _, s := range org1Scopes {
+		if s == "org2:viewer" {
+			t.Fatalf("org-1 scopes leaked org-2's scope: %v", org1Scopes)
+		}
+	}
+	if len(org1Scopes) != 2 {
+		t.Fatalf("org-1 scopes = %v, want exactly 2 (org1:admin, shared:read)", org1Scopes)
+	}
+
+	org2Scopes, err := repo.GetUserScopesForOrg(context.Background(), "user-1", "org-2")
+	if err != nil {
+		t.Fatalf("unexpected error for org-2: %v", err)
+	}
+	for _, s := range org2Scopes {
+		if s == "org1:admin" {
+			t.Fatalf("org-2 scopes leaked org-1's scope: %v", org2Scopes)
+		}
+	}
+	if len(org2Scopes) != 2 {
+		t.Fatalf("org-2 scopes = %v, want exactly 2 (org2:viewer, shared:read)", org2Scopes)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // GetDefaultOrganization cache hit path
 // ---------------------------------------------------------------------------
 
