@@ -22,6 +22,71 @@ func NewAPIKeyRepository(db *sql.DB) *APIKeyRepository {
 	return &APIKeyRepository{db: db}
 }
 
+// rowScanner abstracts *sql.Row and *sql.Rows, both of which implement Scan,
+// so a single-row lookup and a multi-row list can share one scan function.
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+// scanAPIKey scans the standard 12-column api_keys projection (id, user_id,
+// organization_id, name, description, key_hash, key_prefix, scopes,
+// expires_at, last_used_at, expiry_notification_sent_at, created_at) shared by
+// GetAPIKeyByHash, GetAPIKeyByID, and GetAPIKeysByPrefix, including the
+// scopes JSONB unmarshal.
+func scanAPIKey(row rowScanner) (*models.APIKey, error) {
+	apiKey := &models.APIKey{}
+	var scopesJSON []byte
+	if err := row.Scan(
+		&apiKey.ID,
+		&apiKey.UserID,
+		&apiKey.OrganizationID,
+		&apiKey.Name,
+		&apiKey.Description,
+		&apiKey.KeyHash,
+		&apiKey.KeyPrefix,
+		&scopesJSON,
+		&apiKey.ExpiresAt,
+		&apiKey.LastUsedAt,
+		&apiKey.ExpiryNotificationSentAt,
+		&apiKey.CreatedAt,
+	); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(scopesJSON, &apiKey.Scopes); err != nil {
+		return nil, err
+	}
+	return apiKey, nil
+}
+
+// scanAPIKeyWithUserName scans the same projection as scanAPIKey plus a
+// joined u.name column, shared by ListAPIKeysByUser and
+// ListAPIKeysByOrganization.
+func scanAPIKeyWithUserName(rows *sql.Rows) (*models.APIKey, error) {
+	apiKey := &models.APIKey{}
+	var scopesJSON []byte
+	if err := rows.Scan(
+		&apiKey.ID,
+		&apiKey.UserID,
+		&apiKey.OrganizationID,
+		&apiKey.Name,
+		&apiKey.Description,
+		&apiKey.KeyHash,
+		&apiKey.KeyPrefix,
+		&scopesJSON,
+		&apiKey.ExpiresAt,
+		&apiKey.LastUsedAt,
+		&apiKey.ExpiryNotificationSentAt,
+		&apiKey.CreatedAt,
+		&apiKey.UserName,
+	); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(scopesJSON, &apiKey.Scopes); err != nil {
+		return nil, err
+	}
+	return apiKey, nil
+}
+
 // CreateAPIKey creates a new API key
 func (r *APIKeyRepository) CreateAPIKey(ctx context.Context, apiKey *models.APIKey) error {
 	apiKey.ID = uuid.New().String()
@@ -115,38 +180,13 @@ func (r *APIKeyRepository) GetAPIKeyByID(ctx context.Context, keyID string) (*mo
 		WHERE id = $1
 	`
 
-	apiKey := &models.APIKey{}
-	var scopesJSON []byte
-
-	err := r.db.QueryRowContext(ctx, query, keyID).Scan(
-		&apiKey.ID,
-		&apiKey.UserID,
-		&apiKey.OrganizationID,
-		&apiKey.Name,
-		&apiKey.Description,
-		&apiKey.KeyHash,
-		&apiKey.KeyPrefix,
-		&scopesJSON,
-		&apiKey.ExpiresAt,
-		&apiKey.LastUsedAt,
-		&apiKey.ExpiryNotificationSentAt,
-		&apiKey.CreatedAt,
-	)
-
+	apiKey, err := scanAPIKey(r.db.QueryRowContext(ctx, query, keyID))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-
 	if err != nil {
 		return nil, err
 	}
-
-	// Unmarshal scopes from JSONB
-	err = json.Unmarshal(scopesJSON, &apiKey.Scopes)
-	if err != nil {
-		return nil, err
-	}
-
 	return apiKey, nil
 }
 
@@ -169,34 +209,10 @@ func (r *APIKeyRepository) ListAPIKeysByUser(ctx context.Context, userID string)
 
 	apiKeys := make([]*models.APIKey, 0)
 	for rows.Next() {
-		apiKey := &models.APIKey{}
-		var scopesJSON []byte
-
-		err := rows.Scan(
-			&apiKey.ID,
-			&apiKey.UserID,
-			&apiKey.OrganizationID,
-			&apiKey.Name,
-			&apiKey.Description,
-			&apiKey.KeyHash,
-			&apiKey.KeyPrefix,
-			&scopesJSON,
-			&apiKey.ExpiresAt,
-			&apiKey.LastUsedAt,
-			&apiKey.ExpiryNotificationSentAt,
-			&apiKey.CreatedAt,
-			&apiKey.UserName,
-		)
+		apiKey, err := scanAPIKeyWithUserName(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		// Unmarshal scopes from JSONB
-		err = json.Unmarshal(scopesJSON, &apiKey.Scopes)
-		if err != nil {
-			return nil, err
-		}
-
 		apiKeys = append(apiKeys, apiKey)
 	}
 
@@ -222,34 +238,10 @@ func (r *APIKeyRepository) ListAPIKeysByOrganization(ctx context.Context, orgID 
 
 	apiKeys := make([]*models.APIKey, 0)
 	for rows.Next() {
-		apiKey := &models.APIKey{}
-		var scopesJSON []byte
-
-		err := rows.Scan(
-			&apiKey.ID,
-			&apiKey.UserID,
-			&apiKey.OrganizationID,
-			&apiKey.Name,
-			&apiKey.Description,
-			&apiKey.KeyHash,
-			&apiKey.KeyPrefix,
-			&scopesJSON,
-			&apiKey.ExpiresAt,
-			&apiKey.LastUsedAt,
-			&apiKey.ExpiryNotificationSentAt,
-			&apiKey.CreatedAt,
-			&apiKey.UserName,
-		)
+		apiKey, err := scanAPIKeyWithUserName(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		// Unmarshal scopes from JSONB
-		err = json.Unmarshal(scopesJSON, &apiKey.Scopes)
-		if err != nil {
-			return nil, err
-		}
-
 		apiKeys = append(apiKeys, apiKey)
 	}
 
@@ -304,33 +296,10 @@ func (r *APIKeyRepository) GetAPIKeysByPrefix(ctx context.Context, keyPrefix str
 
 	apiKeys := make([]*models.APIKey, 0)
 	for rows.Next() {
-		apiKey := &models.APIKey{}
-		var scopesJSON []byte
-
-		err := rows.Scan(
-			&apiKey.ID,
-			&apiKey.UserID,
-			&apiKey.OrganizationID,
-			&apiKey.Name,
-			&apiKey.Description,
-			&apiKey.KeyHash,
-			&apiKey.KeyPrefix,
-			&scopesJSON,
-			&apiKey.ExpiresAt,
-			&apiKey.LastUsedAt,
-			&apiKey.ExpiryNotificationSentAt,
-			&apiKey.CreatedAt,
-		)
+		apiKey, err := scanAPIKey(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		// Unmarshal scopes from JSONB
-		err = json.Unmarshal(scopesJSON, &apiKey.Scopes)
-		if err != nil {
-			return nil, err
-		}
-
 		apiKeys = append(apiKeys, apiKey)
 	}
 
