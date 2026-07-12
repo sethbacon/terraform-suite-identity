@@ -28,10 +28,18 @@ const DefaultExpiry = time.Hour
 // configures its own instance (e.g. from its own secret env var) — keeping this
 // package app-neutral.
 //
+// TokenManager provides no revocation of its own: Validate never consults a
+// denylist. Callers that need to stop a compromised or must-be-invalidated
+// token before its natural expiry must check the JTI claim against their own
+// store (e.g. store.TokenRepository) on every request — Claims.JTI exists
+// specifically to support that pattern.
+//
 // The signing secret can be rotated at runtime via RotateSecret: the previous
 // secret remains accepted for validation until ClearPreviousSecret is called,
-// giving in-flight tokens an overlap window. Generate always signs with the
-// current secret.
+// giving in-flight tokens an overlap window. A token signed with the previous
+// secret validates for the ENTIRE overlap window regardless of its own
+// expiry — size the window deliberately and call ClearPreviousSecret promptly
+// once rotation is complete. Generate always signs with the current secret.
 type TokenManager struct {
 	issuer   string
 	current  atomic.Pointer[[]byte]

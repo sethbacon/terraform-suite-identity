@@ -124,7 +124,14 @@ new sequential pair instead.
 | `000003` | `000003_registry_canonical_identity` | Reconciles the schema to the suite's canonical identity shape. Adds per-org IdP binding (`organizations.idp_type`, `idp_name`); converts `role_templates.scopes` and `api_keys.scopes` from `TEXT[]` to `JSONB`; adds `api_keys.expiry_notification_sent_at`; and widens `oidc_config` to multi-provider (`name`, `provider_type`, `extra_config`, `created_by`, `updated_by`) with `scopes` as a JSON array. Safe in place because these tables hold only seed data until an app cuts over (the `USING` clauses convert seeded values losslessly). |
 
 The current version is `000003`. Each migration has a matching `.down.sql` that
-fully reverses it (migration 1's down drops every table and the schema).
+fully reverses it (migration 1's down drops every table and the schema), **except
+`000003`**: its `TEXT[]`↔`JSONB` column-type round-trip is best-effort (the
+migration's own `.down.sql` self-labels it as such) rather than a guaranteed exact
+reversal. `000003` is also the one migration in this list that performs an
+in-place `ALTER COLUMN … TYPE` rather than a purely additive change — safe here
+only because those columns held nothing but seed data at the time it ran (see the
+table above); it is not a precedent for future migrations, which must stay
+additive per [CONTRIBUTING.md](../CONTRIBUTING.md#database-migrations).
 
 ### Applying and inspecting
 
