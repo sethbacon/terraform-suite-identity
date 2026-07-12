@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Independent of Dependabot's biweekly cadence: re-scan the currently-pinned
+    # dependency versions weekly so a CVE disclosed against an already-fetched,
+    # checksum-valid dependency doesn't sit undetected for up to two weeks.
+    - cron: "0 6 * * 1"
   workflow_dispatch: {}
 
 concurrency:
@@ -60,6 +65,33 @@ jobs:
             print "PASS: " cov "% meets the " thr "% threshold."
           }'
 
+      - name: Check per-package coverage floor (security-critical packages)
+        # The aggregate 75% floor above can hide a low-coverage security-critical
+        # package behind easy-to-cover CRUD/model packages. Enforce a floor scoped
+        # to identity/auth/... and identity/store/... (JWT, OIDC relying-party,
+        # API-key, and data-access logic) independent of the total.
+        run: |
+          PKG_THRESHOLD=75
+          fail=0
+          for pkg in $(go list ./identity/auth/... ./identity/store/...); do
+            cov=$(go test -cover "$pkg" 2>/dev/null | grep -oE 'coverage: [0-9.]+%' | grep -oE '[0-9.]+')
+            if [ -z "$cov" ]; then
+              echo "SKIP: $pkg has no statements to cover"
+              continue
+            fi
+            awk -v pkg="$pkg" -v cov="$cov" -v thr="$PKG_THRESHOLD" 'BEGIN {
+              if (cov + 0 < thr + 0) {
+                print "FAIL: " pkg " coverage " cov "% is below the " thr "% floor."
+                exit 1
+              }
+              print "PASS: " pkg " coverage " cov "% meets the " thr "% floor."
+            }' || fail=1
+          done
+          if [ "$fail" = "1" ]; then
+            echo "One or more security-critical packages are below the per-package coverage floor."
+            exit 1
+          fi
+
       - name: Upload coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -87,3 +119,26 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
           export PATH="$PATH:$(go env GOPATH)/bin"
           gosec ./...
+
+  govulncheck:
+    name: Vulnerability Scan (govulncheck)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run govulncheck
+        # Reachability-aware scan of the Go vulnerability database against the
+        # currently pinned go.sum versions. Runs on every push/PR AND weekly via
+        # the schedule trigger above, independent of Dependabot's cadence.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          govulncheck ./...
