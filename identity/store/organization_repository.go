@@ -32,6 +32,16 @@ func NewOrganizationRepository(db *sql.DB) *OrganizationRepository {
 
 // GetDefaultOrganization retrieves the default organization for single-tenant mode.
 // Results are cached in memory with a 60-second TTL since the default org rarely changes.
+//
+// The cache is per-instance: InvalidateDefaultOrgCache (called by Rename/Update/Delete)
+// only clears the cache on the OrganizationRepository that performed the write. In a
+// horizontally scaled deployment, another replica's cache is unaffected and continues
+// returning the pre-change organization for up to defaultOrgCacheTTL after a rename —
+// a known, accepted cross-replica staleness window. This is acceptable because the
+// default organization's identity (not its display fields) is what matters for
+// authorization, and that never changes via Rename/Update. If the default org's
+// display fields are ever used for anything beyond display, shorten the TTL or
+// replace this cache with a shared invalidation signal (e.g. LISTEN/NOTIFY).
 func (r *OrganizationRepository) GetDefaultOrganization(ctx context.Context) (*models.Organization, error) {
 	r.defaultOrgMu.RLock()
 	if r.defaultOrgCache != nil && time.Since(r.defaultOrgAt) < defaultOrgCacheTTL {
@@ -159,23 +169,31 @@ func (r *OrganizationRepository) AddMemberWithRoleTemplate(ctx context.Context, 
 	return nil
 }
 
-// AddMemberWithParams adds a user to an organization with the specified role template (by template name)
-// This is a convenience method that looks up the role template by name
-func (r *OrganizationRepository) AddMemberWithParams(ctx context.Context, orgID, userID, roleTemplateName string) error {
-	// Look up role template ID by name. A name that does not resolve is an error:
-	// silently adding the member with a NULL role would leave them with no scopes.
-	// Callers that intend no role should use AddMemberWithRoleTemplate(nil).
+// lookupRoleTemplateID resolves a role template's ID by name, shared by
+// AddMemberWithParams and UpdateMemberRole. Returns an error when the name
+// does not resolve, rather than a silent NULL role — callers that intend no
+// role should use AddMemberWithRoleTemplate(nil) / UpdateMemberRoleTemplate(nil).
+func (r *OrganizationRepository) lookupRoleTemplateID(ctx context.Context, roleTemplateName string) (*string, error) {
 	query := `SELECT id FROM role_templates WHERE name = $1`
 	var id string
 	err := r.db.QueryRowContext(ctx, query, roleTemplateName).Scan(&id)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("role template %q not found", roleTemplateName)
+		return nil, fmt.Errorf("role template %q not found", roleTemplateName)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to look up role template: %w", err)
+		return nil, fmt.Errorf("failed to look up role template: %w", err)
 	}
+	return &id, nil
+}
 
-	return r.AddMemberWithRoleTemplate(ctx, orgID, userID, &id)
+// AddMemberWithParams adds a user to an organization with the specified role template (by template name)
+// This is a convenience method that looks up the role template by name
+func (r *OrganizationRepository) AddMemberWithParams(ctx context.Context, orgID, userID, roleTemplateName string) error {
+	id, err := r.lookupRoleTemplateID(ctx, roleTemplateName)
+	if err != nil {
+		return err
+	}
+	return r.AddMemberWithRoleTemplate(ctx, orgID, userID, id)
 }
 
 // RemoveMember removes a user from an organization
@@ -208,19 +226,11 @@ func (r *OrganizationRepository) UpdateMemberRoleTemplate(ctx context.Context, o
 // UpdateMemberRole changes a user's role template in an organization (by template name)
 // This is a convenience method that looks up the role template by name
 func (r *OrganizationRepository) UpdateMemberRole(ctx context.Context, orgID, userID, roleTemplateName string) error {
-	// Look up role template ID by name. A name that does not resolve is an error
-	// rather than a silent demotion to a NULL (scope-less) role.
-	query := `SELECT id FROM role_templates WHERE name = $1`
-	var id string
-	err := r.db.QueryRowContext(ctx, query, roleTemplateName).Scan(&id)
-	if err == sql.ErrNoRows {
-		return fmt.Errorf("role template %q not found", roleTemplateName)
-	}
+	id, err := r.lookupRoleTemplateID(ctx, roleTemplateName)
 	if err != nil {
-		return fmt.Errorf("failed to look up role template: %w", err)
+		return err
 	}
-
-	return r.UpdateMemberRoleTemplate(ctx, orgID, userID, &id)
+	return r.UpdateMemberRoleTemplate(ctx, orgID, userID, id)
 }
 
 // GetMember retrieves a user's membership in an organization
