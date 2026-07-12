@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
@@ -118,6 +120,180 @@ func TestNewProvider_RequireHTTPSRejectsHTTPIssuer(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HTTPS") {
 		t.Errorf("expected an HTTPS error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RequireHTTPS + RedirectURL (issue #57 sub-finding 1)
+// ---------------------------------------------------------------------------
+
+func TestNewProvider_RequireHTTPSRejectsHTTPRedirectURL(t *testing.T) {
+	// An https issuer is used here so the error can only come from the new
+	// RedirectURL scheme check, not the pre-existing IssuerURL one.
+	_, err := NewProvider(Config{
+		IssuerURL:    "https://issuer.example",
+		ClientID:     "id",
+		ClientSecret: "secret",
+		RedirectURL:  "http://app.example/callback",
+		RequireHTTPS: true,
+	})
+	if err == nil {
+		t.Fatal("expected an error for an http redirect URL when RequireHTTPS is set")
+	}
+	if !strings.Contains(err.Error(), "HTTPS") || !strings.Contains(err.Error(), "redirect") {
+		t.Errorf("expected an HTTPS redirect URL error, got: %v", err)
+	}
+}
+
+func TestNewProvider_RequireHTTPSAllowsEmptyRedirectURL(t *testing.T) {
+	// An empty RedirectURL (e.g. a provider that only needs the OAuth2 config
+	// for token exchange, not browser redirects) must not be rejected: the
+	// check only fires when RedirectURL is non-empty.
+	_, err := NewProvider(Config{
+		IssuerURL:    "https://issuer.example",
+		ClientID:     "id",
+		ClientSecret: "secret",
+		RequireHTTPS: true,
+	})
+	if err != nil && strings.Contains(err.Error(), "redirect") {
+		t.Errorf("expected no redirect-URL error for an empty RedirectURL, got: %v", err)
+	}
+}
+
+func TestNewProvider_RequireHTTPSAcceptsHTTPSIssuerAndRedirect(t *testing.T) {
+	// Full success path: RequireHTTPS is set, both IssuerURL and RedirectURL
+	// are https, and discovery actually succeeds. This is the regression guard
+	// that the new RedirectURL check doesn't reject valid https input.
+	mux := http.NewServeMux()
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, map[string]any{
+			"issuer":                 srv.URL,
+			"authorization_endpoint": srv.URL + "/auth",
+			"token_endpoint":         srv.URL + "/token",
+			"jwks_uri":               srv.URL + "/keys",
+		})
+	})
+
+	// The injected *http.Client (added by NewProviderWithContext for the
+	// HTTP-timeout fix) uses http.DefaultTransport, which by default doesn't
+	// trust httptest's self-signed certificate. Swap in a transport that
+	// trusts this server's certificate for the duration of the call, then
+	// restore the original so no other test is affected.
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	origTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = origTransport })
+	http.DefaultTransport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+
+	p, err := NewProvider(Config{
+		IssuerURL:    srv.URL,
+		ClientID:     "my-client",
+		ClientSecret: "my-secret",
+		RedirectURL:  "https://app.example/callback",
+		RequireHTTPS: true,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected a non-nil provider")
+	}
+}
+
+func TestNewProvider_RequireHTTPSFalseAllowsHTTPIssuerAndRedirect(t *testing.T) {
+	// Regression guard: with RequireHTTPS left at its default (false), an http
+	// issuer and http redirect URL must be accepted exactly as before this
+	// change — the new RedirectURL check must not fire when RequireHTTPS is
+	// false.
+	srv := discoveryServer(t)
+	defer srv.Close()
+
+	p, err := NewProviderWithContext(context.Background(), Config{
+		IssuerURL:    srv.URL,
+		ClientID:     "my-client",
+		ClientSecret: "my-secret",
+		RedirectURL:  "http://app.example/callback",
+		Scopes:       []string{"openid"},
+	})
+	if err != nil {
+		t.Fatalf("NewProviderWithContext: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected a non-nil provider")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HTTP timeout (issue #57 sub-finding 2)
+// ---------------------------------------------------------------------------
+
+func TestNewProviderWithContext_SlowDiscoveryFailsFast(t *testing.T) {
+	// A discovery endpoint that never responds must not hang the caller
+	// forever: the client injected via oidc.ClientContext bounds the request
+	// to oidcHTTPTimeout.
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block // never respond
+	}))
+	// Order matters: unblock the handler goroutine before Close(), which
+	// otherwise blocks until all outstanding requests complete.
+	defer srv.Close()
+	defer close(block)
+
+	start := time.Now()
+	_, err := NewProviderWithContext(context.Background(), Config{
+		IssuerURL:    srv.URL,
+		ClientID:     "id",
+		ClientSecret: "secret",
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error from a discovery endpoint that never responds")
+	}
+	if !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Errorf("expected a deadline-exceeded-flavored error, got: %v", err)
+	}
+	// Lower bound: catches a regression where the timeout is accidentally
+	// slashed to near-zero (the test would otherwise still pass the upper
+	// bound check below). Upper bound: generous slack over oidcHTTPTimeout to
+	// absorb CI scheduling jitter while still failing if construction hangs
+	// far longer than the configured timeout (i.e. the client-level Timeout
+	// isn't actually wired in).
+	if elapsed < oidcHTTPTimeout/2 {
+		t.Errorf("NewProviderWithContext returned after only %s, want close to oidcHTTPTimeout (%s)", elapsed, oidcHTTPTimeout)
+	}
+	if elapsed > oidcHTTPTimeout+10*time.Second {
+		t.Errorf("NewProviderWithContext took %s to fail, want within oidcHTTPTimeout (%s) plus slack", elapsed, oidcHTTPTimeout)
+	}
+}
+
+func TestNewProvider_SlowDiscoveryFailsFast(t *testing.T) {
+	// Same as above, but through the context.Background() convenience
+	// constructor, which must also get a construction deadline rather than
+	// relying on the caller's own (nonexistent) context timeout.
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block // never respond
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	start := time.Now()
+	_, err := NewProvider(Config{
+		IssuerURL:    srv.URL,
+		ClientID:     "id",
+		ClientSecret: "secret",
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error from a discovery endpoint that never responds")
+	}
+	if elapsed > oidcHTTPTimeout+10*time.Second {
+		t.Errorf("NewProvider took %s to fail, want within oidcHTTPTimeout (%s) plus slack", elapsed, oidcHTTPTimeout)
 	}
 }
 

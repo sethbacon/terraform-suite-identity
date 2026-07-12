@@ -11,11 +11,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
+
+// oidcHTTPTimeout bounds every HTTP round trip this package makes to an
+// identity provider: OIDC discovery (the initial NewProvider/NewProviderWithContext
+// call) and the JWKS key-set fetches/refreshes performed later during ID-token
+// verification (go-oidc reuses the *http.Client supplied via the discovery
+// context for the lifetime of the resulting *oidc.Provider — see
+// github.com/coreos/go-oidc/v3/oidc's Provider.client / remoteKeySet). Without
+// an explicit client, discovery falls back to http.DefaultClient, which has no
+// Timeout and can hang indefinitely against a slow or unresponsive issuer. 15
+// seconds comfortably covers discovery + JWKS fetches against a healthy IdP
+// (including ones a few network hops away) while still failing fast enough
+// that a hung issuer can't wedge a caller's startup or a request goroutine.
+const oidcHTTPTimeout = 15 * time.Second
 
 // Config holds the resolved OIDC settings required to construct a Provider.
 // Apps resolve these values from their own configuration (env, file or DB)
@@ -41,14 +56,23 @@ type Provider struct {
 	provider *oidc.Provider
 }
 
-// NewProvider initializes a new OIDC provider using a background context.
+// NewProvider initializes a new OIDC provider using a background context. The
+// underlying discovery request (and any subsequent JWKS refresh) is bounded by
+// oidcHTTPTimeout, so this call cannot hang forever against an unresponsive
+// issuer; callers that need a different deadline, or that want to cancel
+// construction early, should use NewProviderWithContext instead.
 func NewProvider(cfg Config) (*Provider, error) {
-	return NewProviderWithContext(context.Background(), cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), oidcHTTPTimeout)
+	defer cancel()
+	return NewProviderWithContext(ctx, cfg)
 }
 
 // NewProviderWithContext initializes a new OIDC provider with the given context.
 // It performs OIDC discovery against the issuer URL, so the context governs the
-// discovery request.
+// discovery request. Discovery (and the JWKS key-set fetches/refreshes made
+// later during ID-token verification) are additionally bounded by
+// oidcHTTPTimeout via an injected *http.Client, regardless of the caller's own
+// context deadline.
 func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) {
 	if cfg.IssuerURL == "" {
 		return nil, fmt.Errorf("OIDC issuer URL is required")
@@ -65,6 +89,12 @@ func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) 
 	if cfg.RequireHTTPS && !strings.HasPrefix(cfg.IssuerURL, "https://") {
 		return nil, fmt.Errorf("OIDC issuer URL must use HTTPS, got: %q", cfg.IssuerURL)
 	}
+
+	if cfg.RequireHTTPS && cfg.RedirectURL != "" && !strings.HasPrefix(cfg.RedirectURL, "https://") {
+		return nil, fmt.Errorf("OIDC redirect URL must use HTTPS, got: %q", cfg.RedirectURL)
+	}
+
+	ctx = oidc.ClientContext(ctx, &http.Client{Timeout: oidcHTTPTimeout})
 
 	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
 	if err != nil {
@@ -101,6 +131,12 @@ func NewProviderForConfig(cfg *oauth2.Config) *Provider {
 }
 
 // GetAuthURL returns the OAuth2 authorization URL for the given state.
+//
+// Deprecated: GetAuthURL builds a bare OAuth2 authorization URL with no OIDC
+// nonce and no PKCE challenge, so a caller using it (together with a
+// no-options VerifyIDToken call) is not defended against token injection/replay
+// or authorization-code interception. Use BeginAuth instead, which returns an
+// AuthChallenge carrying a generated nonce and PKCE verifier alongside the URL.
 func (p *Provider) GetAuthURL(state string) string {
 	return p.config.AuthCodeURL(state)
 }
@@ -219,6 +255,17 @@ func WithExpectedNonce(nonce string) VerifyOption {
 
 // VerifyIDToken verifies and parses the raw ID token. When an expected nonce is
 // supplied via WithExpectedNonce, the token's `nonce` claim must match it.
+//
+// Calling VerifyIDToken without WithExpectedNonce is a discouraged, legacy
+// calling convention: the token is accepted regardless of which login it was
+// issued for, so it does not defend against ID-token injection/replay across
+// concurrent authorization attempts. VerifyIDToken itself is not deprecated —
+// it remains the correct function to call — only the no-nonce-option pattern
+// is discouraged, so this is intentionally not marked with a blanket
+// "Deprecated:" godoc tag (which would flag every call site, including ones
+// that already pass WithExpectedNonce correctly). New call sites built against
+// a flow started with BeginAuth should always pass
+// WithExpectedNonce(challenge.Nonce).
 func (p *Provider) VerifyIDToken(ctx context.Context, rawIDToken string, opts ...VerifyOption) (*oidc.IDToken, error) {
 	// A Provider built via NewProviderForConfig has no verifier (it skipped
 	// discovery). Return a descriptive error rather than panicking on a nil
