@@ -32,6 +32,16 @@ func NewOrganizationRepository(db *sql.DB) *OrganizationRepository {
 
 // GetDefaultOrganization retrieves the default organization for single-tenant mode.
 // Results are cached in memory with a 60-second TTL since the default org rarely changes.
+//
+// The cache is per-instance: InvalidateDefaultOrgCache (called by Rename/Update/Delete)
+// only clears the cache on the OrganizationRepository that performed the write. In a
+// horizontally scaled deployment, another replica's cache is unaffected and continues
+// returning the pre-change organization for up to defaultOrgCacheTTL after a rename —
+// a known, accepted cross-replica staleness window. This is acceptable because the
+// default organization's identity (not its display fields) is what matters for
+// authorization, and that never changes via Rename/Update. If the default org's
+// display fields are ever used for anything beyond display, shorten the TTL or
+// replace this cache with a shared invalidation signal (e.g. LISTEN/NOTIFY).
 func (r *OrganizationRepository) GetDefaultOrganization(ctx context.Context) (*models.Organization, error) {
 	r.defaultOrgMu.RLock()
 	if r.defaultOrgCache != nil && time.Since(r.defaultOrgAt) < defaultOrgCacheTTL {
