@@ -297,6 +297,125 @@ func TestNewProvider_SlowDiscoveryFailsFast(t *testing.T) {
 	}
 }
 
+func TestExchangeCode_SlowTokenEndpointFailsFast(t *testing.T) {
+	// A token endpoint that never responds must not hang ExchangeCode forever:
+	// contextWithBoundedClient bounds the token-exchange request to
+	// oidcHTTPTimeout, the same as discovery/JWKS. ExchangeCode is called with
+	// a bare context.Background() (no caller-supplied deadline) so this test
+	// exercises the injected client, not an incidental caller timeout.
+	block := make(chan struct{})
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	// Order matters: unblock the handler goroutine before Close(), which
+	// otherwise blocks until all outstanding requests complete.
+	defer srv.Close()
+	defer close(block)
+
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(w, map[string]any{
+			"issuer":                 srv.URL,
+			"authorization_endpoint": srv.URL + "/auth",
+			"token_endpoint":         srv.URL + "/token",
+			"jwks_uri":               srv.URL + "/keys",
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		<-block // never respond
+	})
+
+	p, err := NewProviderWithContext(context.Background(), Config{
+		IssuerURL:    srv.URL,
+		ClientID:     "id",
+		ClientSecret: "secret",
+	})
+	if err != nil {
+		t.Fatalf("NewProviderWithContext: %v", err)
+	}
+
+	start := time.Now()
+	_, err = p.ExchangeCode(context.Background(), "auth-code")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error from a token endpoint that never responds")
+	}
+	// Lower bound mirrors the discovery slow-endpoint tests above: catches a
+	// regression where the timeout is accidentally slashed to near-zero.
+	//
+	// Upper bound is 2x oidcHTTPTimeout, not 1x: golang.org/x/oauth2's
+	// RetrieveToken auto-probes the client-auth style (Config.Endpoint.AuthStyle
+	// defaults to unknown) by trying one style, and on failure retrying once
+	// with the other before giving up (internal.RetrieveToken in
+	// golang.org/x/oauth2/internal/token.go) — so the very first exchange
+	// against a given (tokenURL, clientID) pair can perform two bounded HTTP
+	// round trips, not one. This is a pre-existing property of the oauth2
+	// library's auth-style negotiation, orthogonal to this timeout fix; each
+	// individual round trip is still bounded to oidcHTTPTimeout by the client
+	// injected via contextWithBoundedClient; what this test guards against is
+	// that bound being absent (i.e. hanging far longer than two round trips).
+	if elapsed < oidcHTTPTimeout/2 {
+		t.Errorf("ExchangeCode returned after only %s, want close to a multiple of oidcHTTPTimeout (%s)", elapsed, oidcHTTPTimeout)
+	}
+	if elapsed > 2*oidcHTTPTimeout+10*time.Second {
+		t.Errorf("ExchangeCode took %s to fail, want within 2x oidcHTTPTimeout (%s) plus slack", elapsed, oidcHTTPTimeout)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// contextWithBoundedClient / boundHTTPClient
+// ---------------------------------------------------------------------------
+
+func TestContextWithBoundedClient_NoExistingClientGetsDefault(t *testing.T) {
+	got := contextWithBoundedClient(context.Background())
+	client, ok := got.Value(oauth2.HTTPClient).(*http.Client)
+	if !ok {
+		t.Fatal("expected an *http.Client on the returned context")
+	}
+	if client.Timeout != oidcHTTPTimeout {
+		t.Errorf("Timeout = %s, want %s", client.Timeout, oidcHTTPTimeout)
+	}
+}
+
+func TestContextWithBoundedClient_PreservesCallerTransport(t *testing.T) {
+	// A caller that already injected a custom *http.Client into ctx (e.g.
+	// carrying a private-CA root pool or mTLS certs) via the same
+	// oidc.ClientContext/oauth2 context convention this package uses must not
+	// have that Transport silently discarded — only the Timeout is capped.
+	marker := &http.Transport{}
+	callerClient := &http.Client{Transport: marker, Timeout: time.Hour}
+
+	ctx := oidcpkg.ClientContext(context.Background(), callerClient)
+	got := contextWithBoundedClient(ctx)
+
+	client, ok := got.Value(oauth2.HTTPClient).(*http.Client)
+	if !ok {
+		t.Fatal("expected an *http.Client on the returned context")
+	}
+	if client.Transport != marker {
+		t.Error("expected the caller-supplied Transport to be preserved")
+	}
+	if client.Timeout != oidcHTTPTimeout {
+		t.Errorf("Timeout = %s, want capped to oidcHTTPTimeout (%s)", client.Timeout, oidcHTTPTimeout)
+	}
+}
+
+func TestContextWithBoundedClient_LeavesStricterCallerTimeoutAlone(t *testing.T) {
+	// A caller whose client already has a tighter deadline than
+	// oidcHTTPTimeout must not have it loosened, and the client itself must
+	// not be needlessly replaced.
+	callerClient := &http.Client{Timeout: time.Second}
+	ctx := oidcpkg.ClientContext(context.Background(), callerClient)
+	got := contextWithBoundedClient(ctx)
+
+	client, ok := got.Value(oauth2.HTTPClient).(*http.Client)
+	if !ok {
+		t.Fatal("expected an *http.Client on the returned context")
+	}
+	if client != callerClient {
+		t.Error("expected the caller's own (already-strict) client to be reused unchanged")
+	}
+}
+
 func TestNewProviderForConfig_GetAuthURL(t *testing.T) {
 	// A discovery-free provider still builds authorization URLs.
 	p := NewProviderForConfig(&oauth2.Config{

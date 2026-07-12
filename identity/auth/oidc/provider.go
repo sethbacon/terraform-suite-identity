@@ -21,16 +21,53 @@ import (
 
 // oidcHTTPTimeout bounds every HTTP round trip this package makes to an
 // identity provider: OIDC discovery (the initial NewProvider/NewProviderWithContext
-// call) and the JWKS key-set fetches/refreshes performed later during ID-token
+// call), the JWKS key-set fetches/refreshes performed later during ID-token
 // verification (go-oidc reuses the *http.Client supplied via the discovery
 // context for the lifetime of the resulting *oidc.Provider — see
-// github.com/coreos/go-oidc/v3/oidc's Provider.client / remoteKeySet). Without
-// an explicit client, discovery falls back to http.DefaultClient, which has no
+// github.com/coreos/go-oidc/v3/oidc's Provider.client / remoteKeySet), and the
+// authorization-code token-exchange call made by ExchangeCode. Without an
+// explicit client, these fall back to http.DefaultClient, which has no
 // Timeout and can hang indefinitely against a slow or unresponsive issuer. 15
-// seconds comfortably covers discovery + JWKS fetches against a healthy IdP
-// (including ones a few network hops away) while still failing fast enough
-// that a hung issuer can't wedge a caller's startup or a request goroutine.
+// seconds comfortably covers discovery + JWKS fetches + token exchange against
+// a healthy IdP (including ones a few network hops away) while still failing
+// fast enough that a hung issuer can't wedge a caller's startup or a request
+// goroutine.
 const oidcHTTPTimeout = 15 * time.Second
+
+// boundHTTPClient returns an *http.Client whose Timeout is capped at
+// oidcHTTPTimeout. If existing is non-nil, its Transport, Jar and
+// CheckRedirect are preserved — only the Timeout is adjusted — so a client a
+// caller already installed (e.g. one whose Transport carries a private-CA
+// root pool, mTLS client certificates, or a corporate proxy) is never
+// silently replaced by a plain client with the default Transport. If
+// existing already has a Timeout no looser than oidcHTTPTimeout, it is
+// returned unchanged so a caller's stricter deadline is respected. A nil
+// existing yields a fresh client with the default Transport.
+func boundHTTPClient(existing *http.Client) *http.Client {
+	if existing == nil {
+		return &http.Client{Timeout: oidcHTTPTimeout}
+	}
+	if existing.Timeout > 0 && existing.Timeout <= oidcHTTPTimeout {
+		return existing
+	}
+	bounded := *existing
+	bounded.Timeout = oidcHTTPTimeout
+	return &bounded
+}
+
+// contextWithBoundedClient returns ctx with an *http.Client bounded by
+// oidcHTTPTimeout attached via oidc.ClientContext. Both go-oidc's
+// discovery/JWKS calls and oauth2.Config's token-exchange call read the
+// client from the same underlying context key (oauth2.HTTPClient), so this
+// single helper is used to bound all three call sites. If ctx already
+// carries a client — installed by a caller via the same convention before
+// calling into this package — it is reused (via boundHTTPClient) rather than
+// discarded, so this package never silently drops a caller's custom TLS
+// configuration or proxy.
+func contextWithBoundedClient(ctx context.Context) context.Context {
+	existing, _ := ctx.Value(oauth2.HTTPClient).(*http.Client)
+	return oidc.ClientContext(ctx, boundHTTPClient(existing))
+}
 
 // Config holds the resolved OIDC settings required to construct a Provider.
 // Apps resolve these values from their own configuration (env, file or DB)
@@ -94,7 +131,7 @@ func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) 
 		return nil, fmt.Errorf("OIDC redirect URL must use HTTPS, got: %q", cfg.RedirectURL)
 	}
 
-	ctx = oidc.ClientContext(ctx, &http.Client{Timeout: oidcHTTPTimeout})
+	ctx = contextWithBoundedClient(ctx)
 
 	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
 	if err != nil {
@@ -220,7 +257,15 @@ func WithPKCEVerifier(verifier string) ExchangeOption {
 
 // ExchangeCode exchanges the authorization code for tokens. When a PKCE verifier
 // is supplied via WithPKCEVerifier it is sent on the token request as the
-// code_verifier parameter.
+// code_verifier parameter. Every token-exchange HTTP round trip is bounded by
+// oidcHTTPTimeout (via contextWithBoundedClient), the same as discovery and
+// JWKS fetches, so a slow or hostile token endpoint cannot hang the calling
+// goroutine indefinitely; a client the caller already installed on ctx is
+// preserved, with only its Timeout capped. Note that golang.org/x/oauth2
+// auto-probes the client-auth style on the first exchange against a given
+// token endpoint, trying one style and, on failure, retrying once with the
+// other (see internal.RetrieveToken) — so the very first call can perform up
+// to two bounded round trips (worst case ~2x oidcHTTPTimeout) rather than one.
 func (p *Provider) ExchangeCode(ctx context.Context, code string, opts ...ExchangeOption) (*oauth2.Token, error) {
 	var cfg exchangeConfig
 	for _, opt := range opts {
@@ -231,6 +276,8 @@ func (p *Provider) ExchangeCode(ctx context.Context, code string, opts ...Exchan
 	if cfg.codeVerifier != "" {
 		authCodeOpts = append(authCodeOpts, oauth2.VerifierOption(cfg.codeVerifier))
 	}
+
+	ctx = contextWithBoundedClient(ctx)
 
 	token, err := p.config.Exchange(ctx, code, authCodeOpts...)
 	if err != nil {
