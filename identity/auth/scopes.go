@@ -28,7 +28,15 @@ type ReadWritePairs map[string]string
 //   - The ScopeAdmin wildcard grants every scope.
 //   - If rwPairs[required] is present and userScopes contains that write scope,
 //     the read scope is implicitly satisfied (write-implies-read).
+//
+// An empty required scope always returns false, even if userScopes contains an
+// accidental empty-string element (e.g. from a naive strings.Split on a
+// trailing/double comma upstream in a consumer) — empty string is never a
+// valid scope to require or to grant.
 func HasScope(userScopes []string, required string, rwPairs ReadWritePairs) bool {
+	if required == "" {
+		return false
+	}
 	for _, s := range userScopes {
 		if s == required {
 			return true

@@ -26,6 +26,10 @@ func TestHasScope(t *testing.T) {
 		{"empty scopes", []string{}, "foo:read", false},
 		{"identity-core users read exact", []string{auth.ScopeUsersRead}, auth.ScopeUsersRead, true},
 		{"identity-core admin wildcard", []string{auth.ScopeAdmin}, auth.ScopeUsersRead, true},
+		// An empty required scope must never match, even if userScopes contains
+		// an accidental empty-string element (e.g. from a naive strings.Split on
+		// a value with a trailing/double comma upstream in a consumer).
+		{"empty required scope never matches", []string{"foo:read", ""}, "", false},
 	}
 
 	for _, tt := range tests {

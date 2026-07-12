@@ -701,6 +701,39 @@ func TestGetUserCombinedScopes_DBError(t *testing.T) {
 	}
 }
 
+func TestGetUserCombinedScopes_UnionsAcrossDistinctOrganizations(t *testing.T) {
+	// GetUserCombinedScopes is the ONLY scope primitive: it unions a user's
+	// scopes across ALL org memberships into one flat set fed to the JWT. This
+	// pins the union/dedup contract with two DIFFERENT organizations rather
+	// than the single-row case TestGetUserCombinedScopes_Success covers.
+	repo, mock := newOrgRepo(t)
+	mock.ExpectQuery("SELECT.*FROM organization_members.*JOIN organizations").
+		WillReturnRows(sqlmock.NewRows(userMembershipCols).
+			AddRow("org-1", "acme", nil, time.Now(),
+				"viewer", "Viewer", []byte(`["modules:read","shared:read"]`)).
+			AddRow("org-2", "widgets", nil, time.Now(),
+				"editor", "Editor", []byte(`["modules:write","shared:read"]`)))
+
+	scopes, err := repo.GetUserCombinedScopes(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := make(map[string]bool, len(scopes))
+	for _, s := range scopes {
+		got[s] = true
+	}
+	want := []string{"modules:read", "modules:write", "shared:read"}
+	if len(got) != len(want) {
+		t.Fatalf("scopes = %v, want exactly %v (union of both orgs, deduplicated)", scopes, want)
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("missing expected scope %q in union result %v", w, scopes)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // GetDefaultOrganization cache hit path
 // ---------------------------------------------------------------------------
