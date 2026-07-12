@@ -35,9 +35,9 @@ Notable modelling choices:
 - **No soft-active flag on users, api keys, or organizations.** Access derives entirely
   from organization memberships and the scopes their role templates grant; "disabling" a
   user means removing their memberships (or deleting the user). The `is_active` column
-  still exists on `users`, `api_keys`, and `organizations` for historical reasons but is
-  intentionally unread/unwritten by the model on all three tables — do not mistake any of
-  them for a working kill-switch. (`oidc_config.is_active` is the one exception: it is
+  on `users`, `api_keys`, and `organizations` was never read or written by the model on
+  any of the three tables, so migration `000004` drops it — do not expect any of them to
+  reappear as a working kill-switch. (`oidc_config.is_active` is the one exception: it is
   genuinely read/written by `GetActiveOIDCConfig`/`ActivateOIDCConfig`/
   `DeactivateAllOIDCConfigs`.)
 - **API keys** carry an optional `expires_at`, but this library does not enforce it at
@@ -56,8 +56,9 @@ go get github.com/sethbacon/terraform-suite-identity@latest
 ```
 
 Pin a minimum version in `go.mod`. Schema migrations are additive within a major version,
-with one documented in-place exception (migration `000003` — see
-[docs/schema.md](docs/schema.md)). Requires Go 1.25 or newer.
+with two documented exceptions — an in-place `ALTER COLUMN` (migration `000003`) and a
+verified-dead-column `DROP COLUMN` (migration `000004`) — see
+[docs/schema.md](docs/schema.md). Requires Go 1.25 or newer.
 
 ## Usage
 

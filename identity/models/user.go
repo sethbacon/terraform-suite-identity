@@ -15,6 +15,8 @@ import (
 // There is intentionally no soft-active flag: a user's access derives entirely
 // from their organization memberships and the scopes those role templates grant.
 // "Disabling" a user means removing their memberships (or deleting the user).
+// (The users.is_active column has been removed — see migration 000004 — after
+// an audit found it was never read or written.)
 type User struct {
 	ID        string    `json:"id"`
 	Email     string    `json:"email"`
