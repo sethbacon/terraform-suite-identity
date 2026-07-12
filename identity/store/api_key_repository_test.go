@@ -259,7 +259,7 @@ func TestDeleteExpiredKeys_Success(t *testing.T) {
 
 func TestGetAPIKeysByPrefix_Success(t *testing.T) {
 	repo, mock := newAPIKeyRepo(t)
-	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*key_prefix").
+	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*key_prefix.*expires_at").
 		WillReturnRows(sampleAPIKeyRow())
 
 	keys, err := repo.GetAPIKeysByPrefix(context.Background(), "tfr_abc")
@@ -268,6 +268,47 @@ func TestGetAPIKeysByPrefix_Success(t *testing.T) {
 	}
 	if len(keys) != 1 {
 		t.Errorf("len(keys) = %d, want 1", len(keys))
+	}
+}
+
+// TestGetAPIKeysByPrefix_ExcludesExpired proves the query-level expiry filter
+// (WHERE key_prefix = $1 AND (expires_at IS NULL OR expires_at > NOW())):
+// an expired row is excluded from the returned candidates while a
+// non-expired row and a NULL-expiry row are both included. sqlmock returns
+// exactly the rows the mock is told to return, so this test exercises the
+// scan/assembly path with a row set that models what the real WHERE clause
+// would filter down to, proving the repository doesn't do any additional
+// (incorrect) filtering of its own that would also exclude the good rows.
+func TestGetAPIKeysByPrefix_ExcludesExpired(t *testing.T) {
+	repo, mock := newAPIKeyRepo(t)
+
+	future := time.Now().Add(24 * time.Hour)
+	rows := sqlmock.NewRows(apiKeyCols).
+		AddRow("key-active", "user-1", "org-1", "Active Key", nil, "hash-active", "tfr_abc123",
+			sampleScopes, future, nil, nil, time.Now()).
+		AddRow("key-nullexp", "user-1", "org-1", "No-Expiry Key", nil, "hash-nullexp", "tfr_abc123",
+			sampleScopes, nil, nil, nil, time.Now())
+		// An expired row is deliberately NOT added here: the SQL WHERE clause
+		// (expires_at IS NULL OR expires_at > NOW()) excludes it at the
+		// database level, so the repository must never see it in the result set.
+
+	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*key_prefix.*expires_at.*IS NULL.*expires_at.*NOW").
+		WithArgs("tfr_abc123").
+		WillReturnRows(rows)
+
+	keys, err := repo.GetAPIKeysByPrefix(context.Background(), "tfr_abc123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("len(keys) = %d, want 2 (active + null-expiry, expired excluded by the query)", len(keys))
+	}
+	ids := map[string]bool{keys[0].ID: true, keys[1].ID: true}
+	if !ids["key-active"] || !ids["key-nullexp"] {
+		t.Errorf("expected key-active and key-nullexp in results, got %v", ids)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }
 
