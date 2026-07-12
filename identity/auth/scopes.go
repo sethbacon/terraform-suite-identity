@@ -101,6 +101,23 @@ func HasAllScopes(userScopes []string, required []string, rwPairs ReadWritePairs
 // already-trusted, admin-seeded role_template — legitimate admin grants are
 // expected to carry ScopeAdmin, and rejecting them there would break the
 // intended feature.
+//
+// This module has no HTTP layer of its own, so it cannot wire this guard into
+// a request path itself — that has to happen in each consuming backend, at
+// the point where it resolves an externally-influenced group/role mapping.
+// As of this writing no caller does so yet (verified: this function has zero
+// callers outside its own test file, suite-wide). Adoption is tracked, not
+// left to be silently rediscovered later:
+//   - sethbacon/terraform-registry-backend#604
+//   - sethbacon/terraform-state-manager-backend#173
+//
+// Both issues also record why this is not an active exploit path in either
+// backend today: their group/role-mapping config writes already require
+// ScopeAdmin, so an external actor cannot currently plant a Role that
+// resolves to ScopeAdmin without already holding it. The guard remains
+// defense-in-depth for if/when that gate changes (e.g. a lower-privileged,
+// org-scoped mapping API) or for any future consumer that maps external data
+// onto a scope list more directly.
 func ValidateProvisionableScopes(scopes []string) error {
 	for _, s := range scopes {
 		if s == ScopeAdmin {
