@@ -48,6 +48,15 @@ Notable modelling choices:
   separately in `revoked_tokens`, but is likewise host-enforced — see the Auth section
   below.
 - **Multi-org by default** — `UserWithOrgRoles` aggregates scopes across all memberships.
+  `GetAllowedScopes` and `store.OrganizationRepository.GetUserCombinedScopes` are
+  suite-wide by design: they flatten every organization a user belongs to into one set
+  with no per-organization qualifier, so a user who is `ScopeAdmin` in org A shows up as
+  `ScopeAdmin` in that combined set even for a request scoped to org B, where they may
+  have no membership at all. **Any org-scoped authorization decision must independently
+  verify the caller's membership/role in that specific organization** before trusting the
+  combined set — e.g. match the target `OrganizationID` against
+  `UserWithOrgRoles.Memberships` and use that membership's own `RoleTemplateScopes`,
+  rather than `GetAllowedScopes()`'s flattened result.
 
 ## Installation
 
@@ -142,9 +151,22 @@ claims, _ := tm.Validate(token) // tries current then previous secret (rotation)
 // secret cannot be replayed from an untrusted minter:
 tm.SetAllowedIssuers([]string{"terraform-registry", "terraform-state-manager"})
 
+// Audience — also OFF by default (Validate skips the aud check unless set).
+// Each app in a coupled suite should set THIS app's own identity as the
+// audience, so a token minted for one app cannot be replayed against a
+// sibling even though they share the signing secret and both appear in
+// each other's allowed-issuers list:
+tm.SetAudience("terraform-registry")
+
 // API keys
 key, hash, prefix, _ := auth.GenerateAPIKey("tfr")
 ```
+
+**Issuer pinning and audience are independent opt-in checks, and a coupled suite needs
+both.** `SetAllowedIssuers` alone still lets a trusted sibling's token through unchanged;
+`SetAudience` closes that gap by additionally requiring the token to have been minted
+*for this app specifically*, so even a token from a trusted sibling issuer is rejected
+unless it names this app as its audience.
 
 **Revocation is entirely host-enforced.** The module provides no revocation of its own —
 only the `JTI` claim, which a host must denylist (e.g. via `store.TokenRepository`) and
