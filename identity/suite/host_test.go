@@ -40,13 +40,51 @@ func TestCanonicalHost(t *testing.T) {
 		// is a normalization helper, not an auth check) but worth pinning since a
 		// real consumer (parsing a user-editable module source address or a
 		// config-file host string) could hand these to the function.
-		{"userinfo-prefixed host passes through unmodified", "attacker@reg.example.com", "attacker@reg.example.com"},
+		//
+		// Userinfo ("@") is never legitimate for a bare host-identity join key,
+		// so it's rejected outright regardless of colon count: a bare userinfo
+		// prefix with no colon at all (would otherwise take the no-port fast
+		// path)...
+		{"bare userinfo prefix (no colon) rejected outright", "attacker@reg.example.com", ""},
+		// ...userinfo with no password, single colon (only separates host from
+		// port) — net.SplitHostPort happily splits this into host="user@host",
+		// port="1234" on its own, so this shape is NOT caught by any
+		// colon-count-based check; only an explicit "@" scan catches it.
+		{"userinfo (no password) + port rejected outright", "user@host:1234", ""},
+		// ...userinfo with a password but no port — a single colon (between
+		// user and pass), so net.SplitHostPort also splits this cleanly
+		// (host="user", port="pass@evil.com") without ever erroring.
+		{"userinfo (with password), no port, rejected outright", "user:pass@evil.com", ""},
+		// ...userinfo with no password, default port present — single colon
+		// again; would otherwise merely have its default port stripped and
+		// pass through as "user@evil.com".
+		{"userinfo (no password) + default port rejected outright", "user@evil.com:443", ""},
+		// ...and userinfo with both password and port, the two-colon shape
+		// net.SplitHostPort itself rejects ("too many colons").
+		{"userinfo (with password) + port rejected outright", "user:pass@host:1234", ""},
 		{"non-numeric port re-emitted verbatim (Atoi fails silently)", "reg.example.com:notaport", "reg.example.com:notaport"},
 		// A malformed double-scheme URL is NOT handled gracefully: url.Parse
 		// misreads "https:" (from the second scheme) as the host, so the real
 		// host "evil.com" is silently DROPPED — contradicting this function's own
 		// doc comment ("never drops or mangles input"). Pinned as a known gap.
 		{"double scheme drops the real host", "https://https://evil.com", "https"},
+		// Trailing junk after a valid host:port. net.SplitHostPort rejects this
+		// ("too many colons"), and url.Parse's fallback also fails (invalid
+		// port after host), so this is rejected outright (returns "") rather
+		// than silently passing "host:443:extra" through unchanged.
+		{"trailing junk after host:port rejected outright", "host:443:extra", ""},
+		// Bare (unbracketed) zone-scoped IPv6 literal: net.SplitHostPort demands
+		// brackets around IPv6 and errors on this ("too many colons"), and
+		// net/url's authority parser can't recover it either (it misreads the
+		// "%zone" suffix as an invalid port) — but this is a legitimate address
+		// form, not malformed junk, so it must round-trip unchanged rather than
+		// collapsing to "" like the genuinely-malformed shapes above.
+		{"bare zone-scoped IPv6 literal round-trips unchanged", "2001:db8::1%eth0", "2001:db8::1%eth0"},
+		// Regression guard: a normal full-URL sibling address (scheme + mixed
+		// case + default port + trailing slash) must still canonicalize exactly
+		// as before — unaffected by the userinfo/multi-colon fallback, since
+		// SplitHostPort accepts "Sibling.Example.com:443" cleanly on its own.
+		{"full URL with default port unaffected", "https://Sibling.Example.com:443/", "sibling.example.com"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
