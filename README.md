@@ -234,7 +234,8 @@ import identityoidc "github.com/sethbacon/terraform-suite-identity/identity/auth
 prov, _ := identityoidc.NewProvider(identityoidc.Config{
     IssuerURL: issuer, ClientID: id, ClientSecret: secret,
     RedirectURL: cb, Scopes: []string{"openid", "email", "profile"},
-    RequireHTTPS: true,
+    // HTTPS is required by default; set AllowInsecureIssuer: true only for a
+    // local/dev http issuer.
 })
 
 // Login: BeginAuth generates the auth URL plus a per-login nonce and PKCE verifier.

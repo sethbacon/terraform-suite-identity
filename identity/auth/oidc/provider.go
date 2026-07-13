@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -79,11 +80,13 @@ type Config struct {
 	RedirectURL  string
 	Scopes       []string
 
-	// RequireHTTPS rejects a non-HTTPS issuer URL. An HTTP issuer means discovery
-	// and JWKS key material are fetched over plaintext, allowing a MITM to
-	// substitute signing keys and forge ID tokens. Off by default so local/dev
-	// stacks can use http issuers; production callers should set it true.
-	RequireHTTPS bool
+	// AllowInsecureIssuer opts out of the default HTTPS requirement for the
+	// issuer and redirect URLs. An HTTP issuer means discovery and JWKS key
+	// material are fetched over plaintext, allowing a MITM to substitute
+	// signing keys and forge ID tokens accepted by the verifier — so HTTPS is
+	// required unless this is explicitly set. Set it true only for local/dev
+	// stacks that use an http issuer; production callers must leave it false.
+	AllowInsecureIssuer bool
 }
 
 // Provider wraps the generic OIDC provider, verifier and OAuth2 config.
@@ -123,12 +126,12 @@ func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) 
 		return nil, fmt.Errorf("OIDC client secret is required")
 	}
 
-	if cfg.RequireHTTPS && !strings.HasPrefix(cfg.IssuerURL, "https://") {
-		return nil, fmt.Errorf("OIDC issuer URL must use HTTPS, got: %q", cfg.IssuerURL)
+	if !cfg.AllowInsecureIssuer && !isHTTPSURL(cfg.IssuerURL) {
+		return nil, fmt.Errorf("OIDC issuer URL must use HTTPS, got: %q (set AllowInsecureIssuer to allow an http issuer for local/dev)", cfg.IssuerURL)
 	}
 
-	if cfg.RequireHTTPS && cfg.RedirectURL != "" && !strings.HasPrefix(cfg.RedirectURL, "https://") {
-		return nil, fmt.Errorf("OIDC redirect URL must use HTTPS, got: %q", cfg.RedirectURL)
+	if !cfg.AllowInsecureIssuer && cfg.RedirectURL != "" && !isHTTPSURL(cfg.RedirectURL) {
+		return nil, fmt.Errorf("OIDC redirect URL must use HTTPS, got: %q (set AllowInsecureIssuer to allow an http redirect URL for local/dev)", cfg.RedirectURL)
 	}
 
 	ctx = contextWithBoundedClient(ctx)
@@ -155,6 +158,16 @@ func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) 
 		config:   oauth2Config,
 		provider: provider,
 	}, nil
+}
+
+// isHTTPSURL reports whether rawURL parses as an absolute URL with an https
+// scheme. The scheme comparison is case-insensitive per RFC 3986 (section
+// 3.1: "scheme" is case-insensitive), so "HTTPS://" and "HttpS://" are
+// accepted exactly like "https://" — a plain strings.HasPrefix("https://")
+// check would incorrectly reject those.
+func isHTTPSURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && strings.EqualFold(u.Scheme, "https")
 }
 
 // NewProviderForConfig constructs a Provider backed by the given oauth2 config
@@ -304,14 +317,16 @@ func WithExpectedNonce(nonce string) VerifyOption {
 // supplied via WithExpectedNonce, the token's `nonce` claim must match it.
 //
 // Calling VerifyIDToken without WithExpectedNonce is a discouraged, legacy
-// calling convention: the token is accepted regardless of which login it was
-// issued for, so it does not defend against ID-token injection/replay across
-// concurrent authorization attempts. VerifyIDToken itself is not deprecated —
-// it remains the correct function to call — only the no-nonce-option pattern
-// is discouraged, so this is intentionally not marked with a blanket
-// "Deprecated:" godoc tag (which would flag every call site, including ones
-// that already pass WithExpectedNonce correctly). New call sites built against
-// a flow started with BeginAuth should always pass
+// calling convention. It remains supported ONLY for tokens that carry no
+// `nonce` claim at all (the fully-legacy GetAuthURL flow, which never
+// requests one, so there is nothing to bind). If the ID token DOES carry a
+// `nonce` claim — meaning the authorization request was started with
+// BeginAuth — but the caller omits WithExpectedNonce, VerifyIDToken now fails
+// closed instead of silently skipping the check: accepting such a token would
+// silently drop the nonce binding and reopen ID-token injection/replay across
+// concurrent authorization attempts, even though the caller believed it was
+// using the hardened BeginAuth flow. New call sites built against a flow
+// started with BeginAuth should always pass
 // WithExpectedNonce(challenge.Nonce).
 func (p *Provider) VerifyIDToken(ctx context.Context, rawIDToken string, opts ...VerifyOption) (*oidc.IDToken, error) {
 	// A Provider built via NewProviderForConfig has no verifier (it skipped
@@ -329,6 +344,10 @@ func (p *Provider) VerifyIDToken(ctx context.Context, rawIDToken string, opts ..
 	idToken, err := p.verifier.Verify(ctx, rawIDToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify ID token: %w", err)
+	}
+
+	if idToken.Nonce != "" && cfg.expectedNonce == "" {
+		return nil, fmt.Errorf("ID token includes a nonce but no expected nonce was supplied for verification; call VerifyIDToken with WithExpectedNonce(challenge.Nonce) from the BeginAuth challenge")
 	}
 
 	if cfg.expectedNonce != "" && idToken.Nonce != cfg.expectedNonce {
