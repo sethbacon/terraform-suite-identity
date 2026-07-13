@@ -65,11 +65,12 @@ func TestNewProvider_DiscoveryAndAuthURL(t *testing.T) {
 	defer srv.Close()
 
 	p, err := NewProviderWithContext(context.Background(), Config{
-		IssuerURL:    srv.URL,
-		ClientID:     "my-client",
-		ClientSecret: "my-secret",
-		RedirectURL:  "https://app.example/callback",
-		Scopes:       []string{"openid", "email", "profile"},
+		IssuerURL:           srv.URL,
+		ClientID:            "my-client",
+		ClientSecret:        "my-secret",
+		RedirectURL:         "https://app.example/callback",
+		Scopes:              []string{"openid", "email", "profile"},
+		AllowInsecureIssuer: true, // srv is a plain httptest.NewServer, not TLS
 	})
 	if err != nil {
 		t.Fatalf("NewProviderWithContext: %v", err)
@@ -99,24 +100,25 @@ func TestNewProvider_DiscoveryFailure(t *testing.T) {
 	defer srv.Close()
 
 	if _, err := NewProvider(Config{
-		IssuerURL:    srv.URL,
-		ClientID:     "id",
-		ClientSecret: "secret",
+		IssuerURL:           srv.URL,
+		ClientID:            "id",
+		ClientSecret:        "secret",
+		AllowInsecureIssuer: true, // srv is a plain httptest.NewServer, not TLS
 	}); err == nil {
 		t.Error("expected discovery failure to return an error")
 	}
 }
 
-func TestNewProvider_RequireHTTPSRejectsHTTPIssuer(t *testing.T) {
-	// RequireHTTPS must reject a plaintext issuer before any discovery attempt.
+func TestNewProvider_RejectsHTTPIssuerByDefault(t *testing.T) {
+	// HTTPS is required by default — a plaintext issuer must be rejected before
+	// any discovery attempt, with no explicit opt-in required.
 	_, err := NewProvider(Config{
 		IssuerURL:    "http://issuer.example",
 		ClientID:     "id",
 		ClientSecret: "secret",
-		RequireHTTPS: true,
 	})
 	if err == nil {
-		t.Fatal("expected an error for an http issuer when RequireHTTPS is set")
+		t.Fatal("expected an error for an http issuer by default")
 	}
 	if !strings.Contains(err.Error(), "HTTPS") {
 		t.Errorf("expected an HTTPS error, got: %v", err)
@@ -124,28 +126,27 @@ func TestNewProvider_RequireHTTPSRejectsHTTPIssuer(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// RequireHTTPS + RedirectURL (issue #57 sub-finding 1)
+// HTTPS-by-default + RedirectURL (issue #57 sub-finding 1, issue #103)
 // ---------------------------------------------------------------------------
 
-func TestNewProvider_RequireHTTPSRejectsHTTPRedirectURL(t *testing.T) {
-	// An https issuer is used here so the error can only come from the new
-	// RedirectURL scheme check, not the pre-existing IssuerURL one.
+func TestNewProvider_RejectsHTTPRedirectURLByDefault(t *testing.T) {
+	// An https issuer is used here so the error can only come from the
+	// RedirectURL scheme check, not the IssuerURL one.
 	_, err := NewProvider(Config{
 		IssuerURL:    "https://issuer.example",
 		ClientID:     "id",
 		ClientSecret: "secret",
 		RedirectURL:  "http://app.example/callback",
-		RequireHTTPS: true,
 	})
 	if err == nil {
-		t.Fatal("expected an error for an http redirect URL when RequireHTTPS is set")
+		t.Fatal("expected an error for an http redirect URL by default")
 	}
 	if !strings.Contains(err.Error(), "HTTPS") || !strings.Contains(err.Error(), "redirect") {
 		t.Errorf("expected an HTTPS redirect URL error, got: %v", err)
 	}
 }
 
-func TestNewProvider_RequireHTTPSAllowsEmptyRedirectURL(t *testing.T) {
+func TestNewProvider_AllowsEmptyRedirectURLByDefault(t *testing.T) {
 	// An empty RedirectURL (e.g. a provider that only needs the OAuth2 config
 	// for token exchange, not browser redirects) must not be rejected: the
 	// check only fires when RedirectURL is non-empty.
@@ -153,17 +154,39 @@ func TestNewProvider_RequireHTTPSAllowsEmptyRedirectURL(t *testing.T) {
 		IssuerURL:    "https://issuer.example",
 		ClientID:     "id",
 		ClientSecret: "secret",
-		RequireHTTPS: true,
 	})
 	if err != nil && strings.Contains(err.Error(), "redirect") {
 		t.Errorf("expected no redirect-URL error for an empty RedirectURL, got: %v", err)
 	}
 }
 
-func TestNewProvider_RequireHTTPSAcceptsHTTPSIssuerAndRedirect(t *testing.T) {
-	// Full success path: RequireHTTPS is set, both IssuerURL and RedirectURL
-	// are https, and discovery actually succeeds. This is the regression guard
-	// that the new RedirectURL check doesn't reject valid https input.
+func TestIsHTTPSURL_CaseInsensitiveScheme(t *testing.T) {
+	// The scheme check must not reject a URL solely because of casing: RFC
+	// 3986 defines "scheme" as case-insensitive, so a caller-provided
+	// "HTTPS://" or "HttpS://" issuer/redirect URL must be accepted exactly
+	// like a lowercase "https://" one, not rejected as if it were plaintext.
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"https://issuer.example", true},
+		{"HTTPS://issuer.example", true},
+		{"HttpS://issuer.example", true},
+		{"http://issuer.example", false},
+		{"HTTP://issuer.example", false},
+		{"not-a-url with spaces", false},
+	}
+	for _, c := range cases {
+		if got := isHTTPSURL(c.url); got != c.want {
+			t.Errorf("isHTTPSURL(%q) = %v, want %v", c.url, got, c.want)
+		}
+	}
+}
+
+func TestNewProvider_AcceptsHTTPSIssuerAndRedirectByDefault(t *testing.T) {
+	// Full success path: both IssuerURL and RedirectURL are https (the secure
+	// default), and discovery actually succeeds. This is the regression guard
+	// that the RedirectURL check doesn't reject valid https input.
 	mux := http.NewServeMux()
 	srv := httptest.NewTLSServer(mux)
 	defer srv.Close()
@@ -192,7 +215,6 @@ func TestNewProvider_RequireHTTPSAcceptsHTTPSIssuerAndRedirect(t *testing.T) {
 		ClientID:     "my-client",
 		ClientSecret: "my-secret",
 		RedirectURL:  "https://app.example/callback",
-		RequireHTTPS: true,
 	})
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
@@ -202,20 +224,20 @@ func TestNewProvider_RequireHTTPSAcceptsHTTPSIssuerAndRedirect(t *testing.T) {
 	}
 }
 
-func TestNewProvider_RequireHTTPSFalseAllowsHTTPIssuerAndRedirect(t *testing.T) {
-	// Regression guard: with RequireHTTPS left at its default (false), an http
-	// issuer and http redirect URL must be accepted exactly as before this
-	// change — the new RedirectURL check must not fire when RequireHTTPS is
-	// false.
+func TestNewProvider_AllowInsecureIssuerTrueAllowsHTTPIssuerAndRedirect(t *testing.T) {
+	// Explicit local/dev opt-out: with AllowInsecureIssuer set true, an http
+	// issuer and http redirect URL are accepted — the RedirectURL check must
+	// not fire when the caller has explicitly opted out of the HTTPS default.
 	srv := discoveryServer(t)
 	defer srv.Close()
 
 	p, err := NewProviderWithContext(context.Background(), Config{
-		IssuerURL:    srv.URL,
-		ClientID:     "my-client",
-		ClientSecret: "my-secret",
-		RedirectURL:  "http://app.example/callback",
-		Scopes:       []string{"openid"},
+		IssuerURL:           srv.URL,
+		ClientID:            "my-client",
+		ClientSecret:        "my-secret",
+		RedirectURL:         "http://app.example/callback",
+		Scopes:              []string{"openid"},
+		AllowInsecureIssuer: true,
 	})
 	if err != nil {
 		t.Fatalf("NewProviderWithContext: %v", err)
@@ -244,9 +266,10 @@ func TestNewProviderWithContext_SlowDiscoveryFailsFast(t *testing.T) {
 
 	start := time.Now()
 	_, err := NewProviderWithContext(context.Background(), Config{
-		IssuerURL:    srv.URL,
-		ClientID:     "id",
-		ClientSecret: "secret",
+		IssuerURL:           srv.URL,
+		ClientID:            "id",
+		ClientSecret:        "secret",
+		AllowInsecureIssuer: true, // srv is a plain httptest.NewServer, not TLS
 	})
 	elapsed := time.Since(start)
 
@@ -283,9 +306,10 @@ func TestNewProvider_SlowDiscoveryFailsFast(t *testing.T) {
 
 	start := time.Now()
 	_, err := NewProvider(Config{
-		IssuerURL:    srv.URL,
-		ClientID:     "id",
-		ClientSecret: "secret",
+		IssuerURL:           srv.URL,
+		ClientID:            "id",
+		ClientSecret:        "secret",
+		AllowInsecureIssuer: true, // srv is a plain httptest.NewServer, not TLS
 	})
 	elapsed := time.Since(start)
 
@@ -324,9 +348,10 @@ func TestExchangeCode_SlowTokenEndpointFailsFast(t *testing.T) {
 	})
 
 	p, err := NewProviderWithContext(context.Background(), Config{
-		IssuerURL:    srv.URL,
-		ClientID:     "id",
-		ClientSecret: "secret",
+		IssuerURL:           srv.URL,
+		ClientID:            "id",
+		ClientSecret:        "secret",
+		AllowInsecureIssuer: true, // srv is a plain httptest.NewServer, not TLS
 	})
 	if err != nil {
 		t.Fatalf("NewProviderWithContext: %v", err)
@@ -502,11 +527,12 @@ func TestBeginAuth_IncludesNonceAndPKCE(t *testing.T) {
 func TestExchangeAndVerify_NonceAndPKCE(t *testing.T) {
 	idp := newMockIDP(t, "my-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
-		IssuerURL:    idp.server.URL,
-		ClientID:     "my-client",
-		ClientSecret: "my-secret",
-		RedirectURL:  "https://app.example/callback",
-		Scopes:       []string{"openid", "email"},
+		IssuerURL:           idp.server.URL,
+		ClientID:            "my-client",
+		ClientSecret:        "my-secret",
+		RedirectURL:         "https://app.example/callback",
+		Scopes:              []string{"openid", "email"},
+		AllowInsecureIssuer: true, // idp.server is a plain httptest.NewServer, not TLS
 	})
 	if err != nil {
 		t.Fatalf("NewProviderWithContext: %v", err)
@@ -543,9 +569,10 @@ func TestExchangeAndVerify_NonceAndPKCE(t *testing.T) {
 func TestVerifyIDToken_NonceMismatch(t *testing.T) {
 	idp := newMockIDP(t, "my-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
-		IssuerURL:    idp.server.URL,
-		ClientID:     "my-client",
-		ClientSecret: "my-secret",
+		IssuerURL:           idp.server.URL,
+		ClientID:            "my-client",
+		ClientSecret:        "my-secret",
+		AllowInsecureIssuer: true, // idp.server is a plain httptest.NewServer, not TLS
 	})
 	if err != nil {
 		t.Fatalf("NewProviderWithContext: %v", err)
@@ -563,9 +590,39 @@ func TestVerifyIDToken_NonceMismatch(t *testing.T) {
 		t.Fatal("expected an error for a nonce mismatch")
 	}
 
-	// Without a nonce expectation, verification succeeds (backward compatible).
+	// A token that carries a nonce claim must not be accepted without an
+	// expected nonce to check it against (issue #104): silently skipping the
+	// check here would drop the nonce binding for a login that requested one.
+	if _, err := p.VerifyIDToken(context.Background(), rawID); err == nil {
+		t.Fatal("expected an error verifying a nonce-bearing token without WithExpectedNonce")
+	}
+}
+
+func TestVerifyIDToken_NoNonceClaimSucceedsWithoutExpectation(t *testing.T) {
+	// The fully-legacy GetAuthURL flow never requests a nonce, so the resulting
+	// ID token carries no nonce claim at all. There is nothing to bind in that
+	// case, so verification without WithExpectedNonce must still succeed —
+	// only a token that DOES carry a nonce claim requires the caller to check
+	// it (see TestVerifyIDToken_NonceMismatch).
+	idp := newMockIDP(t, "my-client")
+	p, err := NewProviderWithContext(context.Background(), Config{
+		IssuerURL:           idp.server.URL,
+		ClientID:            "my-client",
+		ClientSecret:        "my-secret",
+		AllowInsecureIssuer: true, // idp.server is a plain httptest.NewServer, not TLS
+	})
+	if err != nil {
+		t.Fatalf("NewProviderWithContext: %v", err)
+	}
+
+	tok, err := p.ExchangeCode(context.Background(), "auth-code")
+	if err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	rawID, _ := tok.Extra("id_token").(string)
+
 	if _, err := p.VerifyIDToken(context.Background(), rawID); err != nil {
-		t.Errorf("VerifyIDToken without nonce expectation: %v", err)
+		t.Errorf("VerifyIDToken for a no-nonce token without an expectation: %v", err)
 	}
 }
 
@@ -714,9 +771,10 @@ func verifiedIDToken(t *testing.T, extra jwt.MapClaims) *oidcpkg.IDToken {
 	t.Helper()
 	idp := newMockIDP(t, "test-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
-		IssuerURL:    idp.server.URL,
-		ClientID:     "test-client",
-		ClientSecret: "test-secret",
+		IssuerURL:           idp.server.URL,
+		ClientID:            "test-client",
+		ClientSecret:        "test-secret",
+		AllowInsecureIssuer: true, // idp.server is a plain httptest.NewServer, not TLS
 	})
 	if err != nil {
 		t.Fatalf("NewProviderWithContext: %v", err)
