@@ -52,8 +52,11 @@ func (r *UserRepository) CreateUser(ctx context.Context, user *models.User) erro
 		user.CreatedAt,
 		user.UpdatedAt,
 	)
+	if err != nil {
+		return fmt.Errorf("failed to create user: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // GetUserByID retrieves a user by ID
@@ -79,7 +82,7 @@ func (r *UserRepository) GetUserByID(ctx context.Context, userID string) (*model
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get user by id: %w", err)
 	}
 
 	return user, nil
@@ -108,7 +111,7 @@ func (r *UserRepository) GetUserByEmail(ctx context.Context, email string) (*mod
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get user by email: %w", err)
 	}
 
 	return user, nil
@@ -137,7 +140,7 @@ func (r *UserRepository) GetUserByOIDCSub(ctx context.Context, oidcSub string) (
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get user by oidc sub: %w", err)
 	}
 
 	return user, nil
@@ -160,28 +163,28 @@ func (r *UserRepository) UpdateUser(ctx context.Context, user *models.User) erro
 		user.OIDCSub,
 		user.UpdatedAt,
 	)
+	if err != nil {
+		return fmt.Errorf("failed to update user: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // DeleteUser deletes a user (cascades to API keys and memberships)
 func (r *UserRepository) DeleteUser(ctx context.Context, userID string) error {
 	query := `DELETE FROM users WHERE id = $1`
 	_, err := r.db.ExecContext(ctx, query, userID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to delete user: %w", err)
+	}
+	return nil
 }
 
-// ListUsers retrieves a paginated list of users
-func (r *UserRepository) ListUsers(ctx context.Context, limit, offset int) ([]*models.User, int, error) {
-	// Get total count
-	var total int
-	countQuery := `SELECT COUNT(*) FROM users`
-	err := r.db.QueryRowContext(ctx, countQuery).Scan(&total)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Get paginated users
+// listUsersPage runs the shared paginated users SELECT, used by both ListUsers
+// (which also returns a total count) and List (which does not). Extracted so
+// the two never drift into two independently-maintained copies of the same
+// query.
+func (r *UserRepository) listUsersPage(ctx context.Context, limit, offset int) ([]*models.User, error) {
 	query := `
 		SELECT id, email, name, oidc_sub, created_at, updated_at
 		FROM users
@@ -191,7 +194,7 @@ func (r *UserRepository) ListUsers(ctx context.Context, limit, offset int) ([]*m
 
 	rows, err := r.db.QueryContext(ctx, query, limit, offset)
 	if err != nil {
-		return nil, 0, err
+		return nil, fmt.Errorf("failed to list users: %w", err)
 	}
 	defer rows.Close()
 
@@ -207,12 +210,30 @@ func (r *UserRepository) ListUsers(ctx context.Context, limit, offset int) ([]*m
 			&user.UpdatedAt,
 		)
 		if err != nil {
-			return nil, 0, err
+			return nil, fmt.Errorf("failed to scan user: %w", err)
 		}
 		users = append(users, user)
 	}
 
-	return users, total, rows.Err()
+	return users, rows.Err()
+}
+
+// ListUsers retrieves a paginated list of users
+func (r *UserRepository) ListUsers(ctx context.Context, limit, offset int) ([]*models.User, int, error) {
+	// Get total count
+	var total int
+	countQuery := `SELECT COUNT(*) FROM users`
+	err := r.db.QueryRowContext(ctx, countQuery).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count users: %w", err)
+	}
+
+	users, err := r.listUsersPage(ctx, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return users, total, nil
 }
 
 // GetOrCreateUserFromOIDC gets or creates a user from OIDC authentication.
@@ -313,7 +334,7 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 		// that still means "someone else already created this identity", so fall
 		// back the same way rather than treating it as a distinct error.
 		if !isUniqueViolation(err) {
-			return nil, err
+			return nil, fmt.Errorf("failed to create user from oidc: %w", err)
 		}
 	} else if n, _ := result.RowsAffected(); n > 0 {
 		return newUser, nil
@@ -349,39 +370,9 @@ func (r *UserRepository) Delete(ctx context.Context, userID string) error {
 	return r.DeleteUser(ctx, userID)
 }
 
-// List retrieves a paginated list of users (simplified version)
+// List is an alias for ListUsers that omits the total count, to match admin handlers
 func (r *UserRepository) List(ctx context.Context, limit, offset int) ([]*models.User, error) {
-	query := `
-		SELECT id, email, name, oidc_sub, created_at, updated_at
-		FROM users
-		ORDER BY created_at DESC
-		LIMIT $1 OFFSET $2
-	`
-
-	rows, err := r.db.QueryContext(ctx, query, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	users := make([]*models.User, 0)
-	for rows.Next() {
-		user := &models.User{}
-		err := rows.Scan(
-			&user.ID,
-			&user.Email,
-			&user.Name,
-			&user.OIDCSub,
-			&user.CreatedAt,
-			&user.UpdatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		users = append(users, user)
-	}
-
-	return users, rows.Err()
+	return r.listUsersPage(ctx, limit, offset)
 }
 
 // Count returns the total number of users
@@ -389,7 +380,10 @@ func (r *UserRepository) Count(ctx context.Context) (int, error) {
 	var total int
 	query := `SELECT COUNT(*) FROM users`
 	err := r.db.QueryRowContext(ctx, query).Scan(&total)
-	return total, err
+	if err != nil {
+		return 0, fmt.Errorf("failed to count users: %w", err)
+	}
+	return total, nil
 }
 
 // Search searches for users by email or name
@@ -405,7 +399,7 @@ func (r *UserRepository) Search(ctx context.Context, query string, limit, offset
 	searchPattern := "%" + escapeLikePattern(query) + "%"
 	rows, err := r.db.QueryContext(ctx, searchQuery, searchPattern, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to search users: %w", err)
 	}
 	defer rows.Close()
 
@@ -421,7 +415,7 @@ func (r *UserRepository) Search(ctx context.Context, query string, limit, offset
 			&user.UpdatedAt,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan user: %w", err)
 		}
 		users = append(users, user)
 	}
@@ -460,7 +454,7 @@ func (r *UserRepository) GetUserWithOrgRoles(ctx context.Context, userID string)
 
 	rows, err := r.db.QueryContext(ctx, query, userID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get user memberships: %w", err)
 	}
 	defer rows.Close()
 
@@ -478,12 +472,12 @@ func (r *UserRepository) GetUserWithOrgRoles(ctx context.Context, userID string)
 			&scopesJSON,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan membership: %w", err)
 		}
 		// Parse scopes JSON
 		if len(scopesJSON) > 0 {
 			if err := json.Unmarshal(scopesJSON, &m.RoleTemplateScopes); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to parse scopes: %w", err)
 			}
 		}
 		memberships = append(memberships, m)
@@ -530,7 +524,7 @@ func (r *UserRepository) loadMembershipsForUsers(ctx context.Context, users []*m
 
 	rows, err := r.db.QueryContext(ctx, query, pq.Array(userIDs))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load memberships for users: %w", err)
 	}
 	defer rows.Close()
 
@@ -555,11 +549,11 @@ func (r *UserRepository) loadMembershipsForUsers(ctx context.Context, users []*m
 			&scopesJSON,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan membership: %w", err)
 		}
 		if len(scopesJSON) > 0 {
 			if err := json.Unmarshal(scopesJSON, &m.RoleTemplateScopes); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to parse scopes: %w", err)
 			}
 		}
 		if uwor, ok := resultByUserID[userID]; ok {

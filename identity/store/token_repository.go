@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -24,7 +25,10 @@ func (r *TokenRepository) RevokeToken(ctx context.Context, jti, userID string, e
 		ON CONFLICT (jti) DO NOTHING
 	`
 	_, err := r.db.ExecContext(ctx, query, jti, userID, expiresAt)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to revoke token: %w", err)
+	}
+	return nil
 }
 
 // IsTokenRevoked checks whether a JTI has been revoked
@@ -32,12 +36,18 @@ func (r *TokenRepository) IsTokenRevoked(ctx context.Context, jti string) (bool,
 	query := `SELECT EXISTS(SELECT 1 FROM revoked_tokens WHERE jti = $1)`
 	var exists bool
 	err := r.db.QueryRowContext(ctx, query, jti).Scan(&exists)
-	return exists, err
+	if err != nil {
+		return false, fmt.Errorf("failed to check token revocation: %w", err)
+	}
+	return exists, nil
 }
 
 // CleanupExpiredRevocations removes entries whose tokens have already expired
 func (r *TokenRepository) CleanupExpiredRevocations(ctx context.Context) error {
 	query := `DELETE FROM revoked_tokens WHERE expires_at < NOW()`
 	_, err := r.db.ExecContext(ctx, query)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to cleanup expired token revocations: %w", err)
+	}
+	return nil
 }
