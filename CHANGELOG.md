@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.18.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.17.0...v0.18.0) (2026-07-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **oidc:** Config.RequireHTTPS is renamed to Config.AllowInsecureIssuer and the default is inverted (HTTPS is now required unless a caller opts out). Consumers setting RequireHTTPS will fail to compile until updated.
+
+### Bug Fixes
+
+* **oidc:** require HTTPS by default and fail closed on unchecked nonce ([#107](https://github.com/sethbacon/terraform-suite-identity/issues/107)) ([c686346](https://github.com/sethbacon/terraform-suite-identity/commit/c6863468f7aeda95a41a3a5b54ba99db160d7d72)), closes [#103](https://github.com/sethbacon/terraform-suite-identity/issues/103) [#104](https://github.com/sethbacon/terraform-suite-identity/issues/104)
+* **store:** complete [#70](https://github.com/sethbacon/terraform-suite-identity/issues/70) code-quality cleanups without breaking consumers ([#109](https://github.com/sethbacon/terraform-suite-identity/issues/109)) ([8190af4](https://github.com/sethbacon/terraform-suite-identity/commit/8190af4048adaa3a5f46a068b33dc0af9706a5ff))
+
 ## [0.17.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.16.1...v0.17.0) (2026-07-12)
 
 
