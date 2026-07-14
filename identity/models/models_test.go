@@ -2,11 +2,56 @@ package models
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sethbacon/terraform-suite-identity/identity/auth"
 )
+
+func TestParseRoleTemplateID(t *testing.T) {
+	validID := uuid.New()
+	validIDStr := validID.String()
+	invalidIDStr := "not-a-uuid"
+
+	cases := []struct {
+		name      string
+		id        *string
+		wantUUID  uuid.UUID
+		wantOK    bool
+		wantErr   bool
+		errSubstr string
+	}{
+		{"nil id", nil, uuid.Nil, false, false, ""},
+		{"valid id", &validIDStr, validID, true, false, ""},
+		{"invalid id", &invalidIDStr, uuid.Nil, false, true, invalidIDStr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok, err := ParseRoleTemplateID(tc.id)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Errorf("error %q does not mention %q", err.Error(), tc.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if got != tc.wantUUID {
+				t.Errorf("uuid = %v, want %v", got, tc.wantUUID)
+			}
+		})
+	}
+}
 
 func TestOIDCConfig_GetScopes(t *testing.T) {
 	cases := []struct {

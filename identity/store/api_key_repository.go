@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,10 +51,10 @@ func scanAPIKey(row rowScanner) (*models.APIKey, error) {
 		&apiKey.ExpiryNotificationSentAt,
 		&apiKey.CreatedAt,
 	); err != nil {
-		return nil, err
+		return nil, err // sql.ErrNoRows must reach callers unwrapped so `err == sql.ErrNoRows` checks keep working
 	}
 	if err := json.Unmarshal(scopesJSON, &apiKey.Scopes); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal api key scopes: %w", err)
 	}
 	return apiKey, nil
 }
@@ -79,10 +80,10 @@ func scanAPIKeyWithUserName(rows *sql.Rows) (*models.APIKey, error) {
 		&apiKey.CreatedAt,
 		&apiKey.UserName,
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to scan api key: %w", err)
 	}
 	if err := json.Unmarshal(scopesJSON, &apiKey.Scopes); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal api key scopes: %w", err)
 	}
 	return apiKey, nil
 }
@@ -95,7 +96,7 @@ func (r *APIKeyRepository) CreateAPIKey(ctx context.Context, apiKey *models.APIK
 	// Marshal scopes to JSONB
 	scopesJSON, err := json.Marshal(apiKey.Scopes)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal api key scopes: %w", err)
 	}
 
 	query := `
@@ -116,8 +117,11 @@ func (r *APIKeyRepository) CreateAPIKey(ctx context.Context, apiKey *models.APIK
 		apiKey.LastUsedAt,
 		apiKey.CreatedAt,
 	)
+	if err != nil {
+		return fmt.Errorf("failed to create api key: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // GetAPIKeyByHash retrieves an API key by an EXACT match on its stored
@@ -146,38 +150,13 @@ func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) 
 		WHERE key_hash = $1
 	`
 
-	apiKey := &models.APIKey{}
-	var scopesJSON []byte
-
-	err := r.db.QueryRowContext(ctx, query, keyHash).Scan(
-		&apiKey.ID,
-		&apiKey.UserID,
-		&apiKey.OrganizationID,
-		&apiKey.Name,
-		&apiKey.Description,
-		&apiKey.KeyHash,
-		&apiKey.KeyPrefix,
-		&scopesJSON,
-		&apiKey.ExpiresAt,
-		&apiKey.LastUsedAt,
-		&apiKey.ExpiryNotificationSentAt,
-		&apiKey.CreatedAt,
-	)
-
+	apiKey, err := scanAPIKey(r.db.QueryRowContext(ctx, query, keyHash))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get api key by hash: %w", err)
 	}
-
-	// Unmarshal scopes from JSONB
-	err = json.Unmarshal(scopesJSON, &apiKey.Scopes)
-	if err != nil {
-		return nil, err
-	}
-
 	return apiKey, nil
 }
 
@@ -195,7 +174,7 @@ func (r *APIKeyRepository) GetAPIKeyByID(ctx context.Context, keyID string) (*mo
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get api key by id: %w", err)
 	}
 	return apiKey, nil
 }
@@ -213,7 +192,7 @@ func (r *APIKeyRepository) ListAPIKeysByUser(ctx context.Context, userID string)
 
 	rows, err := r.db.QueryContext(ctx, query, userID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list api keys by user: %w", err)
 	}
 	defer rows.Close()
 
@@ -242,7 +221,7 @@ func (r *APIKeyRepository) ListAPIKeysByOrganization(ctx context.Context, orgID 
 
 	rows, err := r.db.QueryContext(ctx, query, orgID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list api keys by organization: %w", err)
 	}
 	defer rows.Close()
 
@@ -267,14 +246,20 @@ func (r *APIKeyRepository) UpdateLastUsed(ctx context.Context, keyID string) err
 	`
 
 	_, err := r.db.ExecContext(ctx, query, keyID, time.Now())
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update api key last used: %w", err)
+	}
+	return nil
 }
 
 // RevokeAPIKey deletes/revokes an API key
 func (r *APIKeyRepository) RevokeAPIKey(ctx context.Context, keyID string) error {
 	query := `DELETE FROM api_keys WHERE id = $1`
 	_, err := r.db.ExecContext(ctx, query, keyID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to revoke api key: %w", err)
+	}
+	return nil
 }
 
 // DeleteExpiredKeys deletes all expired API keys (for cleanup/cron job)
@@ -285,7 +270,10 @@ func (r *APIKeyRepository) DeleteExpiredKeys(ctx context.Context) error {
 	`
 
 	_, err := r.db.ExecContext(ctx, query, time.Now())
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to delete expired api keys: %w", err)
+	}
+	return nil
 }
 
 // GetAPIKeysByPrefix retrieves the non-expired API keys matching a prefix
@@ -311,7 +299,7 @@ func (r *APIKeyRepository) GetAPIKeysByPrefix(ctx context.Context, keyPrefix str
 
 	rows, err := r.db.QueryContext(ctx, query, keyPrefix)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get api keys by prefix: %w", err)
 	}
 	defer rows.Close()
 
@@ -333,9 +321,12 @@ func (r *APIKeyRepository) GetAPIKeysByPrefix(ctx context.Context, keyPrefix str
 // can look up an email address.
 func (r *APIKeyRepository) FindExpiringKeys(ctx context.Context, warningDays int) ([]*models.APIKey, error) {
 	cutoff := time.Now().Add(time.Duration(warningDays) * 24 * time.Hour)
+	// expiry_notification_sent_at is selected (though the WHERE clause guarantees
+	// it's NULL for every matching row) purely so this query shares scanAPIKey's
+	// column projection.
 	query := `
 		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
-		       expires_at, last_used_at, created_at
+		       expires_at, last_used_at, expiry_notification_sent_at, created_at
 		FROM api_keys
 		WHERE expires_at IS NOT NULL
 		  AND expires_at > NOW()
@@ -347,22 +338,14 @@ func (r *APIKeyRepository) FindExpiringKeys(ctx context.Context, warningDays int
 
 	rows, err := r.db.QueryContext(ctx, query, cutoff)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to find expiring api keys: %w", err)
 	}
 	defer rows.Close()
 
 	keys := make([]*models.APIKey, 0)
 	for rows.Next() {
-		k := &models.APIKey{}
-		var scopesJSON []byte
-		err := rows.Scan(
-			&k.ID, &k.UserID, &k.OrganizationID, &k.Name, &k.Description,
-			&k.KeyHash, &k.KeyPrefix, &scopesJSON, &k.ExpiresAt, &k.LastUsedAt, &k.CreatedAt,
-		)
+		k, err := scanAPIKey(rows)
 		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(scopesJSON, &k.Scopes); err != nil {
 			return nil, err
 		}
 		keys = append(keys, k)
@@ -375,7 +358,10 @@ func (r *APIKeyRepository) FindExpiringKeys(ctx context.Context, warningDays int
 func (r *APIKeyRepository) MarkExpiryNotificationSent(ctx context.Context, keyID string) error {
 	query := `UPDATE api_keys SET expiry_notification_sent_at = $1 WHERE id = $2`
 	_, err := r.db.ExecContext(ctx, query, time.Now(), keyID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to mark api key expiry notification sent: %w", err)
+	}
+	return nil
 }
 
 // Create is an alias for CreateAPIKey to match admin handlers
@@ -393,7 +379,7 @@ func (r *APIKeyRepository) Update(ctx context.Context, apiKey *models.APIKey) er
 	// Marshal scopes to JSONB
 	scopesJSON, err := json.Marshal(apiKey.Scopes)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal api key scopes: %w", err)
 	}
 
 	query := `
@@ -409,8 +395,11 @@ func (r *APIKeyRepository) Update(ctx context.Context, apiKey *models.APIKey) er
 		scopesJSON,
 		apiKey.ExpiresAt,
 	)
+	if err != nil {
+		return fmt.Errorf("failed to update api key: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // Delete is an alias for RevokeAPIKey to match admin handlers
@@ -441,40 +430,16 @@ func (r *APIKeyRepository) ListByUserAndOrganization(ctx context.Context, userID
 
 	rows, err := r.db.QueryContext(ctx, query, userID, orgID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list api keys by user and organization: %w", err)
 	}
 	defer rows.Close()
 
 	apiKeys := make([]*models.APIKey, 0)
 	for rows.Next() {
-		apiKey := &models.APIKey{}
-		var scopesJSON []byte
-
-		err := rows.Scan(
-			&apiKey.ID,
-			&apiKey.UserID,
-			&apiKey.OrganizationID,
-			&apiKey.Name,
-			&apiKey.Description,
-			&apiKey.KeyHash,
-			&apiKey.KeyPrefix,
-			&scopesJSON,
-			&apiKey.ExpiresAt,
-			&apiKey.LastUsedAt,
-			&apiKey.ExpiryNotificationSentAt,
-			&apiKey.CreatedAt,
-			&apiKey.UserName,
-		)
+		apiKey, err := scanAPIKeyWithUserName(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		// Unmarshal scopes from JSONB
-		err = json.Unmarshal(scopesJSON, &apiKey.Scopes)
-		if err != nil {
-			return nil, err
-		}
-
 		apiKeys = append(apiKeys, apiKey)
 	}
 
@@ -493,40 +458,16 @@ func (r *APIKeyRepository) ListAll(ctx context.Context) ([]*models.APIKey, error
 
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list all api keys: %w", err)
 	}
 	defer rows.Close()
 
 	allKeys := make([]*models.APIKey, 0)
 	for rows.Next() {
-		apiKey := &models.APIKey{}
-		var scopesJSON []byte
-
-		err := rows.Scan(
-			&apiKey.ID,
-			&apiKey.UserID,
-			&apiKey.OrganizationID,
-			&apiKey.Name,
-			&apiKey.Description,
-			&apiKey.KeyHash,
-			&apiKey.KeyPrefix,
-			&scopesJSON,
-			&apiKey.ExpiresAt,
-			&apiKey.LastUsedAt,
-			&apiKey.ExpiryNotificationSentAt,
-			&apiKey.CreatedAt,
-			&apiKey.UserName,
-		)
+		apiKey, err := scanAPIKeyWithUserName(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		// Unmarshal scopes from JSONB
-		err = json.Unmarshal(scopesJSON, &apiKey.Scopes)
-		if err != nil {
-			return nil, err
-		}
-
 		allKeys = append(allKeys, apiKey)
 	}
 

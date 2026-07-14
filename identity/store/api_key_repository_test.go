@@ -443,7 +443,8 @@ func TestAPIKey_ListByOrganization_Delegate(t *testing.T) {
 
 var expiringKeyCols = []string{
 	"id", "user_id", "organization_id", "name", "description",
-	"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at", "created_at",
+	"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at",
+	"expiry_notification_sent_at", "created_at",
 }
 
 func TestFindExpiringKeys_Success(t *testing.T) {
@@ -451,7 +452,7 @@ func TestFindExpiringKeys_Success(t *testing.T) {
 
 	rows := sqlmock.NewRows(expiringKeyCols).
 		AddRow("key-1", "user-1", "org-1", "CI Key", nil, "hashedkey", "tfr_abc123",
-			sampleScopes, nil, nil, time.Now())
+			sampleScopes, nil, nil, nil, time.Now())
 	mock.ExpectQuery("SELECT.*FROM api_keys").
 		WillReturnRows(rows)
 

@@ -26,6 +26,38 @@ func NewRoleTemplateRepository(db *sqlx.DB) *RoleTemplateRepository {
 	return &RoleTemplateRepository{db: db}
 }
 
+// roleTemplateRow is the sqlx StructScan target for a role_templates row.
+// scopes is scanned into a raw JSONB byte slice (rather than models.RoleTemplate's
+// []string Scopes field directly) since sqlx has no built-in JSONB-to-[]string
+// conversion; toModel does that unmarshal explicitly.
+type roleTemplateRow struct {
+	ID          uuid.UUID `db:"id"`
+	Name        string    `db:"name"`
+	DisplayName string    `db:"display_name"`
+	Description *string   `db:"description"`
+	ScopesJSON  []byte    `db:"scopes"`
+	IsSystem    bool      `db:"is_system"`
+	CreatedAt   time.Time `db:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at"`
+}
+
+func (row *roleTemplateRow) toModel() (*models.RoleTemplate, error) {
+	var scopes []string
+	if err := json.Unmarshal(row.ScopesJSON, &scopes); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal role template scopes: %w", err)
+	}
+	return &models.RoleTemplate{
+		ID:          row.ID,
+		Name:        row.Name,
+		DisplayName: row.DisplayName,
+		Description: row.Description,
+		Scopes:      scopes,
+		IsSystem:    row.IsSystem,
+		CreatedAt:   row.CreatedAt,
+		UpdatedAt:   row.UpdatedAt,
+	}, nil
+}
+
 // ListRoleTemplates returns all role templates.
 func (r *RoleTemplateRepository) ListRoleTemplates(ctx context.Context) ([]*models.RoleTemplate, error) {
 	query := `SELECT id, name, display_name, description, scopes, is_system, created_at, updated_at
@@ -33,21 +65,21 @@ func (r *RoleTemplateRepository) ListRoleTemplates(ctx context.Context) ([]*mode
 
 	rows, err := r.db.QueryxContext(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list role templates: %w", err)
 	}
 	defer rows.Close()
 
 	var templates []*models.RoleTemplate
 	for rows.Next() {
-		var t models.RoleTemplate
-		var scopesJSON []byte
-		if err := rows.Scan(&t.ID, &t.Name, &t.DisplayName, &t.Description, &scopesJSON, &t.IsSystem, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		var row roleTemplateRow
+		if err := rows.StructScan(&row); err != nil {
+			return nil, fmt.Errorf("failed to scan role template: %w", err)
+		}
+		t, err := row.toModel()
+		if err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal(scopesJSON, &t.Scopes); err != nil {
-			return nil, err
-		}
-		templates = append(templates, &t)
+		templates = append(templates, t)
 	}
 
 	return templates, rows.Err()
@@ -58,20 +90,16 @@ func (r *RoleTemplateRepository) GetRoleTemplate(ctx context.Context, id uuid.UU
 	query := `SELECT id, name, display_name, description, scopes, is_system, created_at, updated_at
 			  FROM role_templates WHERE id = $1`
 
-	var t models.RoleTemplate
-	var scopesJSON []byte
-	err := r.db.QueryRowxContext(ctx, query, id).Scan(&t.ID, &t.Name, &t.DisplayName, &t.Description, &scopesJSON, &t.IsSystem, &t.CreatedAt, &t.UpdatedAt)
+	var row roleTemplateRow
+	err := r.db.QueryRowxContext(ctx, query, id).StructScan(&row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(scopesJSON, &t.Scopes); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get role template: %w", err)
 	}
 
-	return &t, nil
+	return row.toModel()
 }
 
 // GetRoleTemplateByName retrieves a role template by name.
@@ -79,27 +107,23 @@ func (r *RoleTemplateRepository) GetRoleTemplateByName(ctx context.Context, name
 	query := `SELECT id, name, display_name, description, scopes, is_system, created_at, updated_at
 			  FROM role_templates WHERE name = $1`
 
-	var t models.RoleTemplate
-	var scopesJSON []byte
-	err := r.db.QueryRowxContext(ctx, query, name).Scan(&t.ID, &t.Name, &t.DisplayName, &t.Description, &scopesJSON, &t.IsSystem, &t.CreatedAt, &t.UpdatedAt)
+	var row roleTemplateRow
+	err := r.db.QueryRowxContext(ctx, query, name).StructScan(&row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(scopesJSON, &t.Scopes); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get role template by name: %w", err)
 	}
 
-	return &t, nil
+	return row.toModel()
 }
 
 // CreateRoleTemplate creates a new role template.
 func (r *RoleTemplateRepository) CreateRoleTemplate(ctx context.Context, template *models.RoleTemplate) error {
 	scopesJSON, err := json.Marshal(template.Scopes)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal role template scopes: %w", err)
 	}
 
 	query := `INSERT INTO role_templates (id, name, display_name, description, scopes, is_system, created_at, updated_at)
@@ -107,14 +131,17 @@ func (r *RoleTemplateRepository) CreateRoleTemplate(ctx context.Context, templat
 
 	_, err = r.db.ExecContext(ctx, query,
 		template.ID, template.Name, template.DisplayName, template.Description, scopesJSON, template.IsSystem, template.CreatedAt, template.UpdatedAt)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to create role template: %w", err)
+	}
+	return nil
 }
 
 // UpdateRoleTemplate updates an existing role template (non-system only).
 func (r *RoleTemplateRepository) UpdateRoleTemplate(ctx context.Context, template *models.RoleTemplate) error {
 	scopesJSON, err := json.Marshal(template.Scopes)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal role template scopes: %w", err)
 	}
 
 	query := `UPDATE role_templates SET display_name = $2, description = $3, scopes = $4, updated_at = $5
@@ -123,11 +150,11 @@ func (r *RoleTemplateRepository) UpdateRoleTemplate(ctx context.Context, templat
 	result, err := r.db.ExecContext(ctx, query,
 		template.ID, template.DisplayName, template.Description, scopesJSON, time.Now())
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to update role template: %w", err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get rows affected updating role template: %w", err)
 	}
 	if n == 0 {
 		// The WHERE also matches on is_system = false, so zero rows means the
@@ -143,11 +170,11 @@ func (r *RoleTemplateRepository) DeleteRoleTemplate(ctx context.Context, id uuid
 	query := `DELETE FROM role_templates WHERE id = $1 AND is_system = false`
 	result, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to delete role template: %w", err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get rows affected deleting role template: %w", err)
 	}
 	if n == 0 {
 		return fmt.Errorf("role template %s not found or is a system template (immutable)", id)

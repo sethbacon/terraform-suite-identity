@@ -44,7 +44,7 @@ func (r *AuditRepository) CreateAuditLog(ctx context.Context, log *models.AuditL
 	if log.Metadata != nil {
 		metadataJSON, err := json.Marshal(log.Metadata)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to marshal audit log metadata: %w", err)
 		}
 		metadataArg = metadataJSON
 	}
@@ -54,8 +54,7 @@ func (r *AuditRepository) CreateAuditLog(ctx context.Context, log *models.AuditL
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
 
-	var err error
-	_, err = r.db.ExecContext(ctx, query,
+	_, err := r.db.ExecContext(ctx, query,
 		log.ID,
 		log.UserID,
 		log.OrganizationID,
@@ -66,8 +65,11 @@ func (r *AuditRepository) CreateAuditLog(ctx context.Context, log *models.AuditL
 		log.IPAddress,
 		log.CreatedAt,
 	)
+	if err != nil {
+		return fmt.Errorf("failed to create audit log: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // ListAuditLogs retrieves audit logs with optional filters and pagination.
@@ -141,7 +143,7 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 	var total int
 	err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("failed to count audit logs: %w", err)
 	}
 
 	// Add ordering and pagination
@@ -151,7 +153,7 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 	// Execute query
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("failed to list audit logs: %w", err)
 	}
 	defer rows.Close()
 
@@ -174,14 +176,14 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 			&log.UserName,
 		)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("failed to scan audit log: %w", err)
 		}
 
 		// Unmarshal metadata from JSONB
 		if metadataJSON != nil {
 			err = json.Unmarshal(metadataJSON, &log.Metadata)
 			if err != nil {
-				return nil, 0, err
+				return nil, 0, fmt.Errorf("failed to unmarshal audit log metadata: %w", err)
 			}
 		}
 
@@ -219,14 +221,14 @@ func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string) (*model
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get audit log: %w", err)
 	}
 
 	// Unmarshal metadata from JSONB
 	if metadataJSON != nil {
 		err = json.Unmarshal(metadataJSON, &log.Metadata)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to unmarshal audit log metadata: %w", err)
 		}
 	}
 
@@ -244,9 +246,13 @@ func (r *AuditRepository) DeleteAuditLogsBefore(ctx context.Context, cutoff time
 	`
 	result, err := r.db.ExecContext(ctx, query, cutoff, batchSize)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to delete audit logs before cutoff: %w", err)
 	}
-	return result.RowsAffected()
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected deleting audit logs: %w", err)
+	}
+	return n, nil
 }
 
 // StreamAuditLogs returns rows for the given date range for efficient streaming.
@@ -261,5 +267,9 @@ func (r *AuditRepository) StreamAuditLogs(ctx context.Context, startDate, endDat
 		WHERE al.created_at >= $1 AND al.created_at <= $2
 		ORDER BY al.created_at ASC
 	`
-	return r.db.QueryContext(ctx, query, startDate, endDate)
+	rows, err := r.db.QueryContext(ctx, query, startDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stream audit logs: %w", err)
+	}
+	return rows, nil
 }
