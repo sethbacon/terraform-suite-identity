@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.18.0...v0.18.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* close reopened 2026-07-14 audit regressions ([#54](https://github.com/sethbacon/terraform-suite-identity/issues/54), [#66](https://github.com/sethbacon/terraform-suite-identity/issues/66), [#67](https://github.com/sethbacon/terraform-suite-identity/issues/67), [#68](https://github.com/sethbacon/terraform-suite-identity/issues/68), [#70](https://github.com/sethbacon/terraform-suite-identity/issues/70)) ([#110](https://github.com/sethbacon/terraform-suite-identity/issues/110)) ([547c780](https://github.com/sethbacon/terraform-suite-identity/commit/547c780e9d27acad55e86fd09812924beddd1510))
+
 ## [0.18.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.17.0...v0.18.0) (2026-07-14)
 
 
