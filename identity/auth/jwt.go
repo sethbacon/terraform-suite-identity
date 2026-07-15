@@ -219,6 +219,15 @@ func (m *TokenManager) currentSecret() []byte {
 // single organization and that organization's own scopes, so the binding is
 // enforceable from the token alone via HasScopeInOrg (or HasAnyScopeInOrg /
 // HasAllScopesInOrg) instead of trusting a flat scope list.
+//
+// Deprecated: prefer GenerateForOrg for any multi-tenant deployment. Generate
+// mints a GLOBAL, org-less token from a flat scope union and is safe only for
+// a genuinely single-tenant consumer or a deliberate suite-wide/superuser
+// decision; feeding a cross-org scope union (e.g.
+// store.OrganizationRepository.GetUserCombinedScopes or
+// models.UserWithOrgRoles.GetAllowedScopes) into Generate is the cross-org
+// privilege-escalation primitive this warning describes. Retained (not
+// removed) for that narrow legitimate use.
 func (m *TokenManager) Generate(userID, email string, scopes []string, expiresIn time.Duration) (string, error) {
 	return m.generate(userID, email, "", scopes, expiresIn)
 }

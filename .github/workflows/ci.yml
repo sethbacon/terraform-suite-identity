@@ -76,11 +76,16 @@ jobs:
         # already produced above (no re-running tests, no new tooling — pure
         # stdlib python3, preinstalled on ubuntu-latest) and enforce a
         # statement-weighted floor scoped to identity/auth, identity/auth/oidc,
-        # and identity/store (JWT, OIDC relying-party, API-key, and data-access
-        # logic) independent of the blended total. The root "identity" package
-        # (migration runner) is deliberately not gated here: it legitimately
-        # requires a live PostgreSQL to exercise and is covered instead by the
-        # "integration-test" job's identity/db_integration_test.go.
+        # identity/store, and identity/suite (JWT, OIDC relying-party, API-key,
+        # data-access, and suite-coupling/discovery-client logic) independent of
+        # the blended total. identity/suite was added per the reopened #66: it is
+        # the library's other named security-relevant surface (the suite-coupling
+        # contract) and had been omitted from this list, so a coverage regression
+        # there could hide behind the aggregate the same way identity/auth/oidc
+        # once did. The root "identity" package (migration runner) is deliberately
+        # not gated here: it legitimately requires a live PostgreSQL to exercise
+        # and is covered instead by the "integration-test" job's
+        # identity/db_integration_test.go.
         run: |
           python3 - <<'PY'
           import sys
@@ -92,6 +97,7 @@ jobs:
               "identity/auth",
               "identity/auth/oidc",
               "identity/store",
+              "identity/suite",
           ]
 
           covered = defaultdict(int)

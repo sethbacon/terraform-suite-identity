@@ -10,6 +10,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,12 +58,15 @@ func (r *OIDCConfigRepository) CreateOIDCConfig(ctx context.Context, config *mod
 			config.RedirectURL, config.Scopes, config.IsActive, config.ExtraConfig,
 			config.CreatedAt, config.UpdatedAt, config.CreatedBy, config.UpdatedBy,
 		)
-		return err
+		if err != nil {
+			return fmt.Errorf("failed to create oidc config: %w", err)
+		}
+		return nil
 	}
 
 	tx, err := r.db.BeginTxx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to begin transaction creating active oidc config: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
 
@@ -76,10 +80,13 @@ func (r *OIDCConfigRepository) CreateOIDCConfig(ctx context.Context, config *mod
 		config.RedirectURL, config.Scopes, config.IsActive, config.ExtraConfig,
 		config.CreatedAt, config.UpdatedAt, config.CreatedBy, config.UpdatedBy,
 	); err != nil {
-		return err
+		return fmt.Errorf("failed to create active oidc config: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit active oidc config creation: %w", err)
+	}
+	return nil
 }
 
 // oidcConfigColumns is the explicit column projection for oidc_config reads.
@@ -105,7 +112,10 @@ func (r *OIDCConfigRepository) GetActiveOIDCConfig(ctx context.Context) (*models
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return &config, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get active oidc config: %w", err)
+	}
+	return &config, nil
 }
 
 // GetOIDCConfig retrieves an OIDC configuration by ID.
@@ -116,7 +126,10 @@ func (r *OIDCConfigRepository) GetOIDCConfig(ctx context.Context, id uuid.UUID) 
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return &config, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get oidc config %s: %w", id, err)
+	}
+	return &config, nil
 }
 
 // ListOIDCConfigs lists all OIDC configurations.
@@ -124,28 +137,40 @@ func (r *OIDCConfigRepository) ListOIDCConfigs(ctx context.Context) ([]*models.O
 	var configs []*models.OIDCConfig
 	query := `SELECT ` + oidcConfigColumns + ` FROM oidc_config ORDER BY created_at DESC`
 	err := r.db.SelectContext(ctx, &configs, query)
-	return configs, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to list oidc configs: %w", err)
+	}
+	return configs, nil
 }
 
 // DeleteOIDCConfig deletes an OIDC configuration.
 func (r *OIDCConfigRepository) DeleteOIDCConfig(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM oidc_config WHERE id = $1`
 	_, err := r.db.ExecContext(ctx, query, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to delete oidc config %s: %w", id, err)
+	}
+	return nil
 }
 
 // UpdateOIDCConfigExtraConfig updates only the extra_config column (used for group mapping settings).
 func (r *OIDCConfigRepository) UpdateOIDCConfigExtraConfig(ctx context.Context, id uuid.UUID, extraConfig []byte) error {
 	query := `UPDATE oidc_config SET extra_config = $1, updated_at = $2 WHERE id = $3`
 	_, err := r.db.ExecContext(ctx, query, extraConfig, time.Now(), id)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update oidc config %s extra_config: %w", id, err)
+	}
+	return nil
 }
 
 // DeactivateAllOIDCConfigs sets is_active=false for all configurations.
 func (r *OIDCConfigRepository) DeactivateAllOIDCConfigs(ctx context.Context) error {
 	query := `UPDATE oidc_config SET is_active = false, updated_at = $1`
 	_, err := r.db.ExecContext(ctx, query, time.Now())
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to deactivate oidc configs: %w", err)
+	}
+	return nil
 }
 
 // deactivateAllOIDCConfigsTx sets is_active=false for all configurations
@@ -155,14 +180,17 @@ func (r *OIDCConfigRepository) DeactivateAllOIDCConfigs(ctx context.Context) err
 // row can be active at commit time.
 func deactivateAllOIDCConfigsTx(ctx context.Context, tx *sqlx.Tx) error {
 	_, err := tx.ExecContext(ctx, `UPDATE oidc_config SET is_active = false, updated_at = $1`, time.Now())
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to deactivate oidc configs: %w", err)
+	}
+	return nil
 }
 
 // ActivateOIDCConfig activates a specific configuration (deactivates others first).
 func (r *OIDCConfigRepository) ActivateOIDCConfig(ctx context.Context, id uuid.UUID) error {
 	tx, err := r.db.BeginTxx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to begin transaction activating oidc config %s: %w", id, err)
 	}
 	defer tx.Rollback() // nolint:errcheck
 
@@ -176,8 +204,11 @@ func (r *OIDCConfigRepository) ActivateOIDCConfig(ctx context.Context, id uuid.U
 		time.Now(), id,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to activate oidc config %s: %w", id, err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit activation of oidc config %s: %w", id, err)
+	}
+	return nil
 }

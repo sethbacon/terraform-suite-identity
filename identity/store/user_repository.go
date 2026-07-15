@@ -170,6 +170,37 @@ func (r *UserRepository) UpdateUser(ctx context.Context, user *models.User) erro
 	return nil
 }
 
+// linkOIDCIdentity atomically links oidcSub to the pre-provisioned user
+// identified by userID, updating email and name to the incoming OIDC values.
+// The WHERE clause requires oidc_sub IS NULL, making this a compare-and-set:
+// if a concurrent call already linked a (possibly different) oidc_sub to this
+// row first, this UPDATE affects zero rows and returns (false, nil) instead of
+// overwriting the winner. Returns (true, nil) when this call won the race.
+//
+// This closes a TOCTOU race in GetOrCreateUserFromOIDC's pre-provisioned-
+// account link path: the prior plain UpdateUser call let two concurrent
+// logins with the same email but different oidc_sub both "succeed"
+// (last-write-wins), since neither the UNIQUE(oidc_sub) constraint nor a
+// transaction guarded that path — unlike the brand-new-account INSERT path,
+// which already used ON CONFLICT (oidc_sub) DO NOTHING for the same reason.
+func (r *UserRepository) linkOIDCIdentity(ctx context.Context, userID, oidcSub, email, name string) (bool, error) {
+	query := `
+		UPDATE users
+		SET email = $2, name = $3, oidc_sub = $4, updated_at = $5
+		WHERE id = $1 AND oidc_sub IS NULL
+	`
+
+	result, err := r.db.ExecContext(ctx, query, userID, email, name, oidcSub, time.Now())
+	if err != nil {
+		return false, fmt.Errorf("failed to link oidc identity: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to get rows affected linking oidc identity: %w", err)
+	}
+	return n > 0, nil
+}
+
 // DeleteUser deletes a user (cascades to API keys and memberships)
 func (r *UserRepository) DeleteUser(ctx context.Context, userID string) error {
 	query := `DELETE FROM users WHERE id = $1`
@@ -287,13 +318,41 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 		if !emailVerified {
 			return nil, fmt.Errorf("oidc account linking refused: email %q is not verified by the identity provider", email)
 		}
-		// Link the OIDC identity to the pre-provisioned (or same-sub) account.
-		emailUser.OIDCSub = &oidcSub
-		emailUser.Name = name
-		if err := r.UpdateUser(ctx, emailUser); err != nil {
+		// Link the OIDC identity to the pre-provisioned account. This is a
+		// compare-and-set UPDATE (WHERE ... AND oidc_sub IS NULL), not a plain
+		// UpdateUser: two concurrent link attempts for the SAME email but
+		// DIFFERENT oidc_sub (e.g. an automated SCIM sync racing this user's
+		// first interactive SSO login) must not both "win" last-write-wins, since
+		// neither a transaction nor the UNIQUE(oidc_sub) constraint guards this
+		// specific path — the constraint only fires across two INSERTed rows, not
+		// two UPDATEs of the same row. Mirrors the ON CONFLICT (oidc_sub) DO
+		// NOTHING race guard the brand-new-account INSERT path already has below.
+		linked, err := r.linkOIDCIdentity(ctx, emailUser.ID, oidcSub, email, name)
+		if err != nil {
 			return nil, err
 		}
-		return emailUser, nil
+		if linked {
+			emailUser.OIDCSub = &oidcSub
+			emailUser.Email = email
+			emailUser.Name = name
+			return emailUser, nil
+		}
+
+		// Lost the race: some other request linked this row's oidc_sub first.
+		// Re-read the row and decide based on what actually won rather than
+		// trusting our stale in-memory copy — mirroring the INSERT path's
+		// re-read-the-winner fallback.
+		winner, werr := r.GetUserByID(ctx, emailUser.ID)
+		if werr != nil {
+			return nil, werr
+		}
+		if winner == nil {
+			return nil, fmt.Errorf("oidc account linking: user %s vanished while linking", emailUser.ID)
+		}
+		if winner.OIDCSub != nil && *winner.OIDCSub != oidcSub {
+			return nil, fmt.Errorf("oidc account linking refused: email %q is already linked to a different OIDC subject", email)
+		}
+		return winner, nil
 	}
 
 	// Creating a brand-new account keyed on this email also establishes a new
