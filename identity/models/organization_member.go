@@ -15,6 +15,15 @@ type OrganizationMember struct {
 	CreatedAt      time.Time
 }
 
+// RoleTemplateUUID is a typed convenience accessor equivalent to
+// ParseRoleTemplateID(m.RoleTemplateID) — see ParseRoleTemplateID for the
+// exact (uuid.UUID, bool, error) semantics. Added so callers that need the
+// uuid.UUID RoleTemplateRepository expects have a one-line method instead of
+// each hand-rolling their own uuid.Parse against the *string field.
+func (m *OrganizationMember) RoleTemplateUUID() (uuid.UUID, bool, error) {
+	return ParseRoleTemplateID(m.RoleTemplateID)
+}
+
 // ParseRoleTemplateID converts an OrganizationMember-style *string
 // RoleTemplateID (also used by OrganizationMemberWithUser and UserMembership)
 // into the uuid.UUID that RoleTemplateRepository.GetRoleTemplate and
@@ -48,6 +57,12 @@ type OrganizationMemberWithUser struct {
 	UserEmail               string    `json:"user_email"`
 }
 
+// RoleTemplateUUID is the OrganizationMemberWithUser counterpart of
+// OrganizationMember.RoleTemplateUUID; see ParseRoleTemplateID.
+func (m *OrganizationMemberWithUser) RoleTemplateUUID() (uuid.UUID, bool, error) {
+	return ParseRoleTemplateID(m.RoleTemplateID)
+}
+
 // UserMembership includes organization details for a user's membership.
 type UserMembership struct {
 	OrganizationID          string    `json:"organization_id"`
@@ -57,4 +72,10 @@ type UserMembership struct {
 	RoleTemplateDisplayName *string   `json:"role_template_display_name"`
 	RoleTemplateScopes      []string  `json:"role_template_scopes"`
 	CreatedAt               time.Time `json:"created_at"`
+}
+
+// RoleTemplateUUID is the UserMembership counterpart of
+// OrganizationMember.RoleTemplateUUID; see ParseRoleTemplateID.
+func (m *UserMembership) RoleTemplateUUID() (uuid.UUID, bool, error) {
+	return ParseRoleTemplateID(m.RoleTemplateID)
 }

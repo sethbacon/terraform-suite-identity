@@ -31,6 +31,12 @@ updates:
           - "golang.org/x/crypto"
           - "golang.org/x/oauth2"
           - "golang.org/x/net"
+          # SQL driver and migration engine (see reopened issue #68): these sit
+          # on the same high-stakes surface (migration/schema safety) as the
+          # auth-adjacent deps above, so their version bumps get individual
+          # review too instead of riding the batched catch-all group.
+          - "github.com/lib/pq"
+          - "github.com/golang-migrate/migrate/*"
 
   - package-ecosystem: github-actions
     directory: /

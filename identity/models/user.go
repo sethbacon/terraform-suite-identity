@@ -44,6 +44,10 @@ type UserWithOrgRoles struct {
 // token) and auth.HasScopeInOrg / auth.HasAnyScopeInOrg / auth.HasAllScopesInOrg (to check
 // it) so the org binding is enforceable from the token itself rather than trusted from a
 // flat scope list.
+//
+// Deprecated: prefer GetScopesForOrg for any per-organization authorization
+// decision; see the warning above for the narrow legitimate suite-wide use
+// this is retained for.
 func (u *UserWithOrgRoles) GetAllowedScopes() []string {
 	scopeSet := make(map[string]bool)
 	for _, m := range u.Memberships {

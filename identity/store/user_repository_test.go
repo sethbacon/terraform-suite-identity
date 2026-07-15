@@ -547,6 +547,90 @@ func TestGetOrCreateUserFromOIDC_LinksPreProvisionedUser(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateUserFromOIDC_PreProvisionedLink_LosesRaceToSameSub(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	// sub lookup misses
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-race").
+		WillReturnRows(emptyUserRow())
+	// email lookup finds a pre-provisioned user with a NULL oidc_sub
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("alice@example.com").
+		WillReturnRows(sampleUserRow())
+	// The compare-and-set link UPDATE (WHERE ... AND oidc_sub IS NULL) affects
+	// zero rows: a concurrent request already linked this row first.
+	mock.ExpectExec("UPDATE users").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// The re-read finds the concurrent winner already linked to the SAME sub
+	// (e.g. the identical login retried, or double-tab) — this must succeed,
+	// not error.
+	winnerSub := "sub-race"
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE id").
+		WithArgs("user-1").
+		WillReturnRows(sqlmock.NewRows(userCols).
+			AddRow("user-1", "alice@example.com", "Alice", &winnerSub, time.Now(), time.Now()))
+
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-race", "alice@example.com", "Alice", true)
+	if err != nil {
+		t.Fatalf("expected the race to resolve without error, got: %v", err)
+	}
+	if user == nil || user.OIDCSub == nil || *user.OIDCSub != "sub-race" {
+		t.Fatalf("expected the concurrent winner's row linked to sub-race, got %+v", user)
+	}
+}
+
+func TestGetOrCreateUserFromOIDC_PreProvisionedLink_LosesRaceToDifferentSub(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	// sub lookup misses
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-loser").
+		WillReturnRows(emptyUserRow())
+	// email lookup finds a pre-provisioned user with a NULL oidc_sub
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("alice@example.com").
+		WillReturnRows(sampleUserRow())
+	// The compare-and-set link UPDATE affects zero rows: a DIFFERENT concurrent
+	// identity won the race first.
+	mock.ExpectExec("UPDATE users").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// The re-read finds the row now linked to a DIFFERENT sub than ours — this
+	// must be refused, exactly like the non-racing RefusesRelinkDifferentSub case.
+	winnerSub := "sub-winner"
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE id").
+		WithArgs("user-1").
+		WillReturnRows(sqlmock.NewRows(userCols).
+			AddRow("user-1", "alice@example.com", "Alice", &winnerSub, time.Now(), time.Now()))
+
+	_, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-loser", "alice@example.com", "Alice", true)
+	if err == nil {
+		t.Fatal("expected account linking to be refused when the race is lost to a different oidc_sub")
+	}
+}
+
+func TestGetOrCreateUserFromOIDC_PreProvisionedLink_RaceReReadError(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-x").
+		WillReturnRows(emptyUserRow())
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("alice@example.com").
+		WillReturnRows(sampleUserRow())
+	mock.ExpectExec("UPDATE users").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// The re-read itself fails (e.g. connection loss) — must propagate, not panic.
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE id").
+		WithArgs("user-1").
+		WillReturnError(errDB)
+
+	_, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-x", "alice@example.com", "Alice", true)
+	if err == nil {
+		t.Fatal("expected the re-read error to propagate")
+	}
+}
+
 func TestGetOrCreateUserFromOIDC_RefusesRelinkDifferentSub(t *testing.T) {
 	repo, mock := newUserRepo(t)
 

@@ -674,6 +674,10 @@ func (r *OrganizationRepository) GetUserMemberships(ctx context.Context, userID 
 // org-independent decision (e.g. a system/superuser scope check that by design
 // applies across every organization); it must never stand in for a per-org
 // authorization check.
+//
+// Deprecated: prefer GetUserScopesForOrg for any per-organization authorization
+// decision; see the warning above for the narrow legitimate use this is
+// retained for.
 func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, userID string) ([]string, error) {
 	memberships, err := r.GetUserMemberships(ctx, userID)
 	if err != nil {
