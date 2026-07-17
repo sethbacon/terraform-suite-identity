@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.18.1...v0.19.0) (2026-07-17)
+
+
+### Features
+
+* **mailer:** shared SMTP transport for suite notification systems ([#113](https://github.com/sethbacon/terraform-suite-identity/issues/113)) ([35892dc](https://github.com/sethbacon/terraform-suite-identity/commit/35892dc7a3384897fc146a205941b7b390621caf))
+
 ## [0.18.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.18.0...v0.18.1) (2026-07-15)
 
 
