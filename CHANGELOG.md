@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.19.0...v0.20.0) (2026-07-18)
+
+
+### Features
+
+* **notify:** shared notification channels, crypto, and SSRF-safe HTTP client ([#115](https://github.com/sethbacon/terraform-suite-identity/issues/115)) ([95ef429](https://github.com/sethbacon/terraform-suite-identity/commit/95ef429c3c10a48a83b7503cbec983cb43b35634))
+
 ## [0.19.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.18.1...v0.19.0) (2026-07-17)
 
 
