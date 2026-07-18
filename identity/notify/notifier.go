@@ -239,15 +239,21 @@ func (n *Notifier) sendEmail(ctx context.Context, recipients, subject, body stri
 	if n.smtp == nil || n.smtp.Host == "" {
 		return fmt.Errorf("smtp relay is not configured")
 	}
-	msg := buildMessage(n.smtp.From, to, subject, body)
+	msg := BuildMessage(n.smtp.From, to, subject, body)
 	return mailer.Send(ctx, *n.smtp, to, msg)
 }
 
-// buildMessage composes RFC 5322 headers plus a plain-text body. CR/LF is
+// BuildMessage composes RFC 5322 headers plus a plain-text body. CR/LF is
 // stripped from header-bound fields (From/To/Subject) to prevent SMTP header
 // injection; each must occupy a single line. The body is not header-bound, so
 // it is delivered as-is after the blank line.
-func buildMessage(from string, to []string, subject, body string) []byte {
+//
+// Exported so a caller that needs to send through a one-off SMTP config not
+// tied to a Notifier (e.g. "send test email" with request-overridden,
+// not-yet-saved SMTP settings) can build the same message shape and deliver
+// it directly via mailer.Send, without duplicating CRLF-injection-sensitive
+// header construction.
+func BuildMessage(from string, to []string, subject, body string) []byte {
 	recipients := make([]string, len(to))
 	for i, addr := range to {
 		recipients[i] = sanitizeHeader(addr)
