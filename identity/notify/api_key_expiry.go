@@ -216,6 +216,6 @@ func (n *APIKeyExpiryNotifier) sendExpiryEmail(ctx context.Context, smtp mailer.
 		fmt.Sprintf("\u2014 %s", product),
 	}, "\r\n")
 
-	msg := buildMessage(smtp.From, []string{toEmail}, subject, body)
+	msg := BuildMessage(smtp.From, []string{toEmail}, subject, body)
 	return mailer.Send(ctx, smtp, []string{toEmail}, msg)
 }
