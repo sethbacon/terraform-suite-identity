@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.20.0...v0.20.1) (2026-07-18)
+
+
+### Bug Fixes
+
+* restore two commits dropped by [#115](https://github.com/sethbacon/terraform-suite-identity/issues/115)'s incomplete squash-merge ([#117](https://github.com/sethbacon/terraform-suite-identity/issues/117)) ([f932daf](https://github.com/sethbacon/terraform-suite-identity/commit/f932daf6af6b09f676c345f1630074e1f730169b))
+
 ## [0.20.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.19.0...v0.20.0) (2026-07-18)
 
 
