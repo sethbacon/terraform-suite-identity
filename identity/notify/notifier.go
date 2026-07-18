@@ -44,29 +44,38 @@ type Options struct {
 	TestMessage string
 }
 
+// SMTPProvider returns a live snapshot of the outbound SMTP relay config. It
+// is invoked on every send (not cached), so an admin updating the app's own
+// config struct in place (e.g. via a PUT /admin/notifications/config handler)
+// is observed immediately without recreating the Notifier or requiring the
+// app's config type and mailer.Config to be memory-aliased.
+type SMTPProvider func() mailer.Config
+
 // Notifier fans an Event out to the channels subscribed to it.
 type Notifier struct {
 	repo        *ChannelRepository
-	smtp        *mailer.Config
+	smtp        SMTPProvider
 	tokenCipher *crypto.TokenCipher
 	client      *http.Client
 	logger      *slog.Logger
 	opts        Options
 }
 
-// NewNotifier builds a Notifier over the channel repository. smtp delivers
-// "email" channel targets (and SendTestEmail) through the shared SMTP relay;
-// smtp is held by reference so a runtime configuration update (e.g. via the
-// admin notifications API) is observed without recreating the Notifier.
-// tokenCipher decrypts channel targets at send time. guard applies the
-// deployment's egress policy to every webhook/Slack/Teams POST — the channel
-// target is an admin-configured URL, so it MUST route through the same
-// dial-time SSRF guard as every other outbound client (metadata endpoints,
-// loopback, and RFC 1918 ranges are blocked unless explicitly allow-listed).
-// A nil guard yields the strict default policy.
-func NewNotifier(repo *ChannelRepository, smtp *mailer.Config, tokenCipher *crypto.TokenCipher, guard *httpsafe.Guard, opts Options) *Notifier {
+// NewNotifier builds a Notifier over the channel repository. smtp provides
+// the live SMTP relay config used to deliver "email" channel targets and
+// SendTestEmail; it is called on every send so a runtime configuration
+// update (e.g. via the admin notifications API) is observed without
+// recreating the Notifier. A nil smtp disables the email channel type
+// (matching an empty-Host config). tokenCipher decrypts channel targets at
+// send time. guard applies the deployment's egress policy to every
+// webhook/Slack/Teams POST — the channel target is an admin-configured URL,
+// so it MUST route through the same dial-time SSRF guard as every other
+// outbound client (metadata endpoints, loopback, and RFC 1918 ranges are
+// blocked unless explicitly allow-listed). A nil guard yields the strict
+// default policy.
+func NewNotifier(repo *ChannelRepository, smtp SMTPProvider, tokenCipher *crypto.TokenCipher, guard *httpsafe.Guard, opts Options) *Notifier {
 	if smtp == nil {
-		smtp = &mailer.Config{}
+		smtp = func() mailer.Config { return mailer.Config{} }
 	}
 	return &Notifier{
 		repo:        repo,
@@ -236,11 +245,12 @@ func (n *Notifier) sendEmail(ctx context.Context, recipients, subject, body stri
 	if err != nil {
 		return err
 	}
-	if n.smtp == nil || n.smtp.Host == "" {
+	cfg := n.smtp()
+	if cfg.Host == "" {
 		return fmt.Errorf("smtp relay is not configured")
 	}
-	msg := BuildMessage(n.smtp.From, to, subject, body)
-	return mailer.Send(ctx, *n.smtp, to, msg)
+	msg := BuildMessage(cfg.From, to, subject, body)
+	return mailer.Send(ctx, cfg, to, msg)
 }
 
 // BuildMessage composes RFC 5322 headers plus a plain-text body. CR/LF is
