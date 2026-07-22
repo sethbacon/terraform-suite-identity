@@ -313,6 +313,45 @@ func TestExpiryNotifier_RunCheck_EmptyUserEmail_Skipped(t *testing.T) {
 	n.runCheck(context.Background())
 }
 
+func TestExpiryNotifier_RunCheck_AlreadyClaimed_SkipsSend(t *testing.T) {
+	apiKeyRepo, apiKeyMock := newAPIKeyRepoForNotifier(t)
+	userRepo, userMock := newUserRepoForNotifier(t)
+	cfg := newExpiryConfig(true, "smtp.example.com")
+
+	n := NewAPIKeyExpiryNotifier(apiKeyRepo, userRepo, newExpiryConfigProvider(cfg), testExpiryOpts)
+
+	expiresAt := time.Now().Add(3 * 24 * time.Hour)
+	userID := "user-1"
+	// The full scanAPIKey projection includes expiry_notification_sent_at (NULL for
+	// an as-yet-unnotified expiring key), so FindExpiringKeys scans successfully and
+	// the run reaches the claim.
+	fullCols := []string{
+		"id", "user_id", "organization_id", "name", "description",
+		"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at",
+		"expiry_notification_sent_at", "created_at",
+	}
+	apiKeyMock.ExpectQuery("SELECT.*FROM api_keys").
+		WillReturnRows(sqlmock.NewRows(fullCols).
+			AddRow("key-1", &userID, "org-1", "CI Key", nil,
+				"hash", "tfr_abc", []byte(`["modules:read"]`), &expiresAt, nil, nil, time.Now()))
+	userMock.ExpectQuery("SELECT.*FROM users WHERE id").
+		WillReturnRows(sqlmock.NewRows(userColsForNotifier).
+			AddRow("user-1", "ops@example.com", "Ops", nil, time.Now(), time.Now()))
+	// Another replica already claimed this key: the conditional UPDATE affects 0
+	// rows, so this run must skip the send (no SMTP attempt) rather than duplicate.
+	apiKeyMock.ExpectExec("UPDATE api_keys SET expiry_notification_sent_at").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	n.runCheck(context.Background())
+
+	if err := apiKeyMock.ExpectationsWereMet(); err != nil {
+		t.Errorf("api_key unmet expectations: %v", err)
+	}
+	if err := userMock.ExpectationsWereMet(); err != nil {
+		t.Errorf("user unmet expectations: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Start — full loop paths (enabled + SMTP host set, exercising ticker/stop)
 // ---------------------------------------------------------------------------

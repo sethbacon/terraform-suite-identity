@@ -353,8 +353,36 @@ func (r *APIKeyRepository) FindExpiringKeys(ctx context.Context, warningDays int
 	return keys, rows.Err()
 }
 
-// MarkExpiryNotificationSent records that the expiry warning email was sent for a key,
-// preventing duplicate emails on subsequent job runs.
+// ClaimExpiryNotification atomically claims the right to send the expiry warning
+// for a key: it sets expiry_notification_sent_at only if it is still NULL, and
+// reports whether THIS call won the claim. Under horizontal scaling several
+// replicas run the notifier concurrently; gating the send on a winning claim
+// (claim-then-send) is what stops them all emailing the same key, since the
+// conditional UPDATE is atomic and exactly one row update takes effect.
+//
+// A caller that wins the claim but then fails to send has recorded a "sent" it
+// did not deliver — a missed notice, deliberately preferred over the duplicate
+// spam a send-then-mark ordering produces across replicas.
+func (r *APIKeyRepository) ClaimExpiryNotification(ctx context.Context, keyID string) (bool, error) {
+	query := `UPDATE api_keys SET expiry_notification_sent_at = $1
+	          WHERE id = $2 AND expiry_notification_sent_at IS NULL`
+	res, err := r.db.ExecContext(ctx, query, time.Now(), keyID)
+	if err != nil {
+		return false, fmt.Errorf("failed to claim api key expiry notification: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to read claim result for api key expiry notification: %w", err)
+	}
+	return n > 0, nil
+}
+
+// MarkExpiryNotificationSent unconditionally records that the expiry warning was
+// sent for a key.
+//
+// Deprecated: prefer ClaimExpiryNotification, which is safe under horizontal
+// scaling. This unconditional UPDATE cannot prevent two replicas from both
+// sending before either marks. Retained for backward compatibility.
 func (r *APIKeyRepository) MarkExpiryNotificationSent(ctx context.Context, keyID string) error {
 	query := `UPDATE api_keys SET expiry_notification_sent_at = $1 WHERE id = $2`
 	_, err := r.db.ExecContext(ctx, query, time.Now(), keyID)
