@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.20.1...v0.20.2) (2026-07-22)
+
+
+### Bug Fixes
+
+* **notify:** claim API-key expiry notifications atomically to stop duplicate emails ([#121](https://github.com/sethbacon/terraform-suite-identity/issues/121)) ([ba8a19b](https://github.com/sethbacon/terraform-suite-identity/commit/ba8a19bfd4082004ea2457b4d71c6b0c5d2055fa)), closes [#120](https://github.com/sethbacon/terraform-suite-identity/issues/120)
+
 ## [0.20.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.20.0...v0.20.1) (2026-07-18)
 
 
