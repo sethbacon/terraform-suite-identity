@@ -517,3 +517,50 @@ func TestMarkExpiryNotificationSent_DBError(t *testing.T) {
 		t.Error("expected error, got nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ClaimExpiryNotification
+// ---------------------------------------------------------------------------
+
+func TestClaimExpiryNotification_Won(t *testing.T) {
+	repo, mock := newAPIKeyRepo(t)
+
+	// The conditional UPDATE affected the row -> this caller won the claim.
+	mock.ExpectExec("UPDATE api_keys SET expiry_notification_sent_at").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	claimed, err := repo.ClaimExpiryNotification(context.Background(), "key-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !claimed {
+		t.Error("claimed = false, want true when one row was updated")
+	}
+}
+
+func TestClaimExpiryNotification_AlreadyClaimed(t *testing.T) {
+	repo, mock := newAPIKeyRepo(t)
+
+	// 0 rows affected: another replica already set expiry_notification_sent_at.
+	mock.ExpectExec("UPDATE api_keys SET expiry_notification_sent_at").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	claimed, err := repo.ClaimExpiryNotification(context.Background(), "key-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if claimed {
+		t.Error("claimed = true, want false when no row was updated")
+	}
+}
+
+func TestClaimExpiryNotification_DBError(t *testing.T) {
+	repo, mock := newAPIKeyRepo(t)
+
+	mock.ExpectExec("UPDATE api_keys SET expiry_notification_sent_at").
+		WillReturnError(errDB)
+
+	if _, err := repo.ClaimExpiryNotification(context.Background(), "key-1"); err == nil {
+		t.Error("expected error, got nil")
+	}
+}

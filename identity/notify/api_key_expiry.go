@@ -27,7 +27,7 @@ import (
 // them without a live database.
 type apiKeyRepo interface {
 	FindExpiringKeys(ctx context.Context, warningDays int) ([]*identitymodels.APIKey, error)
-	MarkExpiryNotificationSent(ctx context.Context, keyID string) error
+	ClaimExpiryNotification(ctx context.Context, keyID string) (bool, error)
 }
 
 type userRepo interface {
@@ -37,11 +37,11 @@ type userRepo interface {
 // ExpiryConfig is a point-in-time snapshot of the settings that gate the
 // API-key-expiry job.
 type ExpiryConfig struct {
-	Enabled             bool
-	APIKeyExpiring      bool // notifications.events.api_key_expiring
-	SMTP                mailer.Config
-	WarningDays         int
-	CheckIntervalHours  int
+	Enabled            bool
+	APIKeyExpiring     bool // notifications.events.api_key_expiring
+	SMTP               mailer.Config
+	WarningDays        int
+	CheckIntervalHours int
 }
 
 // ExpiryConfigProvider returns a live snapshot of ExpiryConfig. It is
@@ -179,13 +179,23 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 			continue
 		}
 
-		if err := n.sendExpiryEmail(ctx, cfg.SMTP, user.Email, user.Name, key.Name, key.KeyPrefix, *key.ExpiresAt); err != nil {
-			log.Printf("API key expiry notifier: failed to send email to %s: %v", user.Email, err)
+		// Claim the notification BEFORE sending so concurrent replicas can't both
+		// email this key: the conditional UPDATE is atomic, so exactly one replica
+		// wins the claim and the others skip. A send failure after a won claim is a
+		// missed notice (logged below), which is preferred over duplicate emails.
+		claimed, err := n.apiKeyRepo.ClaimExpiryNotification(ctx, key.ID)
+		if err != nil {
+			log.Printf("API key expiry notifier: failed to claim notification for key %s: %v", key.ID, err)
+			continue
+		}
+		if !claimed {
+			// Another replica (or an earlier run) already claimed this key.
 			continue
 		}
 
-		if err := n.apiKeyRepo.MarkExpiryNotificationSent(ctx, key.ID); err != nil {
-			log.Printf("API key expiry notifier: failed to mark notification sent for key %s: %v", key.ID, err)
+		if err := n.sendExpiryEmail(ctx, cfg.SMTP, user.Email, user.Name, key.Name, key.KeyPrefix, *key.ExpiresAt); err != nil {
+			log.Printf("API key expiry notifier: send failed after claiming key %s; it will NOT be retried (missed, not duplicated): %v", key.ID, err)
+			continue
 		}
 	}
 }
