@@ -48,6 +48,10 @@ jobs:
     name: Publish GitHub Release
     needs: guard
     runs-on: ubuntu-latest
+    # Deployment approval gate, mirroring terraform-suite-ui's publish flow: the
+    # "release" environment (Settings > Environments) requires reviewer approval
+    # and restricts deployments to v* tags before this privileged job runs.
+    environment: release
     permissions:
       contents: write # publish / create releases
     steps:
