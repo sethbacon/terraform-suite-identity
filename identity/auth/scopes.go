@@ -16,6 +16,13 @@ const (
 	ScopeSettingsRead       = "settings:read"
 	ScopeSettingsWrite      = "settings:write"
 
+	// ScopeOrganizationsCreate authorizes creating a NEW top-level organization
+	// (platform-tier provisioning). It is deliberately distinct from
+	// ScopeOrganizationsWrite (which manages an existing org the caller is scoped
+	// to) and is intentionally NOT part of ReadWritePairs — holding
+	// organizations:write does NOT imply organizations:create.
+	ScopeOrganizationsCreate = "organizations:create"
+
 	// ScopeAdmin is the wildcard scope that grants all permissions.
 	//
 	// ScopeAdmin MUST only ever originate from a trusted, admin-seeded
@@ -80,6 +87,32 @@ func HasAllScopes(userScopes []string, required []string, rwPairs ReadWritePairs
 	}
 	for _, r := range required {
 		if !HasScope(userScopes, r, rwPairs) {
+			return false
+		}
+	}
+	return true
+}
+
+// RoleScopesPermittedBy reports whether a caller holding callerScopes is
+// permitted to ASSIGN a role whose scope set is roleScopes (an assignment
+// "ceiling" that prevents privilege escalation via role granting). Rules:
+//   - An empty roleScopes is vacuously permitted.
+//   - A caller holding the ScopeAdmin wildcard may assign anything.
+//   - A non-admin caller may NEVER assign a role that carries ScopeAdmin.
+//   - Otherwise the caller must already hold every scope the role grants
+//     (write-implies-read honored via rwPairs).
+func RoleScopesPermittedBy(callerScopes, roleScopes []string, rwPairs ReadWritePairs) bool {
+	if len(roleScopes) == 0 {
+		return true
+	}
+	if HasScope(callerScopes, ScopeAdmin, rwPairs) {
+		return true
+	}
+	for _, s := range roleScopes {
+		if s == ScopeAdmin {
+			return false
+		}
+		if !HasScope(callerScopes, s, rwPairs) {
 			return false
 		}
 	}

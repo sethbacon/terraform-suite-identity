@@ -247,3 +247,66 @@ func TestHasAllScopesInOrg(t *testing.T) {
 		t.Error("expected false: global (org-less) token must never match")
 	}
 }
+
+func TestScopeOrganizationsCreate(t *testing.T) {
+	if auth.ScopeOrganizationsCreate != "organizations:create" {
+		t.Errorf("ScopeOrganizationsCreate = %q, want %q", auth.ScopeOrganizationsCreate, "organizations:create")
+	}
+}
+
+func TestRoleScopesPermittedBy(t *testing.T) {
+	pairs := auth.ReadWritePairs{auth.ScopeOrganizationsRead: auth.ScopeOrganizationsWrite}
+
+	tests := []struct {
+		name         string
+		callerScopes []string
+		roleScopes   []string
+		want         bool
+	}{
+		{
+			name:         "empty role scopes is vacuously permitted",
+			callerScopes: []string{},
+			roleScopes:   []string{},
+			want:         true,
+		},
+		{
+			name:         "admin caller can assign a role containing admin",
+			callerScopes: []string{auth.ScopeAdmin},
+			roleScopes:   []string{auth.ScopeAdmin, auth.ScopeUsersRead},
+			want:         true,
+		},
+		{
+			name:         "non-admin caller can never assign a role containing admin",
+			callerScopes: []string{auth.ScopeUsersRead, auth.ScopeUsersWrite, auth.ScopeOrganizationsWrite},
+			roleScopes:   []string{auth.ScopeAdmin},
+			want:         false,
+		},
+		{
+			name:         "non-admin caller holding write can assign a role needing the paired read",
+			callerScopes: []string{auth.ScopeOrganizationsWrite},
+			roleScopes:   []string{auth.ScopeOrganizationsRead},
+			want:         true,
+		},
+		{
+			name:         "non-admin caller assigning a role needing a scope they lack",
+			callerScopes: []string{auth.ScopeUsersRead},
+			roleScopes:   []string{auth.ScopeOrganizationsRead},
+			want:         false,
+		},
+		{
+			name:         "non-admin caller assigning a role whose every scope they hold",
+			callerScopes: []string{auth.ScopeUsersRead, auth.ScopeOrganizationsWrite},
+			roleScopes:   []string{auth.ScopeUsersRead, auth.ScopeOrganizationsRead},
+			want:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := auth.RoleScopesPermittedBy(tt.callerScopes, tt.roleScopes, pairs)
+			if got != tt.want {
+				t.Errorf("RoleScopesPermittedBy(%v, %v) = %v, want %v", tt.callerScopes, tt.roleScopes, got, tt.want)
+			}
+		})
+	}
+}
