@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.3](https://github.com/sethbacon/terraform-suite-identity/compare/v0.20.2...v0.20.3) (2026-07-23)
+
+
+### Bug Fixes
+
+* add organizations:create scope and RoleScopesPermittedBy assignment ceiling ([#126](https://github.com/sethbacon/terraform-suite-identity/issues/126)) ([6f8f063](https://github.com/sethbacon/terraform-suite-identity/commit/6f8f0637a1cfbd79f0f34af772080af1c45856f4)), closes [#125](https://github.com/sethbacon/terraform-suite-identity/issues/125)
+
 ## [0.20.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.20.1...v0.20.2) (2026-07-22)
 
 
