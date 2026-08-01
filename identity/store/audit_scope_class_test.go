@@ -141,6 +141,30 @@ func TestAuditReadAxes_ZeroScopeFailsClosed(t *testing.T) {
 	}
 }
 
+// TestAuditReadAxes_OrgsAndUnownedCarriesBothHalves runs the whole axis table
+// through the AuditScopeOrganizationsAndUnowned variant. Both halves of the
+// predicate must reach the SQL on EVERY axis: the allowlist (so other tenants
+// stay out) and the IS NULL branch (so the consumer's platform-level events
+// come back). A variant that only widened the list axis would put the consumer
+// straight back into the split this class is about.
+func TestAuditReadAxes_OrgsAndUnownedCarriesBothHalves(t *testing.T) {
+	const bothHalvesRe = `.*organization_id = ANY\(\$\d+\) OR .*organization_id IS NULL.*`
+	for _, axis := range auditReadAxes() {
+		t.Run(axis.name, func(t *testing.T) {
+			repo, mock := newAuditRepo(t)
+			axis.prime(mock, bothHalvesRe)
+
+			if err := axis.call(repo, AuditScopeOrganizationsAndUnowned("org-1")); err != nil {
+				t.Fatalf("%s: statement did not carry both halves of the orgs+unowned "+
+					"predicate (guard %q removed?): %v", axis.name, axis.guard, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("%s: %v", axis.name, err)
+			}
+		})
+	}
+}
+
 // TestAuditReadAxes_AllOrganizationsIsExplicit documents the single legitimate
 // cross-tenant read: it has to be spelled out, and it is the only way to get an
 // unfiltered statement.
@@ -174,6 +198,14 @@ func TestAuditScope_PermitsOrganization(t *testing.T) {
 		{"empty allowlist denies everything", AuditScopeOrganizations(), "org-1", false},
 		{"platform-wide permits any org", AuditScopeAllOrganizations(), "org-9", true},
 		{"platform-wide permits org-less rows", AuditScopeAllOrganizations(), "", true},
+		// The TSM variant: my organizations, plus the platform's own org-less
+		// events. It must widen to unowned rows WITHOUT widening to other
+		// tenants — that combination is the whole reason it exists.
+		{"orgs+unowned permits a listed org", AuditScopeOrganizationsAndUnowned("org-1"), "org-1", true},
+		{"orgs+unowned permits org-less rows", AuditScopeOrganizationsAndUnowned("org-1"), "", true},
+		{"orgs+unowned still denies a foreign org", AuditScopeOrganizationsAndUnowned("org-1"), "org-9", false},
+		{"orgs+unowned with no orgs is unowned-only", AuditScopeOrganizationsAndUnowned(), "", true},
+		{"orgs+unowned with no orgs denies owned rows", AuditScopeOrganizationsAndUnowned(), "org-1", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,6 +227,8 @@ func TestAuditScope_MatchesNothing(t *testing.T) {
 		{"blank ids are dropped", AuditScopeOrganizations("", ""), true},
 		{"one org", AuditScopeOrganizations("org-1"), false},
 		{"platform-wide", AuditScopeAllOrganizations(), false},
+		{"orgs+unowned with no orgs still matches unowned rows", AuditScopeOrganizationsAndUnowned(), false},
+		{"orgs+unowned with orgs", AuditScopeOrganizationsAndUnowned("org-1"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
