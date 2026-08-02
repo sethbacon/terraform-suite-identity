@@ -75,10 +75,11 @@ jobs:
         # fine). Reuse the coverage.out profile the "Test (with coverage)" step
         # already produced above (no re-running tests, no new tooling — pure
         # stdlib python3, preinstalled on ubuntu-latest) and enforce a
-        # statement-weighted floor scoped to identity/auth, identity/auth/oidc,
-        # identity/store, and identity/suite (JWT, OIDC relying-party, API-key,
-        # data-access, and suite-coupling/discovery-client logic) independent of
-        # the blended total. identity/suite was added per the reopened #66: it is
+        # statement-weighted floor scoped to identity/auth,
+        # identity/auth/oauthstate, identity/auth/oidc, identity/store, and
+        # identity/suite (JWT, OAuth state store-and-consume, OIDC
+        # relying-party, API-key, data-access, and suite-coupling/discovery-client
+        # logic) independent of the blended total. identity/suite was added per the reopened #66: it is
         # the library's other named security-relevant surface (the suite-coupling
         # contract) and had been omitted from this list, so a coverage regression
         # there could hide behind the aggregate the same way identity/auth/oidc
@@ -95,6 +96,7 @@ jobs:
           MODULE_PREFIX = "github.com/sethbacon/terraform-suite-identity/"
           GATED_PACKAGES = [
               "identity/auth",
+              "identity/auth/oauthstate",
               "identity/auth/oidc",
               "identity/store",
               "identity/suite",

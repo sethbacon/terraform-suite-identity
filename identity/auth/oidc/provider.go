@@ -182,11 +182,18 @@ func NewProviderForConfig(cfg *oauth2.Config) *Provider {
 
 // GetAuthURL returns the OAuth2 authorization URL for the given state.
 //
+// The state is supplied by the caller and this package cannot check it: it MUST
+// be an unguessable random value the caller stores server-side and consumes
+// exactly once at the callback. See the warning on BeginAuth about
+// self-describing states.
+//
 // Deprecated: GetAuthURL builds a bare OAuth2 authorization URL with no OIDC
 // nonce and no PKCE challenge, so a caller using it (together with a
 // no-options VerifyIDToken call) is not defended against token injection/replay
-// or authorization-code interception. Use BeginAuth instead, which returns an
-// AuthChallenge carrying a generated nonce and PKCE verifier alongside the URL.
+// or authorization-code interception. Use BeginAuthSession, which additionally
+// mints and verifies the state for you; or BeginAuth if the caller already owns
+// a correct store-and-consume state, which returns an AuthChallenge carrying a
+// generated nonce and PKCE verifier alongside the URL.
 func (p *Provider) GetAuthURL(state string) string {
 	return p.config.AuthCodeURL(state)
 }
@@ -214,6 +221,30 @@ type AuthChallenge struct {
 // VerifyIDToken) and WithPKCEVerifier (to ExchangeCode). The nonce binds the ID
 // token to this specific login (defending against token injection/replay) and
 // PKCE proves possession of the authorization code.
+//
+// # The state parameter is the caller's responsibility here
+//
+// state is passed straight through to the authorization request, and this
+// package has no way to tell an unguessable single-use token from a value that
+// describes the login it belongs to. It MUST be an unguessable random value
+// that the caller stores server-side and consumes exactly once at the callback.
+//
+// A SELF-DESCRIBING state — one that encodes the user, tenant or resource the
+// flow refers to, e.g. fmt.Sprintf("%s:%s", userID, providerID) — is a
+// vulnerability, not a CSRF token. It is guessable and forgeable, it replays
+// because nothing consumes it, and a callback that reads the principal or the
+// target resource out of it lets an anonymous caller name whose record gets
+// written. This is not hypothetical: it is the defect that made a suite
+// consumer's OAuth callback critically vulnerable, and it is why
+// identity/auth/oauthstate exists.
+//
+// Prefer BeginAuthSession + CompleteAuthSession, which take no state parameter
+// at all: they mint it from crypto/rand via oauthstate.Manager, persist this
+// login's nonce and PKCE verifier alongside the caller's own opaque payload,
+// and consume the state exactly once at the callback. BeginAuth is NOT marked
+// deprecated — it remains correct, and remains the right entry point, when the
+// caller genuinely owns a store-and-consume state (for example one from
+// oauthstate.Manager.Issue, or an app's existing equivalent).
 func (p *Provider) BeginAuth(state string) (AuthChallenge, error) {
 	nonce, err := randomNonce()
 	if err != nil {
