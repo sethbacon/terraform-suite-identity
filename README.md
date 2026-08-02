@@ -21,6 +21,7 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 | `identity/store`     | The data-access layer (repository pattern) for those types, plus `TokenRepository` (JWT revocation). Repos use **unqualified** table names so the connection's `search_path` selects the schema.                                          |
 | `identity/auth`      | App-neutral auth primitives: scope checking (`HasScope`/`HasAnyScope`/`HasAllScopes` with wildcard `admin` + write-implies-read), the JWT `TokenManager` (HS256, JTI, secret rotation), and API-key generation/validation.                |
 | `identity/auth/oidc` | A generic OpenID Connect provider (discovery, auth URL, code exchange, ID-token verification, group/user-info extraction).                                                                                                                |
+| `identity/auth/oauthstate` | The OAuth `state` contract: `Manager` mints an unguessable state, stores an **opaque** app payload against it under a TTL, and consumes it exactly once. Ships a `MemoryStore`; HA deployments implement `Store` over their own backend.                     |
 | `identity/suite`     | The shared runtime-coupling contract used by **both** apps: the capability `Manifest` each app publishes, `NegotiateCompat` version negotiation, the polling `DiscoveryClient`, and `CanonicalHost` for the cross-app "Consumed by" join. |
 
 ## Canonical identity model
@@ -238,20 +239,59 @@ prov, _ := identityoidc.NewProvider(identityoidc.Config{
     // local/dev http issuer.
 })
 
-// Login: BeginAuth generates the auth URL plus a per-login nonce and PKCE verifier.
-// Persist Nonce and CodeVerifier server-side, keyed to state, until the callback.
-challenge, _ := prov.BeginAuth(state)
-redirectUser(challenge.URL)
+// Login: BeginAuthSession takes no state parameter — it mints one, and stores this
+// login's nonce, PKCE verifier and your own opaque payload against it.
+states, _ := oauthstate.NewManager(oauthstate.NewMemoryStore(0, 0)) // see OAuth state below
+payload, _ := json.Marshal(mySessionStruct)                        // whatever YOUR app needs
+sess, _ := prov.BeginAuthSession(ctx, states, "oidc-login", payload, oauthstate.DefaultTTL)
+redirectUser(sess.URL)
 
-// Callback: bind the code exchange and ID-token verification back to that same login.
-token, _ := prov.ExchangeCode(ctx, code, identityoidc.WithPKCEVerifier(challenge.CodeVerifier))
+// Callback: the state is verified and consumed once, and hands back everything the
+// callback needs — none of it read from the request.
+cb, err := prov.CompleteAuthSession(ctx, states, "oidc-login", r.FormValue("state"))
+token, _ := prov.ExchangeCode(ctx, code, identityoidc.WithPKCEVerifier(cb.CodeVerifier))
 rawIDToken := token.Extra("id_token").(string)
-idToken, err := prov.VerifyIDToken(ctx, rawIDToken, identityoidc.WithExpectedNonce(challenge.Nonce))
+idToken, err := prov.VerifyIDToken(ctx, rawIDToken, identityoidc.WithExpectedNonce(cb.Nonce))
+// cb.Payload is your bytes, byte for byte.
 ```
 
-**Use `BeginAuth`/`WithPKCEVerifier`/`WithExpectedNonce` for new integrations.** The
-package also exposes a legacy pair, `GetAuthURL`/`VerifyIDToken` called with no options —
-it provides **no nonce or PKCE protection** and exists only for backward compatibility.
+**Use `BeginAuthSession`/`CompleteAuthSession` for new integrations.** `BeginAuth` is
+still correct and supported — it is the right entry point for an app that already owns a
+store-and-consume state — but the caller then owns the state's entropy, storage and
+single use, plus persisting the nonce and PKCE verifier. The legacy pair,
+`GetAuthURL`/`VerifyIDToken` called with no options, provides **no nonce or PKCE
+protection** and exists only for backward compatibility.
+
+### OAuth state
+
+`identity/auth/oauthstate` owns the security-critical half of the `state` protocol —
+entropy, TTL, single use, and the purpose binding — while the payload stays opaque, so
+each app keeps its own session struct without the module needing to unify them:
+
+```go
+import "github.com/sethbacon/terraform-suite-identity/identity/auth/oauthstate"
+
+// MemoryStore is single-process (dev/single-replica). For HA, implement Store over
+// a shared backend: SET NX EX for PutIfAbsent, GETDEL (or an atomic Lua GET+DEL)
+// for Take. The module ships no Redis client of its own.
+states, err := oauthstate.NewManager(oauthstate.NewMemoryStore(0, 0)) // 0 = defaults
+defer states.Close()
+
+// purpose binds the state to the flow AND the resource; the callback must rebuild it
+// from its own route/config, never from the request.
+state, err := states.Issue(ctx, "scm:"+providerID, payload, oauthstate.DefaultTTL)
+payload, err := states.Consume(ctx, "scm:"+providerID, r.FormValue("state"))
+// errors.Is(err, oauthstate.ErrNotFound | ErrExpired | ErrPurposeMismatch)
+
+// Single-use marker for an identifier someone else assigned (e.g. a SAML assertion ID).
+fresh, err := states.Reserve(ctx, assertionID, assertionLifetime) // false == replay
+```
+
+**A self-describing state is a vulnerability, not a CSRF token.** Building the state as
+`fmt.Sprintf("%s:%s", userID, providerID)` and reading the principal back out of it at an
+unauthenticated callback is guessable, forgeable and replayable, and it lets an anonymous
+caller name whose record the callback writes — that defect is why this package exists.
+`Issue` is the only way a state is created here, and it takes no caller-supplied value.
 
 ### Suite coupling
 
