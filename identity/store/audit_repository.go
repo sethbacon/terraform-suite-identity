@@ -104,8 +104,8 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 	// predicate is applied FIRST and unconditionally, before any caller-supplied
 	// filter, so no filter combination can produce an unscoped query.
 	if pred, arg := scope.sqlPredicate("al.organization_id", paramIndex); pred != "" {
-		countQuery += pred
-		query += pred
+		countQuery += pred // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
+		query += pred      // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
 		if arg != nil {
 			args = append(args, arg)
 			paramIndex++
@@ -239,7 +239,7 @@ func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope A
 	`
 	args := []interface{}{logID}
 	if pred, arg := scope.sqlPredicate("organization_id", 2); pred != "" {
-		query += pred
+		query += pred // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
 		if arg != nil {
 			args = append(args, arg)
 		}
@@ -320,7 +320,7 @@ func (r *AuditRepository) StreamAuditLogs(ctx context.Context, startDate, endDat
 	`
 	args := []interface{}{startDate, endDate}
 	if pred, arg := scope.sqlPredicate("al.organization_id", 3); pred != "" {
-		query += pred
+		query += pred // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
 		if arg != nil {
 			args = append(args, arg)
 		}
