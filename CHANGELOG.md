@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.21.0...v0.22.0) (2026-08-02)
+
+
+### Features
+
+* add a store-and-consume OAuth state contract ([#132](https://github.com/sethbacon/terraform-suite-identity/issues/132)) ([628b039](https://github.com/sethbacon/terraform-suite-identity/commit/628b03950d97340aee00c1a9bde218ce3f831c0e))
+
 ## [0.21.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.20.3...v0.21.0) (2026-08-02)
 
 
