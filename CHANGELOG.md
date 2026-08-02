@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.21.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.20.3...v0.21.0) (2026-08-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* require a tenant scope on every audit read accessor ([#130](https://github.com/sethbacon/terraform-suite-identity/issues/130))
+
+### Features
+
+* require a tenant scope on every audit read accessor ([#130](https://github.com/sethbacon/terraform-suite-identity/issues/130)) ([b0c2a25](https://github.com/sethbacon/terraform-suite-identity/commit/b0c2a254ecab262e67a5635ac0c34407f7026fdd))
+
 ## [0.20.3](https://github.com/sethbacon/terraform-suite-identity/compare/v0.20.2...v0.20.3) (2026-07-23)
 
 
