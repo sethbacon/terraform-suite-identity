@@ -74,7 +74,18 @@ func (r *AuditRepository) CreateAuditLog(ctx context.Context, log *models.AuditL
 
 // ListAuditLogs retrieves audit logs with optional filters and pagination.
 // Results are enriched with user email and name via a LEFT JOIN on the users table.
-func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilters, limit, offset int) ([]*models.AuditLog, int, error) {
+//
+// scope is the MANDATORY tenant constraint (see audit_scope.go). It is a
+// separate parameter from filters, not another optional filter field, because
+// audit_logs is organization-owned and an omitted filter must not mean "every
+// organization". Pass AuditScopeAllOrganizations() to read platform-wide.
+func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilters, scope AuditScope, limit, offset int) ([]*models.AuditLog, int, error) {
+	if scope.MatchesNothing() {
+		// Fail closed without a round trip. A principal with no memberships has
+		// an empty audit trail, not the whole estate's.
+		return []*models.AuditLog{}, 0, nil
+	}
+
 	// Build query with filters
 	countQuery := `SELECT COUNT(*) FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`
 	query := `
@@ -88,6 +99,18 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 
 	args := make([]interface{}, 0)
 	paramIndex := 1
+
+	// GUARD audit-scope-list (issue terraform-registry#719): the tenant
+	// predicate is applied FIRST and unconditionally, before any caller-supplied
+	// filter, so no filter combination can produce an unscoped query.
+	if pred, arg := scope.sqlPredicate("al.organization_id", paramIndex); pred != "" {
+		countQuery += pred // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
+		query += pred      // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
+		if arg != nil {
+			args = append(args, arg)
+			paramIndex++
+		}
+	}
 
 	// Apply filters
 	if filters.UserID != nil {
@@ -193,18 +216,39 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 	return logs, total, rows.Err()
 }
 
-// GetAuditLog retrieves a single audit log entry by ID
-func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string) (*models.AuditLog, error) {
+// GetAuditLog retrieves a single audit log entry by ID within scope.
+//
+// An entry outside the scope is reported as not found (nil, nil) rather than
+// forbidden, so the by-id read cannot be used to probe for the existence of
+// another organization's audit entries.
+//
+// scope is mandatory for the same reason it is mandatory on ListAuditLogs: the
+// by-id axis previously carried no tenant predicate at all while the list axis
+// had one, which is precisely how terraform-registry#719 stayed open after
+// being closed.
+func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope AuditScope) (*models.AuditLog, error) {
+	if scope.MatchesNothing() {
+		return nil, nil
+	}
+
+	// GUARD audit-scope-byid (issue terraform-registry#719).
 	query := `
 		SELECT id, user_id, organization_id, action, resource_type, resource_id, metadata, ip_address, created_at
 		FROM audit_logs
 		WHERE id = $1
 	`
+	args := []interface{}{logID}
+	if pred, arg := scope.sqlPredicate("organization_id", 2); pred != "" {
+		query += pred // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
+		if arg != nil {
+			args = append(args, arg)
+		}
+	}
 
 	log := &models.AuditLog{}
 	var metadataJSON []byte
 
-	err := r.db.QueryRowContext(ctx, query, logID).Scan(
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(
 		&log.ID,
 		&log.UserID,
 		&log.OrganizationID,
@@ -255,9 +299,17 @@ func (r *AuditRepository) DeleteAuditLogsBefore(ctx context.Context, cutoff time
 	return n, nil
 }
 
-// StreamAuditLogs returns rows for the given date range for efficient streaming.
-// The caller is responsible for closing the returned *sql.Rows.
-func (r *AuditRepository) StreamAuditLogs(ctx context.Context, startDate, endDate time.Time) (*sql.Rows, error) {
+// StreamAuditLogs returns rows for the given date range, constrained to scope,
+// for efficient streaming. The caller is responsible for closing the returned
+// *sql.Rows.
+//
+// This is the export axis. It is the axis that kept leaking after
+// terraform-registry#719 was closed: the fix landed on the list handler, and no
+// search rooted at ListAuditLogs reaches a different method in a different file
+// serving GET /admin/audit-logs/export. Making scope a required parameter here
+// is what stops the next access axis from repeating it.
+func (r *AuditRepository) StreamAuditLogs(ctx context.Context, startDate, endDate time.Time, scope AuditScope) (*sql.Rows, error) {
+	// GUARD audit-scope-export (issue terraform-registry#719).
 	query := `
 		SELECT al.id, al.user_id, al.organization_id, al.action, al.resource_type, al.resource_id,
 		       al.metadata, al.ip_address, al.created_at,
@@ -265,9 +317,17 @@ func (r *AuditRepository) StreamAuditLogs(ctx context.Context, startDate, endDat
 		FROM audit_logs al
 		LEFT JOIN users u ON al.user_id = u.id
 		WHERE al.created_at >= $1 AND al.created_at <= $2
-		ORDER BY al.created_at ASC
 	`
-	rows, err := r.db.QueryContext(ctx, query, startDate, endDate)
+	args := []interface{}{startDate, endDate}
+	if pred, arg := scope.sqlPredicate("al.organization_id", 3); pred != "" {
+		query += pred // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
+		if arg != nil {
+			args = append(args, arg)
+		}
+	}
+	query += ` ORDER BY al.created_at ASC`
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stream audit logs: %w", err)
 	}
