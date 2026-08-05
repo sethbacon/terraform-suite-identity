@@ -1,0 +1,62 @@
+# CodeQL analysis.
+#
+# This module had no code scanning of any kind, which meant its zero open
+# code-scanning alerts recorded the absence of a scanner rather than the absence
+# of findings. Both backends execute this module IN-PROCESS, so it is the one
+# place in the suite where an unanalysed defect reaches every running service at
+# once.
+#
+# Action refs are SHA-pinned with a trailing version comment, matching ci.yml and
+# the rest of the suite (zizmor's ref-version-mismatch audit checks the two agree).
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Off-peak, and offset from the suite's other weekly jobs.
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL Analysis (Go)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@dc73d59c2d7bd4f8194098a91219eeee6d8a1719 # v4
+        with:
+          languages: go
+          queries: security-extended
+
+      # Build explicitly rather than relying on autobuild: this is a library
+      # module, and a silent build failure would produce an empty database that
+      # reports clean.
+      - name: Build
+        run: go build ./...
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@dc73d59c2d7bd4f8194098a91219eeee6d8a1719 # v4
+        with:
+          category: /language:go
