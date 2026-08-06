@@ -25,11 +25,24 @@ const (
 	StateUnreachable SiblingState = "unreachable" // unreachable beyond grace, or incompatible
 )
 
+// ManifestPath is the path each app must serve its capability Manifest at, and
+// the path DiscoveryClient appends to a sibling's base URL when polling.
+//
+// It is exported so a publisher can register its route from this constant
+// instead of hand-copying the literal: the discovery client and the publisher
+// then genuinely cannot diverge, because there is one definition. Note the
+// guarantee only holds for a publisher that actually references it — a route
+// registered from a copied literal still has to be kept in sync by hand, and
+// the failure mode is a permanently Unreachable sibling.
+//
+// This value is part of the wire contract between the two suite apps. Changing
+// it is a breaking change for every already-deployed sibling, not a refactor.
+const ManifestPath = "/api/v1/suite/manifest"
+
 const (
 	defaultPollInterval = 60 * time.Second
 	defaultGraceWindow  = 5 * time.Minute
 	pollTimeout         = 2 * time.Second
-	manifestPath        = "/api/v1/suite/manifest"
 	// maxManifestBytes caps how much of a sibling's response is read. A manifest
 	// is a few hundred bytes; the cap defends against a hostile or malfunctioning
 	// sibling streaming an unbounded body.
@@ -190,7 +203,7 @@ func (d *DiscoveryClient) pollOnce(ctx context.Context) {
 func (d *DiscoveryClient) fetch(ctx context.Context) (*Manifest, error) {
 	ctx, cancel := context.WithTimeout(ctx, pollTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.siblingURL+manifestPath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.siblingURL+ManifestPath, nil)
 	if err != nil {
 		return nil, err
 	}

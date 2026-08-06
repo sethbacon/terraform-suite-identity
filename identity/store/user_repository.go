@@ -6,7 +6,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -498,20 +497,9 @@ func (r *UserRepository) GetUserWithOrgRoles(ctx context.Context, userID string)
 		return nil, nil
 	}
 
-	// Then get all memberships with role templates
-	query := `
-		SELECT om.organization_id, COALESCE(o.name, '') as organization_name,
-		       om.role_template_id, om.created_at,
-		       rt.name as role_template_name, rt.display_name as role_template_display_name,
-		       COALESCE(rt.scopes, '[]'::jsonb) as role_template_scopes
-		FROM organization_members om
-		LEFT JOIN organizations o ON om.organization_id = o.id
-		LEFT JOIN role_templates rt ON om.role_template_id = rt.id
-		WHERE om.user_id = $1
-		ORDER BY om.created_at DESC
-	`
-
-	rows, err := r.db.QueryContext(ctx, query, userID)
+	// Then get all memberships with role templates (see membership.go for the
+	// shared query constant and scan helper).
+	rows, err := r.db.QueryContext(ctx, userMembershipByUserQuery, userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user memberships: %w", err)
 	}
@@ -520,24 +508,8 @@ func (r *UserRepository) GetUserWithOrgRoles(ctx context.Context, userID string)
 	memberships := make([]models.UserMembership, 0)
 	for rows.Next() {
 		m := models.UserMembership{}
-		var scopesJSON []byte
-		err := rows.Scan(
-			&m.OrganizationID,
-			&m.OrganizationName,
-			&m.RoleTemplateID,
-			&m.CreatedAt,
-			&m.RoleTemplateName,
-			&m.RoleTemplateDisplayName,
-			&scopesJSON,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan membership: %w", err)
-		}
-		// Parse scopes JSON
-		if len(scopesJSON) > 0 {
-			if err := json.Unmarshal(scopesJSON, &m.RoleTemplateScopes); err != nil {
-				return nil, fmt.Errorf("failed to parse scopes: %w", err)
-			}
+		if err := scanUserMembership(rows, &m); err != nil {
+			return nil, err
 		}
 		memberships = append(memberships, m)
 	}
@@ -569,19 +541,8 @@ func (r *UserRepository) loadMembershipsForUsers(ctx context.Context, users []*m
 		userIDs[i] = u.ID
 	}
 
-	query := `
-		SELECT om.user_id, om.organization_id, COALESCE(o.name, '') as organization_name,
-		       om.role_template_id, om.created_at,
-		       rt.name as role_template_name, rt.display_name as role_template_display_name,
-		       COALESCE(rt.scopes, '[]'::jsonb) as role_template_scopes
-		FROM organization_members om
-		LEFT JOIN organizations o ON om.organization_id = o.id
-		LEFT JOIN role_templates rt ON om.role_template_id = rt.id
-		WHERE om.user_id = ANY($1)
-		ORDER BY om.user_id, om.created_at DESC
-	`
-
-	rows, err := r.db.QueryContext(ctx, query, pq.Array(userIDs))
+	// See membership.go for the shared query constant and scan helper.
+	rows, err := r.db.QueryContext(ctx, userMembershipByUserIDsQuery, pq.Array(userIDs))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load memberships for users: %w", err)
 	}
@@ -596,24 +557,9 @@ func (r *UserRepository) loadMembershipsForUsers(ctx context.Context, users []*m
 	for rows.Next() {
 		var userID string
 		m := models.UserMembership{}
-		var scopesJSON []byte
-		err := rows.Scan(
-			&userID,
-			&m.OrganizationID,
-			&m.OrganizationName,
-			&m.RoleTemplateID,
-			&m.CreatedAt,
-			&m.RoleTemplateName,
-			&m.RoleTemplateDisplayName,
-			&scopesJSON,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan membership: %w", err)
-		}
-		if len(scopesJSON) > 0 {
-			if err := json.Unmarshal(scopesJSON, &m.RoleTemplateScopes); err != nil {
-				return nil, fmt.Errorf("failed to parse scopes: %w", err)
-			}
+		// userID is the one extra leading column this bulk query selects.
+		if err := scanUserMembership(rows, &m, &userID); err != nil {
+			return nil, err
 		}
 		if uwor, ok := resultByUserID[userID]; ok {
 			uwor.Memberships = append(uwor.Memberships, m)
