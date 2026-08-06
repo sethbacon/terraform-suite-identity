@@ -95,7 +95,7 @@ func TestDiscoveryClient_ActiveThenUnreachable(t *testing.T) {
 	sibling := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
 		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != manifestPath {
+		if r.URL.Path != ManifestPath {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -180,7 +180,7 @@ func TestDiscoveryClient_DoesNotFollowRedirects(t *testing.T) {
 		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case manifestPath:
+		case ManifestPath:
 			http.Redirect(w, r, "/elsewhere", http.StatusFound)
 		case "/elsewhere":
 			_ = json.NewEncoder(w).Encode(sibling)
@@ -212,7 +212,7 @@ func TestDiscoveryClient_IncompatibleManifestBecomesUnreachableButKeepsStaleLast
 	var compatible atomic.Bool
 	compatible.Store(true)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != manifestPath {
+		if r.URL.Path != ManifestPath {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -277,7 +277,7 @@ func TestNewDiscoveryClient_AcceptsHTTPS(t *testing.T) {
 	sibling := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
 		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != manifestPath {
+		if r.URL.Path != ManifestPath {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -313,7 +313,7 @@ func TestNewInsecureDiscoveryClient_PlaintextHTTPStillWarnsAndConstructs(t *test
 	sibling := Manifest{SchemaVersion: SchemaVersionV1, App: "terraform-state-manager",
 		Identity: IdentityInfo{Issuer: "terraform-state-manager"}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != manifestPath {
+		if r.URL.Path != ManifestPath {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -347,7 +347,7 @@ func TestDiscoveryClient_OversizedBodyRejected(t *testing.T) {
 	// more than that must be truncated/rejected (a decode failure -> fetch
 	// error -> unreachable) rather than hanging or succeeding on a partial body.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != manifestPath {
+		if r.URL.Path != ManifestPath {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
