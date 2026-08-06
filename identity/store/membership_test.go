@@ -61,11 +61,29 @@ func TestUserMembershipQueriesShareOneProjection(t *testing.T) {
 	if !strings.HasPrefix(bulk, "SELECT om.user_id, ") {
 		t.Errorf("bulk query must select om.user_id first so rows can be attributed: %s", bulk)
 	}
-	if !strings.HasSuffix(single, "WHERE om.user_id = $1 ORDER BY om.created_at DESC") {
-		t.Errorf("single-user predicate/ordering changed: %s", single)
+	// The query constants END at the WHERE clause and the ORDER BY is a separate
+	// constant appended by each caller. That split is load-bearing since v0.25.0:
+	// a tenant predicate is spliced onto the WHERE clause (andScope), so a
+	// constant that already ended in ORDER BY would receive it as
+	// `ORDER BY om.created_at DESC AND <predicate>`. Assert both halves, and
+	// assert the ordering is NOT baked into the query — otherwise a well-meaning
+	// re-merge silently reintroduces the syntax error on the scoped path only.
+	if !strings.HasSuffix(single, "WHERE om.user_id = $1") {
+		t.Errorf("single-user predicate changed: %s", single)
 	}
-	if !strings.HasSuffix(bulk, "WHERE om.user_id = ANY($1) ORDER BY om.user_id, om.created_at DESC") {
-		t.Errorf("bulk predicate/ordering changed: %s", bulk)
+	if !strings.HasSuffix(bulk, "WHERE om.user_id = ANY($1)") {
+		t.Errorf("bulk predicate changed: %s", bulk)
+	}
+	if strings.Contains(single, "ORDER BY") || strings.Contains(bulk, "ORDER BY") {
+		t.Error("the membership query constants must end at the WHERE clause; " +
+			"the ORDER BY belongs in userMembershipOrderBy/userMembershipBulkOrderBy " +
+			"so a tenant predicate can be appended to the predicate, not to the sort")
+	}
+	if whitespace(userMembershipOrderBy) != "ORDER BY om.created_at DESC" {
+		t.Errorf("single-user ordering changed: %s", userMembershipOrderBy)
+	}
+	if whitespace(userMembershipBulkOrderBy) != "ORDER BY om.user_id, om.created_at DESC" {
+		t.Errorf("bulk ordering changed: %s", userMembershipBulkOrderBy)
 	}
 }
 
@@ -86,8 +104,15 @@ func TestOrgMemberQueriesShareOneProjection(t *testing.T) {
 	if !strings.HasSuffix(one, "WHERE om.organization_id = $1 AND om.user_id = $2") {
 		t.Errorf("single-member predicate changed: %s", one)
 	}
-	if !strings.HasSuffix(list, "WHERE om.organization_id = $1 ORDER BY om.created_at DESC") {
-		t.Errorf("list predicate/ordering changed: %s", list)
+	if !strings.HasSuffix(list, "WHERE om.organization_id = $1") {
+		t.Errorf("list predicate changed: %s", list)
+	}
+	if strings.Contains(list, "ORDER BY") {
+		t.Error("orgMembersByOrgQuery must end at the WHERE clause so the tenant " +
+			"predicate lands on the predicate; the sort lives in orgMembersByOrgOrderBy")
+	}
+	if whitespace(orgMembersByOrgOrderBy) != "ORDER BY om.created_at DESC" {
+		t.Errorf("list ordering changed: %s", orgMembersByOrgOrderBy)
 	}
 }
 
@@ -108,7 +133,7 @@ func TestGetUserWithOrgRolesAndGetUserMembershipsIssueIdenticalSQL(t *testing.T)
 	mock1.ExpectQuery(regexp.QuoteMeta(whitespace(userMembershipByUserQuery))).
 		WithArgs("u1").
 		WillReturnRows(sqlmock.NewRows(userMembershipCols))
-	if _, err := NewUserRepository(db1).GetUserWithOrgRoles(context.Background(), "u1"); err != nil {
+	if _, err := NewUserRepository(db1).GetUserWithOrgRoles(context.Background(), "u1", OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("GetUserWithOrgRoles: %v", err)
 	}
 	if err := mock1.ExpectationsWereMet(); err != nil {
@@ -157,7 +182,7 @@ func TestMembershipScanErrorWording(t *testing.T) {
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(userMembershipCols).
 						AddRow("org-1", "Org", nil, "not-a-time", nil, nil, []byte(`[]`)))
-				_, err := NewUserRepository(db).GetUserWithOrgRoles(context.Background(), "u1")
+				_, err := NewUserRepository(db).GetUserWithOrgRoles(context.Background(), "u1", OrgScopeAllOrganizations())
 				return err
 			},
 		},
@@ -175,7 +200,7 @@ func TestMembershipScanErrorWording(t *testing.T) {
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(userMembershipBulkCols).
 						AddRow("u1", "org-1", "Org", nil, "not-a-time", nil, nil, []byte(`[]`)))
-				_, _, err := NewUserRepository(db).ListUsersWithMemberships(context.Background(), 10, 0)
+				_, _, err := NewUserRepository(db).ListUsersWithMemberships(context.Background(), 10, 0, OrgScopeAllOrganizations())
 				return err
 			},
 		},
@@ -201,7 +226,7 @@ func TestMembershipScanErrorWording(t *testing.T) {
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols).
 						AddRow("org-1", "u1", nil, "not-a-time", "A", "a@b.c", nil, nil, []byte(`[]`)))
-				_, err := NewOrganizationRepository(db).GetMemberWithRole(context.Background(), "org-1", "u1")
+				_, err := NewOrganizationRepository(db).GetMemberWithRole(context.Background(), "org-1", "u1", OrgScopeAllOrganizations())
 				return err
 			},
 		},
@@ -214,7 +239,7 @@ func TestMembershipScanErrorWording(t *testing.T) {
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols).
 						AddRow("org-1", "u1", nil, "not-a-time", "A", "a@b.c", nil, nil, []byte(`[]`)))
-				_, err := NewOrganizationRepository(db).ListMembersWithUsers(context.Background(), "org-1")
+				_, err := NewOrganizationRepository(db).ListMembersWithUsers(context.Background(), "org-1", OrgScopeAllOrganizations())
 				return err
 			},
 		},
@@ -259,7 +284,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(userMembershipCols).
 						AddRow("org-1", "Org", nil, time.Now(), nil, nil, badScopesJSON))
-				_, err := NewUserRepository(db).GetUserWithOrgRoles(context.Background(), "u1")
+				_, err := NewUserRepository(db).GetUserWithOrgRoles(context.Background(), "u1", OrgScopeAllOrganizations())
 				return err
 			},
 		},
@@ -274,7 +299,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(userMembershipBulkCols).
 						AddRow("u1", "org-1", "Org", nil, time.Now(), nil, nil, badScopesJSON))
-				_, err := NewUserRepository(db).SearchWithMemberships(context.Background(), "a", 10, 0)
+				_, err := NewUserRepository(db).SearchWithMemberships(context.Background(), "a", 10, 0, OrgScopeAllOrganizations())
 				return err
 			},
 		},
@@ -298,7 +323,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols).
 						AddRow("org-1", "u1", nil, time.Now(), "A", "a@b.c", nil, nil, badScopesJSON))
-				_, err := NewOrganizationRepository(db).GetMemberWithRole(context.Background(), "org-1", "u1")
+				_, err := NewOrganizationRepository(db).GetMemberWithRole(context.Background(), "org-1", "u1", OrgScopeAllOrganizations())
 				return err
 			},
 		},
@@ -310,7 +335,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols).
 						AddRow("org-1", "u1", nil, time.Now(), "A", "a@b.c", nil, nil, badScopesJSON))
-				_, err := NewOrganizationRepository(db).ListMembersWithUsers(context.Background(), "org-1")
+				_, err := NewOrganizationRepository(db).ListMembersWithUsers(context.Background(), "org-1", OrgScopeAllOrganizations())
 				return err
 			},
 		},
@@ -340,7 +365,7 @@ func TestGetMemberWithRoleNoRowsConvention(t *testing.T) {
 	mock.ExpectQuery(`FROM organization_members`).
 		WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols))
 
-	member, err := NewOrganizationRepository(db).GetMemberWithRole(context.Background(), "org-1", "u1")
+	member, err := NewOrganizationRepository(db).GetMemberWithRole(context.Background(), "org-1", "u1", OrgScopeAllOrganizations())
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for a missing membership, got %v", err)
 	}
@@ -408,7 +433,7 @@ func TestLoadMembershipsForUsersAttributesRowsToTheRightUser(t *testing.T) {
 			// A row for a user that is not in the page is dropped, not misfiled.
 			AddRow("u9", "org-9", "Nine", nil, time.Now(), nil, nil, []byte(`["z"]`)))
 
-	got, total, err := NewUserRepository(db).ListUsersWithMemberships(context.Background(), 10, 0)
+	got, total, err := NewUserRepository(db).ListUsersWithMemberships(context.Background(), 10, 0, OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

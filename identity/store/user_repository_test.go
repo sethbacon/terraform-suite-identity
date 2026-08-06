@@ -45,7 +45,7 @@ func TestGetUserByID_Found(t *testing.T) {
 		WithArgs("user-1").
 		WillReturnRows(sampleUserRow())
 
-	user, err := repo.GetUserByID(context.Background(), "user-1")
+	user, err := repo.GetUserByID(context.Background(), "user-1", OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestGetUserByID_NotFound(t *testing.T) {
 		WithArgs("missing").
 		WillReturnRows(emptyUserRow())
 
-	user, err := repo.GetUserByID(context.Background(), "missing")
+	user, err := repo.GetUserByID(context.Background(), "missing", OrgScopeAllOrganizations())
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
@@ -78,7 +78,7 @@ func TestGetUserByID_DBError(t *testing.T) {
 		WithArgs("user-1").
 		WillReturnError(errDB)
 
-	_, err := repo.GetUserByID(context.Background(), "user-1")
+	_, err := repo.GetUserByID(context.Background(), "user-1", OrgScopeAllOrganizations())
 	if err == nil {
 		t.Error("expected error, got nil")
 	}
@@ -191,7 +191,7 @@ func TestUpdateUser_Success(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	user := &models.User{ID: "user-1", Email: "alice@example.com", Name: "Alice Updated"}
-	if err := repo.UpdateUser(context.Background(), user); err != nil {
+	if err := repo.UpdateUser(context.Background(), user, OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -202,7 +202,7 @@ func TestUpdateUser_DBError(t *testing.T) {
 		WillReturnError(errDB)
 
 	user := &models.User{ID: "user-1", Email: "alice@example.com", Name: "Alice"}
-	if err := repo.UpdateUser(context.Background(), user); err == nil {
+	if err := repo.UpdateUser(context.Background(), user, OrgScopeAllOrganizations()); err == nil {
 		t.Error("expected error, got nil")
 	}
 }
@@ -217,7 +217,7 @@ func TestDeleteUser_Success(t *testing.T) {
 		WithArgs("user-1").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	if err := repo.DeleteUser(context.Background(), "user-1"); err != nil {
+	if err := repo.DeleteUser(context.Background(), "user-1", OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -227,7 +227,7 @@ func TestDeleteUser_DBError(t *testing.T) {
 	mock.ExpectExec("DELETE FROM users").
 		WillReturnError(errDB)
 
-	if err := repo.DeleteUser(context.Background(), "user-1"); err == nil {
+	if err := repo.DeleteUser(context.Background(), "user-1", OrgScopeAllOrganizations()); err == nil {
 		t.Error("expected error, got nil")
 	}
 }
@@ -244,7 +244,7 @@ func TestListUsers_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM users.*ORDER BY").
 		WillReturnRows(sampleUserRow())
 
-	users, total, err := repo.ListUsers(context.Background(), 20, 0)
+	users, total, err := repo.ListUsers(context.Background(), 20, 0, OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestListUsers_CountError(t *testing.T) {
 	mock.ExpectQuery("SELECT COUNT.*FROM users").
 		WillReturnError(errDB)
 
-	_, _, err := repo.ListUsers(context.Background(), 20, 0)
+	_, _, err := repo.ListUsers(context.Background(), 20, 0, OrgScopeAllOrganizations())
 	if err == nil {
 		t.Error("expected error, got nil")
 	}
@@ -276,7 +276,7 @@ func TestListUsers_Empty(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM users.*ORDER BY").
 		WillReturnRows(emptyUserRow())
 
-	users, total, err := repo.ListUsers(context.Background(), 20, 0)
+	users, total, err := repo.ListUsers(context.Background(), 20, 0, OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestCount_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT COUNT.*FROM users").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(42))
 
-	count, err := repo.Count(context.Background())
+	count, err := repo.Count(context.Background(), OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestSearch_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM users.*WHERE.*ILIKE").
 		WillReturnRows(sampleUserRow())
 
-	users, err := repo.Search(context.Background(), "alice", 20, 0)
+	users, err := repo.Search(context.Background(), "alice", 20, 0, OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestSearch_EscapesLikeMetacharacters(t *testing.T) {
 		WithArgs(`%50\%\_off%`, 20, 0).
 		WillReturnRows(emptyUserRow())
 
-	if _, err := repo.Search(context.Background(), "50%_off", 20, 0); err != nil {
+	if _, err := repo.Search(context.Background(), "50%_off", 20, 0, OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -349,7 +349,7 @@ func TestSearch_Empty(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM users.*WHERE.*ILIKE").
 		WillReturnRows(emptyUserRow())
 
-	users, err := repo.Search(context.Background(), "nobody", 20, 0)
+	users, err := repo.Search(context.Background(), "nobody", 20, 0, OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -721,7 +721,7 @@ func TestGetUserWithOrgRoles_NotFound(t *testing.T) {
 		WithArgs("missing").
 		WillReturnRows(emptyUserRow())
 
-	result, err := repo.GetUserWithOrgRoles(context.Background(), "missing")
+	result, err := repo.GetUserWithOrgRoles(context.Background(), "missing", OrgScopeAllOrganizations())
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
@@ -745,7 +745,7 @@ func TestGetUserWithOrgRoles_Success_NoMemberships(t *testing.T) {
 		WithArgs("user-1").
 		WillReturnRows(sqlmock.NewRows(membCols))
 
-	result, err := repo.GetUserWithOrgRoles(context.Background(), "user-1")
+	result, err := repo.GetUserWithOrgRoles(context.Background(), "user-1", OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -764,7 +764,7 @@ func TestGetUserWithOrgRoles_DBError(t *testing.T) {
 		WithArgs("user-err").
 		WillReturnError(errDB)
 
-	result, err := repo.GetUserWithOrgRoles(context.Background(), "user-err")
+	result, err := repo.GetUserWithOrgRoles(context.Background(), "user-err", OrgScopeAllOrganizations())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -783,7 +783,7 @@ func TestGetUserWithOrgRoles_QueryError(t *testing.T) {
 		WithArgs("user-1").
 		WillReturnError(errDB)
 
-	result, err := repo.GetUserWithOrgRoles(context.Background(), "user-1")
+	result, err := repo.GetUserWithOrgRoles(context.Background(), "user-1", OrgScopeAllOrganizations())
 	if err == nil {
 		t.Fatal("expected error from memberships query, got nil")
 	}
@@ -813,7 +813,7 @@ func TestGetUserWithOrgRoles_WithMemberships(t *testing.T) {
 			[]byte(`["modules:read","modules:write"]`),
 		))
 
-	result, err := repo.GetUserWithOrgRoles(context.Background(), "user-1")
+	result, err := repo.GetUserWithOrgRoles(context.Background(), "user-1", OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -909,7 +909,7 @@ func TestListUsersWithMemberships_Success(t *testing.T) {
 	mock.ExpectQuery("ANY").
 		WillReturnRows(emptyBulkMembershipRowsRepo())
 
-	result, total, err := repo.ListUsersWithMemberships(context.Background(), 20, 0)
+	result, total, err := repo.ListUsersWithMemberships(context.Background(), 20, 0, OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -943,7 +943,7 @@ func TestListUsersWithMemberships_WithMembership(t *testing.T) {
 	)
 	mock.ExpectQuery("ANY").WillReturnRows(memberRows)
 
-	result, _, err := repo.ListUsersWithMemberships(context.Background(), 20, 0)
+	result, _, err := repo.ListUsersWithMemberships(context.Background(), 20, 0, OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -968,7 +968,7 @@ func TestListUsersWithMemberships_Empty(t *testing.T) {
 		WillReturnRows(emptyUserRow())
 	// No users → no bulk membership query should be issued
 
-	result, total, err := repo.ListUsersWithMemberships(context.Background(), 20, 0)
+	result, total, err := repo.ListUsersWithMemberships(context.Background(), 20, 0, OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -986,7 +986,7 @@ func TestListUsersWithMemberships_MembershipDBError(t *testing.T) {
 		WillReturnRows(sampleUserRow())
 	mock.ExpectQuery("ANY").WillReturnError(errDB)
 
-	_, _, err := repo.ListUsersWithMemberships(context.Background(), 20, 0)
+	_, _, err := repo.ListUsersWithMemberships(context.Background(), 20, 0, OrgScopeAllOrganizations())
 	if err == nil {
 		t.Error("expected error from membership query, got nil")
 	}
@@ -1000,7 +1000,7 @@ func TestSearchWithMemberships_Success(t *testing.T) {
 	mock.ExpectQuery("ANY").
 		WillReturnRows(emptyBulkMembershipRowsRepo())
 
-	result, err := repo.SearchWithMemberships(context.Background(), "alice", 20, 0)
+	result, err := repo.SearchWithMemberships(context.Background(), "alice", 20, 0, OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

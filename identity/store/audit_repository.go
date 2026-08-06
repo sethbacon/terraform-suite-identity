@@ -76,11 +76,11 @@ func (r *AuditRepository) CreateAuditLog(ctx context.Context, log *models.AuditL
 // ListAuditLogs retrieves audit logs with optional filters and pagination.
 // Results are enriched with user email and name via a LEFT JOIN on the users table.
 //
-// scope is the MANDATORY tenant constraint (see audit_scope.go). It is a
+// scope is the MANDATORY tenant constraint (see org_scope.go). It is a
 // separate parameter from filters, not another optional filter field, because
 // audit_logs is organization-owned and an omitted filter must not mean "every
-// organization". Pass AuditScopeAllOrganizations() to read platform-wide.
-func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilters, scope AuditScope, limit, offset int) ([]*models.AuditLog, int, error) {
+// organization". Pass OrgScopeAllOrganizations() to read platform-wide.
+func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilters, scope OrgScope, limit, offset int) ([]*models.AuditLog, int, error) {
 	if scope.MatchesNothing() {
 		// Fail closed without a round trip. A principal with no memberships has
 		// an empty audit trail, not the whole estate's.
@@ -154,7 +154,7 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 // The caller is responsible for the MatchesNothing() short-circuit; a
 // fail-closed scope reaching here still yields an " AND FALSE" predicate rather
 // than an unfiltered query.
-func buildListAuditLogsQueries(filters AuditFilters, scope AuditScope, limit, offset int) (countQuery string, countArgs []interface{}, listQuery string, listArgs []interface{}) {
+func buildListAuditLogsQueries(filters AuditFilters, scope OrgScope, limit, offset int) (countQuery string, countArgs []interface{}, listQuery string, listArgs []interface{}) {
 	// Build query with filters
 	countQuery = `SELECT COUNT(*) FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`
 	query := `
@@ -172,14 +172,9 @@ func buildListAuditLogsQueries(filters AuditFilters, scope AuditScope, limit, of
 	// GUARD audit-scope-list (issue terraform-registry#719): the tenant
 	// predicate is applied FIRST and unconditionally, before any caller-supplied
 	// filter, so no filter combination can produce an unscoped query.
-	if pred, arg := scope.sqlPredicate("al.organization_id", paramIndex); pred != "" {
-		countQuery += pred // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
-		query += pred      // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
-		if arg != nil {
-			args = append(args, arg)
-			paramIndex++
-		}
-	}
+	countQuery, _ = andScope(countQuery, scope, "al.organization_id", args)
+	query, args = andScope(query, scope, "al.organization_id", args)
+	paramIndex = len(args) + 1
 
 	// Apply filters
 	if filters.UserID != nil {
@@ -261,7 +256,7 @@ func buildListAuditLogsQueries(filters AuditFilters, scope AuditScope, limit, of
 // by-id axis previously carried no tenant predicate at all while the list axis
 // had one, which is precisely how terraform-registry#719 stayed open after
 // being closed.
-func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope AuditScope) (*models.AuditLog, error) {
+func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope OrgScope) (*models.AuditLog, error) {
 	if scope.MatchesNothing() {
 		return nil, notFound("audit log by id")
 	}
@@ -273,12 +268,7 @@ func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope A
 		WHERE id = $1
 	`
 	args := []interface{}{logID}
-	if pred, arg := scope.sqlPredicate("organization_id", 2); pred != "" {
-		query += pred // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
-		if arg != nil {
-			args = append(args, arg)
-		}
-	}
+	query, args = andScope(query, scope, "organization_id", args)
 
 	log := &models.AuditLog{}
 	var metadataJSON []byte
@@ -339,7 +329,7 @@ func (r *AuditRepository) DeleteAuditLogsBefore(ctx context.Context, cutoff time
 // search rooted at ListAuditLogs reaches a different method in a different file
 // serving GET /admin/audit-logs/export. Making scope a required parameter here
 // is what stops the next access axis from repeating it.
-func (r *AuditRepository) StreamAuditLogs(ctx context.Context, startDate, endDate time.Time, scope AuditScope) (*sql.Rows, error) {
+func (r *AuditRepository) StreamAuditLogs(ctx context.Context, startDate, endDate time.Time, scope OrgScope) (*sql.Rows, error) {
 	// GUARD audit-scope-export (issue terraform-registry#719).
 	query := `
 		SELECT al.id, al.user_id, al.organization_id, al.action, al.resource_type, al.resource_id,
@@ -350,12 +340,7 @@ func (r *AuditRepository) StreamAuditLogs(ctx context.Context, startDate, endDat
 		WHERE al.created_at >= $1 AND al.created_at <= $2
 	`
 	args := []interface{}{startDate, endDate}
-	if pred, arg := scope.sqlPredicate("al.organization_id", 3); pred != "" {
-		query += pred // #nosec G202 -- pred is one of three fixed strings from AuditScope.sqlPredicate ("", " AND FALSE", or a $N placeholder built from an internal column constant); scope values travel as query args and are never interpolated
-		if arg != nil {
-			args = append(args, arg)
-		}
-	}
+	query, args = andScope(query, scope, "al.organization_id", args)
 	query += ` ORDER BY al.created_at ASC`
 
 	rows, err := r.db.QueryContext(ctx, query, args...)

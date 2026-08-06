@@ -114,7 +114,11 @@ func (r *OrganizationRepository) GetDefaultOrganization(ctx context.Context) (*m
 	// misconfiguration the caller must see, not an empty value it should try to
 	// use. Nothing is cached on that path either — caching a miss would pin the
 	// misconfiguration for a further TTL after it was fixed.
-	org, err := r.GetByName(ctx, "default")
+	// UNSCOPED BY DESIGN — bootstrap. Resolving the default organization happens
+	// before any principal is known (it is what single-tenant deployments resolve
+	// every request against), so there is no scope to derive. The platform-wide
+	// scope is named explicitly here rather than reached by omission.
+	org, err := r.GetByName(ctx, "default", OrgScopeAllOrganizations())
 	if err != nil {
 		return nil, err
 	}
@@ -143,18 +147,27 @@ func (r *OrganizationRepository) InvalidateDefaultOrgCache() {
 	r.defaultOrgMu.Unlock()
 }
 
-// GetByName retrieves an organization by its name.
+// GetByName retrieves an organization by its name, within scope.
 //
-// Returns an error wrapping ErrNotFound when no organization has that name.
-func (r *OrganizationRepository) GetByName(ctx context.Context, name string) (*models.Organization, error) {
+// Returns an error wrapping ErrNotFound when no organization has that name
+// inside the scope — the same error an absent organization produces, so the
+// name axis is not an existence oracle over other tenants' organization names.
+func (r *OrganizationRepository) GetByName(ctx context.Context, name string, scope OrgScope) (*models.Organization, error) {
+	if scope.MatchesNothing() {
+		return nil, notFound("organization by name")
+	}
+
+	// GUARD org-scope-organization-byid (issue #138).
 	query := `
 		SELECT id, name, display_name, idp_type, idp_name, created_at, updated_at
 		FROM organizations
 		WHERE name = $1
 	`
+	args := []interface{}{name}
+	query, args = andScope(query, scope, "id", args)
 
 	org := &models.Organization{}
-	err := r.db.QueryRowContext(ctx, query, name).Scan(
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(
 		&org.ID,
 		&org.Name,
 		&org.DisplayName,
@@ -174,18 +187,30 @@ func (r *OrganizationRepository) GetByName(ctx context.Context, name string) (*m
 	return org, nil
 }
 
-// GetByID retrieves an organization by ID.
+// GetByID retrieves an organization by ID, within scope.
 //
-// Returns an error wrapping ErrNotFound when no organization has that ID.
-func (r *OrganizationRepository) GetByID(ctx context.Context, id string) (*models.Organization, error) {
+// Returns an error wrapping ErrNotFound when no organization has that ID inside
+// the scope. On this table the row IS the tenant, so the predicate constrains
+// the primary key: `id = $1 AND id = ANY($2)`. That reads redundantly and is
+// not — $1 is the caller-supplied path parameter and $2 is the caller's
+// authority, and keeping them as separate conjuncts is what makes the second
+// one impossible to omit when a new access axis is added.
+func (r *OrganizationRepository) GetByID(ctx context.Context, id string, scope OrgScope) (*models.Organization, error) {
+	if scope.MatchesNothing() {
+		return nil, notFound("organization by id")
+	}
+
+	// GUARD org-scope-organization-byid (issue #138).
 	query := `
 		SELECT id, name, display_name, idp_type, idp_name, created_at, updated_at
 		FROM organizations
 		WHERE id = $1
 	`
+	args := []interface{}{id}
+	query, args = andScope(query, scope, "id", args)
 
 	org := &models.Organization{}
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(
 		&org.ID,
 		&org.Name,
 		&org.DisplayName,
@@ -207,6 +232,12 @@ func (r *OrganizationRepository) GetByID(ctx context.Context, id string) (*model
 
 // Create creates a new organization, filling org.ID/CreatedAt/UpdatedAt from
 // the row the database returns.
+//
+// UNSCOPED BY DESIGN — this is the one create axis in the package with no
+// owning organization to check against, because the row being created IS the
+// organization. Authority for it is the platform-tier
+// auth.ScopeOrganizationsCreate, which is deliberately not implied by
+// organizations:write, and which a consumer enforces on the route.
 //
 // This is the canonical name for the operation. Until v0.25.0 the same insert
 // was reachable as both Create and CreateOrganization; the short name survives
@@ -237,8 +268,9 @@ func (r *OrganizationRepository) Create(ctx context.Context, org *models.Organiz
 
 // === Organization Membership Operations ===
 
-// AddMemberWithRoleTemplate adds a user to an organization with the specified
-// role template, stamping created_at from the DATABASE clock (NOW()).
+// AddMemberWithRoleTemplate adds a user to an organization within scope, with
+// the specified role template, stamping created_at from the DATABASE clock
+// (NOW()).
 //
 // This is the canonical add-member operation. A second exported name for it,
 // AddMember(*models.OrganizationMember), was removed in v0.25.0. The two were
@@ -248,18 +280,33 @@ func (r *OrganizationRepository) Create(ctx context.Context, org *models.Organiz
 // by the zero value rather than by any explicit decision. Collapsing onto this
 // signature makes the server clock the only source of a membership's creation
 // time.
-func (r *OrganizationRepository) AddMemberWithRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string) error {
+func (r *OrganizationRepository) AddMemberWithRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string, scope OrgScope) error {
+	if scope.MatchesNothing() {
+		return notFound("organization by id")
+	}
+
+	// GUARD org-scope-membership-create (issue #138). As on CreateAPIKey, the
+	// create axis has no existing row to filter, so the INSERT sources from a
+	// scoped SELECT over the target organization: granting membership of an
+	// organization outside the scope inserts nothing and reports ErrNotFound.
+	// Adding a member is a privilege GRANT, so leaving this axis unscoped while
+	// scoping the update and delete axes beside it would leave the strongest of
+	// the three open.
 	query := `
 		INSERT INTO organization_members (organization_id, user_id, role_template_id, created_at)
-		VALUES ($1, $2, $3, NOW())
+		SELECT o.id, $2, $3, NOW()
+		FROM organizations o
+		WHERE o.id = $1
 	`
+	args := []interface{}{orgID, userID, roleTemplateID}
+	query, args = andScope(query, scope, "o.id", args)
 
-	_, err := r.db.ExecContext(ctx, query, orgID, userID, roleTemplateID)
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to add member: %w", err)
 	}
 
-	return nil
+	return requireRow(res, "organization by id")
 }
 
 // lookupRoleTemplateID resolves a role template's ID by name, shared by
@@ -281,21 +328,29 @@ func (r *OrganizationRepository) lookupRoleTemplateID(ctx context.Context, roleT
 
 // AddMemberWithParams adds a user to an organization with the specified role template (by template name)
 // This is a convenience method that looks up the role template by name
-func (r *OrganizationRepository) AddMemberWithParams(ctx context.Context, orgID, userID, roleTemplateName string) error {
+func (r *OrganizationRepository) AddMemberWithParams(ctx context.Context, orgID, userID, roleTemplateName string, scope OrgScope) error {
 	id, err := r.lookupRoleTemplateID(ctx, roleTemplateName)
 	if err != nil {
 		return err
 	}
-	return r.AddMemberWithRoleTemplate(ctx, orgID, userID, id)
+	return r.AddMemberWithRoleTemplate(ctx, orgID, userID, id, scope)
 }
 
-// RemoveMember removes a user from an organization.
+// RemoveMember removes a user from an organization, within scope.
 //
 // Returns an error wrapping ErrNotFound when that user is not a member of that
 // organization, so "member removed" cannot be reported for a no-op.
-func (r *OrganizationRepository) RemoveMember(ctx context.Context, orgID, userID string) error {
+func (r *OrganizationRepository) RemoveMember(ctx context.Context, orgID, userID string, scope OrgScope) error {
+	if scope.MatchesNothing() {
+		return notFound("organization member")
+	}
+
+	// GUARD org-scope-membership-delete (issues #138, #162).
 	query := `DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2`
-	res, err := r.db.ExecContext(ctx, query, orgID, userID)
+	args := []interface{}{orgID, userID}
+	query, args = andScope(query, scope, "organization_id", args)
+
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to remove member: %w", err)
 	}
@@ -303,7 +358,8 @@ func (r *OrganizationRepository) RemoveMember(ctx context.Context, orgID, userID
 	return requireRow(res, "organization member")
 }
 
-// UpdateMemberRoleTemplate changes a user's role template in an organization.
+// UpdateMemberRoleTemplate changes a user's role template in an organization,
+// within scope.
 //
 // Returns an error wrapping ErrNotFound when that user is not a member of that
 // organization. A privilege change reported as applied when it matched no row
@@ -312,14 +368,21 @@ func (r *OrganizationRepository) RemoveMember(ctx context.Context, orgID, userID
 // This is the canonical name. UpdateMember(*models.OrganizationMember), which
 // delegated here, was removed in v0.25.0: it accepted a whole membership struct
 // but wrote only RoleTemplateID, so its name promised more than it did.
-func (r *OrganizationRepository) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string) error {
+func (r *OrganizationRepository) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string, scope OrgScope) error {
+	if scope.MatchesNothing() {
+		return notFound("organization member")
+	}
+
+	// GUARD org-scope-membership-update (issue #138).
 	query := `
 		UPDATE organization_members
 		SET role_template_id = $3
 		WHERE organization_id = $1 AND user_id = $2
 	`
+	args := []interface{}{orgID, userID, roleTemplateID}
+	query, args = andScope(query, scope, "organization_id", args)
 
-	res, err := r.db.ExecContext(ctx, query, orgID, userID, roleTemplateID)
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update member role template: %w", err)
 	}
@@ -329,28 +392,35 @@ func (r *OrganizationRepository) UpdateMemberRoleTemplate(ctx context.Context, o
 
 // UpdateMemberRole changes a user's role template in an organization (by template name)
 // This is a convenience method that looks up the role template by name
-func (r *OrganizationRepository) UpdateMemberRole(ctx context.Context, orgID, userID, roleTemplateName string) error {
+func (r *OrganizationRepository) UpdateMemberRole(ctx context.Context, orgID, userID, roleTemplateName string, scope OrgScope) error {
 	id, err := r.lookupRoleTemplateID(ctx, roleTemplateName)
 	if err != nil {
 		return err
 	}
-	return r.UpdateMemberRoleTemplate(ctx, orgID, userID, id)
+	return r.UpdateMemberRoleTemplate(ctx, orgID, userID, id, scope)
 }
 
-// GetMember retrieves a user's membership in an organization.
+// GetMember retrieves a user's membership in an organization, within scope.
 //
 // Returns an error wrapping ErrNotFound when that user is not a member. A
 // caller that only wants a yes/no answer should use CheckMembership, which
 // absorbs the sentinel into its boolean.
-func (r *OrganizationRepository) GetMember(ctx context.Context, orgID, userID string) (*models.OrganizationMember, error) {
+func (r *OrganizationRepository) GetMember(ctx context.Context, orgID, userID string, scope OrgScope) (*models.OrganizationMember, error) {
+	if scope.MatchesNothing() {
+		return nil, notFound("organization member")
+	}
+
+	// GUARD org-scope-membership-byid (issues #138, #161).
 	query := `
 		SELECT organization_id, user_id, role_template_id, created_at
 		FROM organization_members
 		WHERE organization_id = $1 AND user_id = $2
 	`
+	args := []interface{}{orgID, userID}
+	query, args = andScope(query, scope, "organization_id", args)
 
 	member := &models.OrganizationMember{}
-	err := r.db.QueryRowContext(ctx, query, orgID, userID).Scan(
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(
 		&member.OrganizationID,
 		&member.UserID,
 		&member.RoleTemplateID,
@@ -368,16 +438,23 @@ func (r *OrganizationRepository) GetMember(ctx context.Context, orgID, userID st
 	return member, nil
 }
 
-// ListMembers retrieves all members of an organization
-func (r *OrganizationRepository) ListMembers(ctx context.Context, orgID string) ([]*models.OrganizationMember, error) {
+// ListMembers retrieves the members of an organization, within scope.
+func (r *OrganizationRepository) ListMembers(ctx context.Context, orgID string, scope OrgScope) ([]*models.OrganizationMember, error) {
+	if scope.MatchesNothing() {
+		return []*models.OrganizationMember{}, nil
+	}
+
+	// GUARD org-scope-membership-list (issues #138, #161).
 	query := `
 		SELECT organization_id, user_id, role_template_id, created_at
 		FROM organization_members
 		WHERE organization_id = $1
-		ORDER BY created_at DESC
 	`
+	args := []interface{}{orgID}
+	query, args = andScope(query, scope, "organization_id", args)
+	query += ` ORDER BY created_at DESC`
 
-	rows, err := r.db.QueryContext(ctx, query, orgID)
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list members: %w", err)
 	}
@@ -401,22 +478,44 @@ func (r *OrganizationRepository) ListMembers(ctx context.Context, orgID string) 
 	return members, rows.Err()
 }
 
-// GetUserOrganizations retrieves all organizations a user belongs to.
+// GetUserOrganizations retrieves the organizations a user belongs to that are
+// inside scope.
+//
+// This is #161. Unscoped, it returned a user's COMPLETE organization list, and
+// terraform-registry exposes it at GET /api/v1/users/:id behind the flat
+// users:read scope — a scope the per-organization user_manager and org_owner
+// role templates grant, and which the session JWT carries org-lessly (#652). So
+// a role holder in organization A could read the organizations/
+// organization_members rows of organizations they belong to nowhere, on a
+// resource whose owning organization is exactly what is being disclosed.
+//
+// The predicate constrains om.organization_id, not o.id: a membership the
+// caller may not see must not appear even when the organization itself is one
+// the caller knows about. Filtering on the organization would answer "which of
+// MY organizations exist" instead of "which of this user's memberships may I
+// see".
 //
 // This is the canonical name; the ListUserOrganizations alias was removed in
 // v0.25.0. "Get" matches this repository's other user-axis accessors
 // (GetUserMemberships, GetUserCombinedScopes, GetUserScopesForOrg), where
 // "List" is reserved for the organization-axis pagination (List, ListMembers).
-func (r *OrganizationRepository) GetUserOrganizations(ctx context.Context, userID string) ([]*models.Organization, error) {
+func (r *OrganizationRepository) GetUserOrganizations(ctx context.Context, userID string, scope OrgScope) ([]*models.Organization, error) {
+	if scope.MatchesNothing() {
+		return []*models.Organization{}, nil
+	}
+
+	// GUARD org-scope-membership-list (issue #161).
 	query := `
 		SELECT o.id, o.name, o.display_name, o.idp_type, o.idp_name, o.created_at, o.updated_at
 		FROM organizations o
 		INNER JOIN organization_members om ON o.id = om.organization_id
 		WHERE om.user_id = $1
-		ORDER BY o.created_at DESC
 	`
+	args := []interface{}{userID}
+	query, args = andScope(query, scope, "om.organization_id", args)
+	query += ` ORDER BY o.created_at DESC`
 
-	rows, err := r.db.QueryContext(ctx, query, userID)
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user organizations: %w", err)
 	}
@@ -443,8 +542,13 @@ func (r *OrganizationRepository) GetUserOrganizations(ctx context.Context, userI
 	return organizations, rows.Err()
 }
 
-// CheckMembership checks if a user is a member of an organization and returns
-// their role template ID.
+// CheckMembership checks if a user is a member of an organization within scope
+// and returns their role template ID.
+//
+// A membership outside the scope reports (false, nil, nil) — the same answer as
+// no membership at all. That is deliberate: the boolean is consumed as an
+// authorization answer, and "not visible to you" and "not a member" must reach
+// the same decision or the predicate becomes an oracle.
 //
 // This is one of the two accessors that deliberately ABSORB ErrNotFound: its
 // boolean already carries "not a member" in band, so surfacing the sentinel as
@@ -452,8 +556,8 @@ func (r *OrganizationRepository) GetUserOrganizations(ctx context.Context, userI
 // handle only one. Every other error still propagates — a lookup that FAILED
 // must not be reported as "not a member", which would be a fail-open for any
 // caller reading only the boolean.
-func (r *OrganizationRepository) CheckMembership(ctx context.Context, orgID, userID string) (bool, *string, error) {
-	member, err := r.GetMember(ctx, orgID, userID)
+func (r *OrganizationRepository) CheckMembership(ctx context.Context, orgID, userID string, scope OrgScope) (bool, *string, error) {
+	member, err := r.GetMember(ctx, orgID, userID, scope)
 	if errors.Is(err, ErrNotFound) {
 		return false, nil, nil
 	}
@@ -465,13 +569,24 @@ func (r *OrganizationRepository) CheckMembership(ctx context.Context, orgID, use
 }
 
 // GetMemberWithRole retrieves a user's membership in an organization with role
-// template info.
+// template info, within scope.
 //
-// Returns an error wrapping ErrNotFound when that user is not a member.
-func (r *OrganizationRepository) GetMemberWithRole(ctx context.Context, orgID, userID string) (*models.OrganizationMemberWithUser, error) {
+// Returns an error wrapping ErrNotFound when that user is not a member inside
+// the scope. This is the accessor both consumers' per-resource route guards are
+// built on, so it is also the one most often called with
+// OrgScopeAllOrganizations(): a guard deciding "may this caller act in this
+// organization" is DERIVING authority and cannot be gated on the authority it
+// is deriving.
+func (r *OrganizationRepository) GetMemberWithRole(ctx context.Context, orgID, userID string, scope OrgScope) (*models.OrganizationMemberWithUser, error) {
+	if scope.MatchesNothing() {
+		return nil, notFound("organization member")
+	}
+
+	// GUARD org-scope-membership-byid (issues #138, #161).
 	// See membership.go for the shared query constant and scan helper. The helper
 	// returns the Scan error unwrapped so the sql.ErrNoRows check below still works.
-	member, scopesJSON, err := scanOrgMemberWithUser(r.db.QueryRowContext(ctx, orgMemberByOrgAndUserQuery, orgID, userID))
+	query, args := andScope(orgMemberByOrgAndUserQuery, scope, "om.organization_id", []interface{}{orgID, userID})
+	member, scopesJSON, err := scanOrgMemberWithUser(r.db.QueryRowContext(ctx, query, args...))
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, notFound("organization member")
@@ -489,20 +604,30 @@ func (r *OrganizationRepository) GetMemberWithRole(ctx context.Context, orgID, u
 	return member, nil
 }
 
-// Update updates an organization.
+// Update updates an organization, within scope.
 //
-// Returns an error wrapping ErrNotFound when no organization has org.ID. The
+// Returns an error wrapping ErrNotFound when no organization has org.ID inside
+// the scope. It also rewrites idp_type/idp_name — the organization's identity
+// provider binding — so an unscoped update was a cross-tenant authentication
+// change, not merely a cosmetic one. The
 // default-org cache is invalidated either way: the invalidation is cheap and
 // skipping it on the error path would leave a stale entry behind on exactly the
 // call whose outcome is least certain.
-func (r *OrganizationRepository) Update(ctx context.Context, org *models.Organization) error {
+func (r *OrganizationRepository) Update(ctx context.Context, org *models.Organization, scope OrgScope) error {
+	if scope.MatchesNothing() {
+		return notFound("organization by id")
+	}
+
+	// GUARD org-scope-organization-update (issue #138).
 	query := `
 		UPDATE organizations
 		SET display_name = $2, idp_type = $3, idp_name = $4, updated_at = NOW()
 		WHERE id = $1
 	`
+	args := []interface{}{org.ID, org.DisplayName, org.IdpType, org.IdpName}
+	query, args = andScope(query, scope, "id", args)
 
-	res, err := r.db.ExecContext(ctx, query, org.ID, org.DisplayName, org.IdpType, org.IdpName)
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update organization: %w", err)
 	}
@@ -511,18 +636,24 @@ func (r *OrganizationRepository) Update(ctx context.Context, org *models.Organiz
 	return requireRow(res, "organization by id")
 }
 
-// Rename renames an organization (the identity row only) and invalidates the
-// default-org cache. Returns an error wrapping ErrNotFound when no organization
-// has that ID — a consuming app that cascades the new name into its own
+// Rename renames an organization (the identity row only), within scope, and
+// invalidates the default-org cache. Returns an error wrapping ErrNotFound when
+// no organization has that ID inside the scope — a consuming app that cascades the new name into its own
 // denormalized tables must not do so on the strength of a rename that renamed
 // nothing. Apps that store the organization name denormalized in their
 // own domain tables (e.g. the registry's module/provider namespaces) are
 // responsible for cascading the new name on their side.
-func (r *OrganizationRepository) Rename(ctx context.Context, orgID, newName string) error {
-	res, err := r.db.ExecContext(ctx,
-		`UPDATE organizations SET name = $1, updated_at = NOW() WHERE id = $2`,
-		newName, orgID,
-	)
+func (r *OrganizationRepository) Rename(ctx context.Context, orgID, newName string, scope OrgScope) error {
+	if scope.MatchesNothing() {
+		return notFound("organization by id")
+	}
+
+	// GUARD org-scope-organization-update (issue #138).
+	query := `UPDATE organizations SET name = $1, updated_at = NOW() WHERE id = $2`
+	args := []interface{}{newName, orgID}
+	query, args = andScope(query, scope, "id", args)
+
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("rename organization: %w", err)
 	}
@@ -531,12 +662,22 @@ func (r *OrganizationRepository) Rename(ctx context.Context, orgID, newName stri
 	return requireRow(res, "organization by id")
 }
 
-// Delete deletes an organization.
+// Delete deletes an organization, within scope.
 //
-// Returns an error wrapping ErrNotFound when no organization has that ID.
-func (r *OrganizationRepository) Delete(ctx context.Context, orgID string) error {
+// Returns an error wrapping ErrNotFound when no organization has that ID inside
+// the scope. This cascades to the organization's memberships and API keys, so
+// it is the highest-blast-radius axis on the table.
+func (r *OrganizationRepository) Delete(ctx context.Context, orgID string, scope OrgScope) error {
+	if scope.MatchesNothing() {
+		return notFound("organization by id")
+	}
+
+	// GUARD org-scope-organization-delete (issue #138).
 	query := `DELETE FROM organizations WHERE id = $1`
-	res, err := r.db.ExecContext(ctx, query, orgID)
+	args := []interface{}{orgID}
+	query, args = andScope(query, scope, "id", args)
+
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to delete organization: %w", err)
 	}
@@ -545,16 +686,26 @@ func (r *OrganizationRepository) Delete(ctx context.Context, orgID string) error
 	return requireRow(res, "organization by id")
 }
 
-// List retrieves a paginated list of organizations
-func (r *OrganizationRepository) List(ctx context.Context, limit, offset int) ([]*models.Organization, error) {
+// List retrieves a paginated list of the organizations inside scope.
+func (r *OrganizationRepository) List(ctx context.Context, limit, offset int, scope OrgScope) ([]*models.Organization, error) {
+	if scope.MatchesNothing() {
+		return []*models.Organization{}, nil
+	}
+
+	// GUARD org-scope-organization-list (issue #138): the tenant predicate is
+	// applied before LIMIT/OFFSET, so pagination pages the caller's own
+	// organizations rather than paging through everyone's.
 	query := `
 		SELECT id, name, display_name, idp_type, idp_name, created_at, updated_at
 		FROM organizations
-		ORDER BY created_at DESC
-		LIMIT $1 OFFSET $2
+		WHERE 1=1
 	`
+	var args []interface{}
+	query, args = andScope(query, scope, "id", args)
+	query += fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2) // #nosec G202 -- the appended text is a fixed template; its only interpolations are the integer placeholder indices computed from len(args). Every value travels as a query argument.
+	args = append(args, limit, offset)
 
-	rows, err := r.db.QueryContext(ctx, query, limit, offset)
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list organizations: %w", err)
 	}
@@ -581,11 +732,24 @@ func (r *OrganizationRepository) List(ctx context.Context, limit, offset int) ([
 	return orgs, rows.Err()
 }
 
-// Count returns the total number of organizations
-func (r *OrganizationRepository) Count(ctx context.Context) (int, error) {
+// Count returns how many organizations are inside scope.
+//
+// It is scoped for the same reason List is: a total that counts rows the caller
+// cannot see turns the paginated list into a disclosure of how many tenants
+// exist, and drives a consumer's page controls off a number its own list can
+// never reach.
+func (r *OrganizationRepository) Count(ctx context.Context, scope OrgScope) (int, error) {
+	if scope.MatchesNothing() {
+		return 0, nil
+	}
+
+	// GUARD org-scope-organization-list (issue #138).
 	var count int
-	query := `SELECT COUNT(*) FROM organizations`
-	err := r.db.QueryRowContext(ctx, query).Scan(&count)
+	query := `SELECT COUNT(*) FROM organizations WHERE 1=1`
+	var args []interface{}
+	query, args = andScope(query, scope, "id", args)
+
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count organizations: %w", err)
 	}
@@ -593,18 +757,30 @@ func (r *OrganizationRepository) Count(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// Search searches for organizations by name or display name
-func (r *OrganizationRepository) Search(ctx context.Context, query string, limit, offset int) ([]*models.Organization, error) {
+// Search searches the organizations inside scope by name or display name.
+//
+// The scope predicate is applied as its own conjunct AFTER the parenthesised
+// ILIKE alternation, so no search term can escape it. An OR-ed filter beside an
+// AND-ed one is the classic way a tenant predicate gets lost, which is why the
+// alternation is parenthesised here rather than left to operator precedence.
+func (r *OrganizationRepository) Search(ctx context.Context, query string, limit, offset int, scope OrgScope) ([]*models.Organization, error) {
+	if scope.MatchesNothing() {
+		return []*models.Organization{}, nil
+	}
+
+	// GUARD org-scope-organization-list (issue #138).
 	searchQuery := `
 		SELECT id, name, display_name, idp_type, idp_name, created_at, updated_at
 		FROM organizations
-		WHERE name ILIKE $1 OR display_name ILIKE $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
+		WHERE (name ILIKE $1 OR display_name ILIKE $1)
 	`
-
 	searchPattern := "%" + escapeLikePattern(query) + "%"
-	rows, err := r.db.QueryContext(ctx, searchQuery, searchPattern, limit, offset)
+	args := []interface{}{searchPattern}
+	searchQuery, args = andScope(searchQuery, scope, "id", args)
+	searchQuery += fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2) // #nosec G202 -- the appended text is a fixed template; its only interpolations are the integer placeholder indices computed from len(args). Every value travels as a query argument.
+	args = append(args, limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, searchQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search organizations: %w", err)
 	}
@@ -631,10 +807,17 @@ func (r *OrganizationRepository) Search(ctx context.Context, query string, limit
 	return orgs, rows.Err()
 }
 
-// ListMembersWithUsers retrieves all members of an organization with user details and role template info
-func (r *OrganizationRepository) ListMembersWithUsers(ctx context.Context, orgID string) ([]*models.OrganizationMemberWithUser, error) {
+// ListMembersWithUsers retrieves the members of an organization, within scope,
+// with user details and role template info.
+func (r *OrganizationRepository) ListMembersWithUsers(ctx context.Context, orgID string, scope OrgScope) ([]*models.OrganizationMemberWithUser, error) {
+	if scope.MatchesNothing() {
+		return []*models.OrganizationMemberWithUser{}, nil
+	}
+
+	// GUARD org-scope-membership-list (issues #138, #161).
 	// See membership.go for the shared query constant and scan helper.
-	rows, err := r.db.QueryContext(ctx, orgMembersByOrgQuery, orgID)
+	query, args := andScope(orgMembersByOrgQuery, scope, "om.organization_id", []interface{}{orgID})
+	rows, err := r.db.QueryContext(ctx, query+orgMembersByOrgOrderBy, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list members with users: %w", err)
 	}
@@ -656,12 +839,24 @@ func (r *OrganizationRepository) ListMembersWithUsers(ctx context.Context, orgID
 	return members, rows.Err()
 }
 
-// GetUserMemberships retrieves all organization memberships for a user with role template info
+// GetUserMemberships retrieves all organization memberships for a user with
+// role template info.
+//
+// UNSCOPED BY DESIGN — authority derivation. This is the accessor OrgScopeForUser
+// itself reads, and both consumers' resolvers read, to work out WHICH
+// organizations a principal may act in. Requiring a scope here would be
+// circular: the caller would have to supply the answer it is asking for.
+//
+// It is therefore the one accessor on this repository that a consumer must
+// still guard for itself when it is asking about SOMEONE ELSE. The right guard
+// is not a scope parameter but a different accessor: a consumer showing one
+// user's memberships to another user wants GetUserOrganizations (scoped, #161)
+// or a scoped ListMembersWithUsers, not this.
 func (r *OrganizationRepository) GetUserMemberships(ctx context.Context, userID string) ([]*models.UserMembership, error) {
 	// Same shape (and, before membership.go, byte-identical SQL) as
 	// UserRepository.GetUserWithOrgRoles; the two differ only in whether they
 	// return a value slice or a pointer slice.
-	rows, err := r.db.QueryContext(ctx, userMembershipByUserQuery, userID)
+	rows, err := r.db.QueryContext(ctx, userMembershipByUserQuery+userMembershipOrderBy, userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user memberships: %w", err)
 	}
@@ -758,7 +953,10 @@ func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, user
 // accepts, so the org-scoped path type-checks end to end while the
 // cross-organization union (auth.GlobalScopes) does not.
 func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID, orgID string) (auth.OrgScopes, error) {
-	member, err := r.GetMemberWithRole(ctx, orgID, userID)
+	// UNSCOPED BY DESIGN — authority derivation, like GetUserMemberships: this
+	// computes what the principal may do in orgID, so it cannot be gated on a
+	// scope derived from what the principal may do.
+	member, err := r.GetMemberWithRole(ctx, orgID, userID, OrgScopeAllOrganizations())
 	if errors.Is(err, ErrNotFound) {
 		return auth.OrgScopes{}, nil
 	}
@@ -781,19 +979,68 @@ func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID
 	return scopes, nil
 }
 
-// RemoveAllMembershipsForUser removes a user from all organizations and returns
-// how many memberships it removed.
-// Used by SCIM deprovisioning to soft-delete/deactivate a user.
+// RemoveAllMembershipsForUser removes a user from every organization INSIDE
+// scope and returns, as an OrgScope, the organizations whose membership it
+// actually removed.
 //
-// Bulk, so zero is not an error: deprovisioning a user who belonged to no
-// organization is a legitimate no-op. The count is what lets a caller log or
-// audit what the deprovisioning actually did instead of asserting it did
-// something.
-func (r *OrganizationRepository) RemoveAllMembershipsForUser(ctx context.Context, userID string) (int64, error) {
-	query := `DELETE FROM organization_members WHERE user_id = $1`
-	res, err := r.db.ExecContext(ctx, query, userID)
-	if err != nil {
-		return 0, fmt.Errorf("failed to remove all memberships for user %s: %w", userID, err)
+// Used by SCIM deprovisioning. Before v0.25.0 it took no scope and deleted the
+// target's rows in every organization, so terraform-state-manager's
+// DELETE /scim/v2/Users/:id — gated on the flat scim:provision scope that a
+// SINGLE organization's admin role template yields — stripped memberships in
+// organizations the caller had no relationship with (#162). The registry had
+// already grown a hand-rolled guard for the same axis (its #719); this makes
+// the unscoped call unrepresentable instead of merely discouraged, so the two
+// consumers cannot drift apart again.
+//
+// # Why it returns a scope and not a count
+//
+// The count answered "did the deprovisioning do something"; the SET answers the
+// question the next statement in the same request has to ask. Deprovisioning
+// also has to revoke the credentials the removed memberships backed, and
+// narrowing that sweep is #160 — which must not re-strand credentials
+// (#732/#736). Returning the removed organizations AS AN OrgScope makes them
+// directly passable to APIKeyRepository.RevokeAPIKeysForUser, so the sweep
+// covers exactly the organizations where authority was actually withdrawn:
+//
+//	removed, err := orgRepo.RemoveAllMembershipsForUser(ctx, userID, scope)
+//	...
+//	n, err := keyRepo.RevokeAPIKeysForUser(ctx, userID, removed)
+//
+// A caller that wants the old count reads len(removed.OrganizationIDs()); a
+// caller that wants to log which organizations were touched now can, which the
+// count never allowed.
+//
+// Bulk, so removing nothing is not an error: deprovisioning a user who belonged
+// to no organization in scope is a legitimate no-op, and the empty scope it
+// returns denies the downstream sweep — which is the correct outcome, since no
+// authority was reduced anywhere.
+func (r *OrganizationRepository) RemoveAllMembershipsForUser(ctx context.Context, userID string, scope OrgScope) (OrgScope, error) {
+	if scope.MatchesNothing() {
+		return OrgScope{}, nil
 	}
-	return affectedRows(res, "organization memberships for user")
+
+	// GUARD org-scope-membership-sweep (issues #160, #162).
+	query := `DELETE FROM organization_members WHERE user_id = $1`
+	args := []interface{}{userID}
+	query, args = andScope(query, scope, "organization_id", args)
+	query += ` RETURNING organization_id`
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return OrgScope{}, fmt.Errorf("failed to remove all memberships for user %s: %w", userID, err)
+	}
+	defer rows.Close()
+
+	removed := make([]string, 0)
+	for rows.Next() {
+		var orgID string
+		if err := rows.Scan(&orgID); err != nil {
+			return OrgScope{}, fmt.Errorf("failed to scan removed membership for user %s: %w", userID, err)
+		}
+		removed = append(removed, orgID)
+	}
+	if err := rows.Err(); err != nil {
+		return OrgScope{}, fmt.Errorf("failed to remove all memberships for user %s: %w", userID, err)
+	}
+	return OrgScopeOrganizations(removed...), nil
 }

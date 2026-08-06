@@ -51,7 +51,7 @@ func TestIntegrationHotPathIndexes(t *testing.T) {
 	seedHotPathFixtures(t, db)
 
 	t.Run("audit list and count use the composite scope index", func(t *testing.T) {
-		assertAuditScopePlans(t, db)
+		assertOrgScopePlans(t, db)
 	})
 
 	t.Run("audit export stream uses the composite scope index", func(t *testing.T) {
@@ -187,29 +187,29 @@ func seedHotPathFixtures(t *testing.T, db *sql.DB) {
 	mustExec(t, db, `ANALYZE identity.organizations`)
 }
 
-// assertAuditScopePlans EXPLAINs the two statements ListAuditLogs really emits.
+// assertOrgScopePlans EXPLAINs the two statements ListAuditLogs really emits.
 //
 // The queries come from buildListAuditLogsQueries — the same builder
 // ListAuditLogs itself calls — so this proves the plan for the SQL that reaches
 // production, not for a hand-copied approximation of it. That distinction is the
-// whole point: v0.21.0 made AuditScope mandatory, so this predicate is now on
+// whole point: v0.21.0 made OrgScope mandatory, so this predicate is now on
 // every audit read, and an index that fails to match the predicate the builder
 // really produces would leave the mandatory control the most expensive query in
 // the module.
-func assertAuditScopePlans(t *testing.T, db *sql.DB) {
+func assertOrgScopePlans(t *testing.T, db *sql.DB) {
 	t.Helper()
 
 	coldOrg := scanUUID(t, db, `SELECT id FROM identity.organizations WHERE name = 'bulk-cold'`)
 
 	countQuery, countArgs, listQuery, listArgs := buildListAuditLogsQueries(
-		AuditFilters{}, AuditScopeOrganizations(coldOrg), 50, 0)
+		AuditFilters{}, OrgScopeOrganizations(coldOrg), 50, 0)
 
 	// Guard against the builder silently losing the predicate: if this ever
 	// stops being true the plan assertions below would pass vacuously against
 	// an unscoped query.
 	for _, q := range []string{countQuery, listQuery} {
 		if !strings.Contains(q, "al.organization_id = ANY($1)") {
-			t.Fatalf("the emitted query no longer carries the AuditScope predicate; "+
+			t.Fatalf("the emitted query no longer carries the OrgScope predicate; "+
 				"this test would be asserting the wrong plan.\nQuery was:\n%s", q)
 		}
 	}
@@ -223,14 +223,14 @@ func assertAuditScopePlans(t *testing.T, db *sql.DB) {
 	assertPlanUsesIndex(t, "the scoped audit page query", "idx_identity_audit_logs_org_created_at",
 		explain(t, db, listQuery, listArgs...))
 
-	// The unowned variant (AuditScopeOrganizationsAndUnowned, which
+	// The unowned variant (OrgScopeOrganizationsAndUnowned, which
 	// terraform-state-manager needs because it writes org-less audit rows by
 	// design) adds `OR al.organization_id IS NULL`. PostgreSQL btrees index
 	// NULLs, so the same index serves it — this is the assertion that would
 	// fail if anyone "optimised" the index by making it partial on
 	// organization_id IS NOT NULL.
 	_, _, unownedList, unownedArgs := buildListAuditLogsQueries(
-		AuditFilters{}, AuditScopeOrganizationsAndUnowned(coldOrg), 50, 0)
+		AuditFilters{}, OrgScopeOrganizationsAndUnowned(coldOrg), 50, 0)
 	if !strings.Contains(unownedList, "IS NULL") {
 		t.Fatalf("the unowned scope no longer emits an IS NULL branch:\n%s", unownedList)
 	}

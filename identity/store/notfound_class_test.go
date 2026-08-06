@@ -31,6 +31,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -113,7 +114,7 @@ func notFoundReadAxes() []notFoundReadAxis {
 			primeHit:  func(m sqlmock.Sqlmock) { m.ExpectQuery("SELECT.*FROM users.*WHERE id").WillReturnRows(sampleUserRow()) },
 			primeMiss: func(m sqlmock.Sqlmock) { m.ExpectQuery("SELECT.*FROM users.*WHERE id").WillReturnRows(emptyUserRow()) },
 			call: func(r *classRepos) (bool, error) {
-				u, err := r.users.GetUserByID(context.Background(), "user-1")
+				u, err := r.users.GetUserByID(context.Background(), "user-1", OrgScopeAllOrganizations())
 				return u != nil, err
 			},
 		},
@@ -153,7 +154,7 @@ func notFoundReadAxes() []notFoundReadAxis {
 				m.ExpectQuery("SELECT.*FROM users.*WHERE id").WillReturnRows(emptyUserRow())
 			},
 			call: func(r *classRepos) (bool, error) {
-				u, err := r.users.GetUserWithOrgRoles(context.Background(), "user-1")
+				u, err := r.users.GetUserWithOrgRoles(context.Background(), "user-1", OrgScopeAllOrganizations())
 				return u != nil, err
 			},
 		},
@@ -166,7 +167,7 @@ func notFoundReadAxes() []notFoundReadAxis {
 				m.ExpectQuery("SELECT.*FROM organizations WHERE name").WillReturnRows(emptyOrgRow())
 			},
 			call: func(r *classRepos) (bool, error) {
-				o, err := r.orgs.GetByName(context.Background(), "default")
+				o, err := r.orgs.GetByName(context.Background(), "default", OrgScopeAllOrganizations())
 				return o != nil, err
 			},
 		},
@@ -179,7 +180,7 @@ func notFoundReadAxes() []notFoundReadAxis {
 				m.ExpectQuery("SELECT.*FROM organizations WHERE id").WillReturnRows(emptyOrgRow())
 			},
 			call: func(r *classRepos) (bool, error) {
-				o, err := r.orgs.GetByID(context.Background(), "org-1")
+				o, err := r.orgs.GetByID(context.Background(), "org-1", OrgScopeAllOrganizations())
 				return o != nil, err
 			},
 		},
@@ -208,7 +209,7 @@ func notFoundReadAxes() []notFoundReadAxis {
 				m.ExpectQuery("SELECT.*FROM organization_members WHERE organization_id").WillReturnRows(emptyOrgMemberRow())
 			},
 			call: func(r *classRepos) (bool, error) {
-				mem, err := r.orgs.GetMember(context.Background(), "org-1", "user-1")
+				mem, err := r.orgs.GetMember(context.Background(), "org-1", "user-1", OrgScopeAllOrganizations())
 				return mem != nil, err
 			},
 		},
@@ -221,7 +222,7 @@ func notFoundReadAxes() []notFoundReadAxis {
 				m.ExpectQuery("FROM organization_members").WillReturnRows(sqlmock.NewRows(orgMemberWithRoleRepoCols))
 			},
 			call: func(r *classRepos) (bool, error) {
-				mem, err := r.orgs.GetMemberWithRole(context.Background(), "org-1", "user-1")
+				mem, err := r.orgs.GetMemberWithRole(context.Background(), "org-1", "user-1", OrgScopeAllOrganizations())
 				return mem != nil, err
 			},
 		},
@@ -234,7 +235,7 @@ func notFoundReadAxes() []notFoundReadAxis {
 				m.ExpectQuery("SELECT.*FROM api_keys.*WHERE id").WillReturnRows(emptyAPIKeyRow())
 			},
 			call: func(r *classRepos) (bool, error) {
-				k, err := r.keys.GetAPIKeyByID(context.Background(), "key-1")
+				k, err := r.keys.GetAPIKeyByID(context.Background(), "key-1", OrgScopeAllOrganizations())
 				return k != nil, err
 			},
 		},
@@ -297,7 +298,7 @@ func notFoundReadAxes() []notFoundReadAxis {
 				m.ExpectQuery("SELECT id.*FROM audit_logs.*WHERE id").WillReturnRows(sqlmock.NewRows(auditGetCols))
 			},
 			call: func(r *classRepos) (bool, error) {
-				l, err := r.audit.GetAuditLog(context.Background(), "log-1", AuditScopeAllOrganizations())
+				l, err := r.audit.GetAuditLog(context.Background(), "log-1", OrgScopeAllOrganizations())
 				return l != nil, err
 			},
 		},
@@ -377,13 +378,15 @@ func zeroRowMutationAxes() []zeroRowMutationAxis {
 			name:  "UserRepository.UpdateUser",
 			prime: exec("UPDATE users SET"),
 			call: func(r *classRepos) error {
-				return r.users.UpdateUser(context.Background(), &models.User{ID: "user-1"})
+				return r.users.UpdateUser(context.Background(), &models.User{ID: "user-1"}, OrgScopeAllOrganizations())
 			},
 		},
 		{
 			name:  "UserRepository.DeleteUser",
 			prime: exec("DELETE FROM users"),
-			call:  func(r *classRepos) error { return r.users.DeleteUser(context.Background(), "user-1") },
+			call: func(r *classRepos) error {
+				return r.users.DeleteUser(context.Background(), "user-1", OrgScopeAllOrganizations())
+			},
 		},
 		{
 			name:  "APIKeyRepository.UpdateLastUsed",
@@ -393,43 +396,51 @@ func zeroRowMutationAxes() []zeroRowMutationAxis {
 		{
 			name:  "APIKeyRepository.RevokeAPIKey",
 			prime: exec("DELETE FROM api_keys"),
-			call:  func(r *classRepos) error { return r.keys.RevokeAPIKey(context.Background(), "key-1") },
+			call: func(r *classRepos) error {
+				return r.keys.RevokeAPIKey(context.Background(), "key-1", OrgScopeAllOrganizations())
+			},
 		},
 		{
 			name:  "APIKeyRepository.Update",
 			prime: exec("UPDATE api_keys"),
 			call: func(r *classRepos) error {
-				return r.keys.Update(context.Background(), &models.APIKey{ID: "key-1"})
+				return r.keys.Update(context.Background(), &models.APIKey{ID: "key-1"}, OrgScopeAllOrganizations())
 			},
 		},
 		{
 			name:  "OrganizationRepository.RemoveMember",
 			prime: exec("DELETE FROM organization_members"),
-			call:  func(r *classRepos) error { return r.orgs.RemoveMember(context.Background(), "org-1", "user-1") },
+			call: func(r *classRepos) error {
+				return r.orgs.RemoveMember(context.Background(), "org-1", "user-1", OrgScopeAllOrganizations())
+			},
 		},
 		{
 			name:  "OrganizationRepository.UpdateMemberRoleTemplate",
 			prime: exec("UPDATE organization_members"),
 			call: func(r *classRepos) error {
-				return r.orgs.UpdateMemberRoleTemplate(context.Background(), "org-1", "user-1", nil)
+				return r.orgs.UpdateMemberRoleTemplate(context.Background(), "org-1", "user-1", nil, OrgScopeAllOrganizations())
 			},
 		},
 		{
 			name:  "OrganizationRepository.Update",
 			prime: exec("UPDATE organizations"),
 			call: func(r *classRepos) error {
-				return r.orgs.Update(context.Background(), &models.Organization{ID: "org-1"})
+				return r.orgs.Update(context.Background(), &models.Organization{ID: "org-1"}, OrgScopeAllOrganizations())
 			},
 		},
 		{
 			name:  "OrganizationRepository.Rename",
 			prime: exec("UPDATE organizations SET name"),
-			call:  func(r *classRepos) error { return r.orgs.Rename(context.Background(), "org-1", "new") },
+			call: func(r *classRepos) error {
+				return r.orgs.Rename(context.Background(), "org-1", "new", OrgScopeAllOrganizations())
+			},
 		},
 		{
 			name:  "OrganizationRepository.Delete",
 			prime: exec("DELETE FROM organizations"),
-			call:  func(r *classRepos) error { return r.orgs.Delete(context.Background(), "org-1") },
+			call: func(r *classRepos) error {
+				return r.orgs.Delete(context.Background(), "org-1", OrgScopeAllOrganizations())
+			},
 		},
 		{
 			name:  "OIDCConfigRepository.DeleteOIDCConfig",
@@ -543,10 +554,29 @@ func bulkSweepAxes() []bulkSweepAxis {
 			call:  func(r *classRepos) (int64, error) { return r.keys.DeleteExpiredKeys(context.Background()) },
 		},
 		{
-			name:  "OrganizationRepository.RemoveAllMembershipsForUser",
-			prime: exec("DELETE FROM organization_members"),
+			// Since v0.25.0 this sweep RETURNs the organization ids it removed
+			// rather than a bare count (see issues #160/#162), so it is primed as
+			// a query. The class invariant under test is unchanged: a bulk sweep
+			// that touched nothing reports emptiness IN BAND and must not report
+			// ErrNotFound.
+			name: "OrganizationRepository.RemoveAllMembershipsForUser",
+			prime: func(m sqlmock.Sqlmock, n int64) {
+				rows := sqlmock.NewRows([]string{"organization_id"})
+				for i := int64(0); i < n; i++ {
+					rows.AddRow(fmt.Sprintf("org-%d", i))
+				}
+				m.ExpectQuery("DELETE FROM organization_members").WillReturnRows(rows)
+			},
 			call: func(r *classRepos) (int64, error) {
-				return r.orgs.RemoveAllMembershipsForUser(context.Background(), "user-1")
+				removed, err := r.orgs.RemoveAllMembershipsForUser(context.Background(), "user-1", OrgScopeAllOrganizations())
+				return int64(len(removed.OrganizationIDs())), err
+			},
+		},
+		{
+			name:  "APIKeyRepository.RevokeAPIKeysForUser",
+			prime: exec("DELETE FROM api_keys WHERE user_id"),
+			call: func(r *classRepos) (int64, error) {
+				return r.keys.RevokeAPIKeysForUser(context.Background(), "user-1", OrgScopeAllOrganizations())
 			},
 		},
 		{
@@ -612,7 +642,7 @@ func TestNotFoundClass_AbsorbersStayInBand(t *testing.T) {
 		mock.ExpectQuery("SELECT.*FROM organization_members WHERE organization_id").
 			WillReturnRows(emptyOrgMemberRow())
 
-		ok, role, err := repos.orgs.CheckMembership(context.Background(), "org-1", "user-1")
+		ok, role, err := repos.orgs.CheckMembership(context.Background(), "org-1", "user-1", OrgScopeAllOrganizations())
 		if err != nil {
 			t.Fatalf("err = %v, want nil (the boolean already says 'not a member')", err)
 		}
@@ -626,7 +656,7 @@ func TestNotFoundClass_AbsorbersStayInBand(t *testing.T) {
 		mock.ExpectQuery("SELECT.*FROM organization_members WHERE organization_id").
 			WillReturnError(errDB)
 
-		ok, _, err := repos.orgs.CheckMembership(context.Background(), "org-1", "user-1")
+		ok, _, err := repos.orgs.CheckMembership(context.Background(), "org-1", "user-1", OrgScopeAllOrganizations())
 		if err == nil {
 			t.Fatal("a failed lookup returned nil error; 'could not tell' must not read as 'not a member'")
 		}
@@ -791,13 +821,19 @@ func TestNotFoundClass_ExecResultDiscardersAreEnumerated(t *testing.T) {
 	// ON CONFLICT clause, and the two that have one treat zero rows as an
 	// idempotent success), or a bulk statement whose caller does not act on the
 	// count.
+	//
+	// CreateAPIKey and AddMemberWithRoleTemplate LEFT this list in v0.25.0. Both
+	// gained a required OrgScope, and both apply it by sourcing the INSERT from a
+	// scoped SELECT over the organizations table, so a zero-row insert became
+	// possible for the first time — it is what an out-of-scope (or absent) target
+	// organization produces — and both now route through requireRow. That is the
+	// list doing its job in the direction it was written for: a mutation whose
+	// zero-row case becomes reachable must stop discarding its result.
 	allowed := map[string]string{
 		"CreateUser":                 "plain INSERT; a unique violation surfaces as an error, so zero rows cannot happen",
-		"CreateAPIKey":               "plain INSERT",
 		"CreateAuditLog":             "plain INSERT",
 		"CreateRoleTemplate":         "plain INSERT",
 		"CreateOIDCConfig":           "plain INSERT (both the plain and transactional paths)",
-		"AddMemberWithRoleTemplate":  "plain INSERT",
 		"RevokeToken":                "INSERT ... ON CONFLICT DO NOTHING; zero rows means already revoked, an idempotent success",
 		"deactivateAllOIDCConfigsTx": "bulk UPDATE inside a transaction; zero rows means there were no configs",
 		"maybePruneExpiredRevocations": "best-effort bounded prune; it must never fail the revocation " +

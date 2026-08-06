@@ -20,6 +20,7 @@ import (
 	"github.com/sethbacon/terraform-suite-identity/identity/crypto"
 	"github.com/sethbacon/terraform-suite-identity/identity/httpsafe"
 	identitymodels "github.com/sethbacon/terraform-suite-identity/identity/models"
+	"github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -117,7 +118,7 @@ type stubUserRepo struct {
 	err  error
 }
 
-func (s *stubUserRepo) GetUserByID(context.Context, string) (*identitymodels.User, error) {
+func (s *stubUserRepo) GetUserByID(context.Context, string, store.OrgScope) (*identitymodels.User, error) {
 	return s.user, s.err
 }
 
