@@ -13,6 +13,23 @@ import (
 // JTI is a unique token identifier that apps may use for revocation
 // (e.g. a denylist keyed by JTI).
 //
+// # Reading the token identifier
+//
+// Read it with TokenID(). Claims carries the `jti` claim in TWO places: the
+// custom JTI field declared here, and jwt.RegisteredClaims.ID promoted from the
+// embedded struct — both tagged `json:"jti,omitempty"`. Go's field-dominance
+// rules make the shallower field (JTI) win for BOTH marshal and unmarshal, so
+// encoding/json never populates RegisteredClaims.ID from a token body and never
+// emits it. Left alone, `claims.ID` — the idiomatic golang-jwt spelling, which
+// compiles and reads perfectly — would therefore always be the empty string,
+// and a revocation denylist keyed on it would query for "" and report every
+// token as not-revoked, forever, with no error anywhere.
+//
+// Generate and Validate both keep the two fields in agreement (see TokenID), so
+// either spelling reads correctly on a Claims this package produced. TokenID is
+// still the documented accessor: it is the one that stays correct if the field
+// layout ever changes.
+//
 // OrgID is empty on a token minted by Generate (a GLOBAL, org-less token — see
 // the warning on Generate) and set to a single organization ID on a token
 // minted by GenerateForOrg. Never authorize an org-scoped action from Scopes
@@ -27,8 +44,48 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
+// TokenID returns the token's unique identifier (the `jti` claim) — the value a
+// revocation denylist is keyed on. It is the single documented way to read it;
+// see the note on Claims for why reading either underlying field directly is a
+// trap worth avoiding.
+//
+// An empty return means the token carries no identifier, which a caller must
+// treat as "cannot be checked against a denylist" and therefore as a reason to
+// DENY, never as "not revoked" (store.TokenRepository.IsTokenRevoked enforces
+// that on its side).
+func (c *Claims) TokenID() string {
+	if c == nil {
+		return ""
+	}
+	if c.JTI != "" {
+		return c.JTI
+	}
+	return c.RegisteredClaims.ID
+}
+
+// syncTokenID makes the two struct fields that both carry the `jti` claim agree,
+// so a caller reaching for the standard RegisteredClaims.ID spelling gets the
+// identifier rather than silence. Called on every Claims this package mints or
+// parses.
+func syncTokenID(c *Claims) {
+	if id := c.TokenID(); id != "" {
+		c.JTI = id
+		c.RegisteredClaims.ID = id
+	}
+}
+
 // DefaultExpiry is applied when Generate is called with expiresIn == 0.
 const DefaultExpiry = time.Hour
+
+// ErrNoSigningSecret is returned by Generate/GenerateForOrg and Validate when
+// the TokenManager holds no signing secret — a zero-value TokenManager, or one
+// built by NewTokenManager("", …) or rotated onto an empty secret.
+//
+// An empty HMAC key is not a weak secret, it is a PUBLIC one: anyone can sign a
+// token that verifies against it. Both directions therefore fail closed rather
+// than minting or accepting tokens that a misconfigured deployment would have
+// treated as authentic.
+var ErrNoSigningSecret = errors.New("auth: token manager has no signing secret configured")
 
 // TokenManager issues and validates HS256 JWTs using an injected signing secret
 // and issuer. It holds no global or environment state, so each consuming app
@@ -37,9 +94,9 @@ const DefaultExpiry = time.Hour
 //
 // TokenManager provides no revocation of its own: Validate never consults a
 // denylist. Callers that need to stop a compromised or must-be-invalidated
-// token before its natural expiry must check the JTI claim against their own
-// store (e.g. store.TokenRepository) on every request — Claims.JTI exists
-// specifically to support that pattern.
+// token before its natural expiry must check the token identifier against their
+// own store (e.g. store.TokenRepository) on every request — read it with
+// Claims.TokenID, which exists specifically to support that pattern.
 //
 // The signing secret can be rotated at runtime via RotateSecret: the previous
 // secret remains accepted for validation until ClearPreviousSecret is called,
@@ -250,6 +307,10 @@ func (m *TokenManager) generate(userID, email, orgID string, scopes []string, ex
 	if expiresIn == 0 {
 		expiresIn = DefaultExpiry
 	}
+	secret := m.currentSecret()
+	if len(secret) == 0 {
+		return "", ErrNoSigningSecret
+	}
 	jti := uuid.NewString()
 	claims := &Claims{
 		UserID: userID,
@@ -262,14 +323,18 @@ func (m *TokenManager) generate(userID, email, orgID string, scopes []string, ex
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    m.issuer,
 			Subject:   userID,
-			// Note: RegisteredClaims.ID also serializes to "jti"; the custom JTI
-			// field (same tag, shallower) is the canonical one, so ID is left unset.
+			// ID carries the same "jti" tag as the shallower Claims.JTI, which
+			// wins on marshal — so exactly one jti key is emitted either way.
+			// It is set here so a caller inspecting the returned Claims struct
+			// reads the identifier from whichever field it reaches for; see
+			// Claims.TokenID.
+			ID: jti,
 		},
 	}
 	if aud := m.audience.Load(); aud != nil {
 		claims.Audience = jwt.ClaimStrings{*aud}
 	}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.currentSecret())
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
 }
 
 // Validate parses and verifies a JWT (rejecting any signing method other than
@@ -289,6 +354,12 @@ func (m *TokenManager) Validate(tokenString string) (*Claims, error) {
 }
 
 func (m *TokenManager) validateWith(tokenString string, secret []byte) (*Claims, error) {
+	// An empty HMAC key verifies any token an attacker signs with the same
+	// (publicly known) empty key, so a manager without a secret must accept
+	// nothing rather than everything. See ErrNoSigningSecret.
+	if len(secret) == 0 {
+		return nil, ErrNoSigningSecret
+	}
 	parserOpts := []jwt.ParserOption{}
 	if aud := m.audience.Load(); aud != nil {
 		parserOpts = append(parserOpts, jwt.WithAudience(*aud))
@@ -317,5 +388,9 @@ func (m *TokenManager) validateWith(tokenString string, secret []byte) (*Claims,
 	if !m.issuerAllowed(claims.Issuer) {
 		return nil, errors.New("token issuer not allowed")
 	}
+	// encoding/json only ever populated the shallower JTI field from the token
+	// body; mirror it onto RegisteredClaims.ID so a denylist keyed on the
+	// standard field name looks up the real identifier instead of "".
+	syncTokenID(claims)
 	return claims, nil
 }

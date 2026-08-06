@@ -69,7 +69,15 @@ func (u *UserWithOrgRoles) GetAllowedScopes() []string {
 // deduplicated. If the user has no membership matching orgID, an empty (non-nil) slice is
 // returned, matching GetAllowedScopes' convention of returning make([]string, 0, ...) rather
 // than nil.
+//
+// An empty orgID names no organization and therefore grants nothing: it returns an empty
+// slice without consulting the memberships at all. Matching it by equality instead would make
+// a membership row with an unset OrganizationID — corrupt data, but the shape a bug upstream
+// produces — hand its scopes to a caller that asked about no organization in particular.
 func (u *UserWithOrgRoles) GetScopesForOrg(orgID string) []string {
+	if orgID == "" {
+		return []string{}
+	}
 	scopeSet := make(map[string]bool)
 	for _, m := range u.Memberships {
 		if m.OrganizationID != orgID {
