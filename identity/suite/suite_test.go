@@ -369,3 +369,64 @@ func TestDiscoveryClient_OversizedBodyRejected(t *testing.T) {
 		t.Fatalf("oversized body must be rejected (want unreachable/nil), got state=%v manifest=%v", st, m)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Retained-alias class: the client's own manifest
+// ---------------------------------------------------------------------------
+
+// TestNewDiscoveryClientDoesNotRetainTheCallersManifest asserts that the
+// client's copy of its own manifest shares no memory with the caller's.
+//
+// Manifest is passed by value, so its string fields are already the client's —
+// but a struct copy still shares the Capabilities backing array and the Links
+// map. The normal construction pattern is to build a Manifest once, hand it to
+// the client, and keep serving it from the app's own manifest endpoint, so the
+// caller genuinely does hold and use that map afterwards. Manifest.clone
+// exists for exactly this and is what Snapshot already uses on the way out;
+// this is the same discipline on the way in.
+func TestNewDiscoveryClientDoesNotRetainTheCallersManifest(t *testing.T) {
+	self := Manifest{
+		SchemaVersion: "suite/v1",
+		App:           "terraform-registry",
+		Version:       "1.2.3",
+		Capabilities:  []Capability{{ID: "modules.v1"}},
+		Links:         map[string]string{"ui": "https://registry.example.com"},
+	}
+
+	c, err := NewDiscoveryClient("https://sibling.example.com", self, time.Minute)
+	if err != nil {
+		t.Fatalf("NewDiscoveryClient: %v", err)
+	}
+
+	// The caller keeps using the manifest it still owns.
+	self.Links["ui"] = "https://attacker.example.com"
+	self.Links["added"] = "https://attacker.example.com/extra"
+	self.Capabilities[0] = Capability{ID: "mutated"}
+
+	if got := c.self.Links["ui"]; got != "https://registry.example.com" {
+		t.Errorf("client's own manifest Links[\"ui\"] = %q: it still shares the caller's map", got)
+	}
+	if _, ok := c.self.Links["added"]; ok {
+		t.Error("a key added to the caller's map after construction appeared in the client's manifest")
+	}
+	if got := c.self.Capabilities[0].ID; got != "modules.v1" {
+		t.Errorf("client's own manifest Capabilities[0].ID = %q: it still shares the "+
+			"caller's slice", got)
+	}
+}
+
+// TestNewDiscoveryClientHandlesAManifestWithNoReferenceFields keeps the
+// inbound clone from inventing an empty map or slice where the caller supplied
+// none — the manifest is serialised with omitempty, so present-but-empty and
+// absent are different documents.
+func TestNewDiscoveryClientHandlesAManifestWithNoReferenceFields(t *testing.T) {
+	c := NewInsecureDiscoveryClient("http://sibling.example.com",
+		Manifest{SchemaVersion: "suite/v1", App: "terraform-registry"}, time.Minute)
+
+	if c.self.Links != nil {
+		t.Errorf("nil Links became %#v", c.self.Links)
+	}
+	if c.self.Capabilities != nil {
+		t.Errorf("nil Capabilities became %#v", c.self.Capabilities)
+	}
+}

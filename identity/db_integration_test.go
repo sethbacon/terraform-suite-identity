@@ -3,10 +3,13 @@
 package identity
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/lib/pq"
@@ -180,16 +183,15 @@ func TestIntegrationRunMigrations(t *testing.T) {
 func testJSONBScopeConversion(t *testing.T, db *sql.DB) {
 	t.Helper()
 
-	// newMigrator wraps the *sql.DB in a golang-migrate driver that takes
-	// ownership of it on Close (see postgres.WithInstance): closing the
-	// returned *migrate.Migrate would close db out from under the rest of
-	// this test, exactly like RunMigrations/GetMigrationVersion themselves
-	// never call Close on the migrators they create internally. So, as they
-	// do, we deliberately never call Close here either.
-	m, err := newMigrator(db)
+	// newMigrator borrows one connection from db and the migrator owns it
+	// until closeMigrator hands it back; db itself is never closed by this
+	// package, so the rest of this test keeps using it afterwards. This
+	// mirrors what RunMigrations/GetMigrationVersion do internally.
+	m, err := newMigrator(context.Background(), db)
 	if err != nil {
 		t.Fatalf("failed to create migrator: %v", err)
 	}
+	defer closeMigrator(m)
 
 	// --- migrate to version 2 only (pre-registry-reconciliation shape,
 	// where role_templates/api_keys.scopes are still TEXT[] and
@@ -321,12 +323,13 @@ func testJSONBScopeConversion(t *testing.T, db *sql.DB) {
 func testIsActiveDropAndSingleActiveOIDCConfig(t *testing.T, db *sql.DB) {
 	t.Helper()
 
-	// See testJSONBScopeConversion: the migrator takes ownership of db on
-	// Close, so (like RunMigrations itself) we deliberately never Close it.
-	m, err := newMigrator(db)
+	// See testJSONBScopeConversion: the migrator borrows one connection from
+	// db and closeMigrator gives it back; db itself is never closed here.
+	m, err := newMigrator(context.Background(), db)
 	if err != nil {
 		t.Fatalf("failed to create migrator: %v", err)
 	}
+	defer closeMigrator(m)
 
 	// --- version 3: the vestigial is_active columns still exist ---
 	if err := m.Migrate(jsonbScopesVersion); err != nil && err != migrate.ErrNoChange {
@@ -550,4 +553,116 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestIntegrationRunMigrationsReleasesPooledConnections is the regression
+// guard for issue #139: every exported migration entry point must give the
+// connection it borrows back to the caller's pool.
+//
+// The three entry points take the consuming application's *sql.DB. Until this
+// fix each call checked out a dedicated connection (via golang-migrate's
+// postgres.WithInstance) and never returned it, so every invocation
+// permanently cost the consumer one slot of its MaxOpenConns.
+// GetMigrationVersion is the sharp end: it returns nothing but a version and a
+// dirty flag, which is exactly the shape of a readiness probe, so a handful of
+// probe intervals could drain the pool and leave every request in the
+// application waiting on a connection that was never coming back.
+//
+// The pool is therefore capped at a single connection. With the leak, the
+// SECOND borrow has nothing to wait for and blocks forever — so the whole
+// sequence runs on its own goroutine under a deadline, which converts that
+// hang into a failure with a diagnosis instead of a CI timeout. The
+// single-connection pool then has to serve an ordinary query, and the pool's
+// own accounting has to agree that nothing is still checked out.
+//
+// The test name deliberately starts with TestIntegrationRunMigrations so the
+// CI job's `-run TestIntegrationRunMigrations` filter selects it.
+func TestIntegrationRunMigrationsReleasesPooledConnections(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("failed to open database connection: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// One connection, and no idle-timeout churn that could mask a leak by
+	// quietly opening a replacement.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+
+	if err := db.Ping(); err != nil {
+		t.Fatalf("failed to reach database at TEST_DATABASE_URL: %v", err)
+	}
+
+	if _, err := db.Exec(`DROP SCHEMA IF EXISTS identity CASCADE`); err != nil {
+		t.Fatalf("failed to reset identity schema before test: %v", err)
+	}
+
+	// Exercise every entry point more than once. Each call borrows and must
+	// return; only the first can succeed if any of them keeps its connection.
+	const versionCalls = 5
+	done := make(chan error, 1)
+	go func() {
+		done <- func() error {
+			if err := RunMigrations(db, "up"); err != nil {
+				return fmt.Errorf("RunMigrations(up): %w", err)
+			}
+			if err := RunMigrations(db, "up"); err != nil {
+				return fmt.Errorf("second RunMigrations(up): %w", err)
+			}
+			if err := RunMigrationSteps(db, -1); err != nil {
+				return fmt.Errorf("RunMigrationSteps(-1): %w", err)
+			}
+			if err := RunMigrationSteps(db, 1); err != nil {
+				return fmt.Errorf("RunMigrationSteps(1): %w", err)
+			}
+			for i := 1; i <= versionCalls; i++ {
+				if _, _, err := GetMigrationVersion(db); err != nil {
+					return fmt.Errorf("GetMigrationVersion call %d: %w", i, err)
+				}
+			}
+			return nil
+		}()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("migration entry points failed against a single-connection pool: %v", err)
+		}
+	case <-time.After(90 * time.Second):
+		t.Fatalf("the migration entry points blocked waiting for a connection from a "+
+			"pool of 1 after %d version calls: a previous call did not return the "+
+			"connection it borrowed (issue #139)", versionCalls)
+	}
+
+	if stats := db.Stats(); stats.InUse != 0 {
+		t.Errorf("db.Stats().InUse = %d after the full migration sequence, want 0: "+
+			"%d connection(s) are still checked out", stats.InUse, stats.InUse)
+	}
+	if stats := db.Stats(); stats.OpenConnections > 1 {
+		t.Errorf("db.Stats().OpenConnections = %d, want at most 1 for a pool capped at 1",
+			stats.OpenConnections)
+	}
+
+	// The pool must still be able to serve ordinary application traffic. The
+	// short deadline is what makes an exhausted pool fail here rather than
+	// stall: db.QueryRowContext waits for a free connection.
+	probeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var one int
+	if err := db.QueryRowContext(probeCtx, `SELECT 1`).Scan(&one); err != nil {
+		t.Fatalf("the single-connection pool could not serve a query after the migration "+
+			"sequence (its only connection was never returned): %v", err)
+	}
+	if one != 1 {
+		t.Fatalf("probe query returned %d, want 1", one)
+	}
 }

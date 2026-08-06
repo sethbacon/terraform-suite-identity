@@ -102,8 +102,14 @@ func newDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Dura
 		pollInterval = defaultPollInterval
 	}
 	return &DiscoveryClient{
-		siblingURL:   siblingURL,
-		self:         self,
+		siblingURL: siblingURL,
+		// self arrives by value, so its string fields are already the
+		// client's own — but a shallow copy still shares the caller's
+		// Capabilities backing array and Links map. Clone so a caller that
+		// keeps its Manifest (the normal pattern: build it once, hand it to
+		// the client, keep using it) cannot reach into this client's identity
+		// afterwards by writing to that map or slice.
+		self:         *self.clone(),
 		pollInterval: pollInterval,
 		graceWindow:  defaultGraceWindow,
 		// Do not follow redirects: the manifest lives at a known path on the

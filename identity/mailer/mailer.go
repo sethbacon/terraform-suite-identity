@@ -210,6 +210,14 @@ func finish(c *smtp.Client, auth smtp.Auth, from string, to []string, msg []byte
 		return fmt.Errorf("smtp data: %w", err)
 	}
 	if _, err := w.Write(msg); err != nil {
+		// Release the DATA writer on the way out, as every other path here
+		// does. Nothing is stranded without this — w wraps the client's own
+		// connection, and the caller's deferred c.Close() tears that down on
+		// every path — so this is symmetry rather than a repair: the function
+		// closes what it opens, and a later edit that gives w an independent
+		// resource does not have to remember to add it. The write error is
+		// what the caller needs, so the close error is discarded.
+		_ = w.Close()
 		return fmt.Errorf("smtp write: %w", err)
 	}
 	if err := w.Close(); err != nil {
