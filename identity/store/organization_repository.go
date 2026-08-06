@@ -17,13 +17,51 @@ import (
 type OrganizationRepository struct {
 	db *sql.DB
 
-	// Cache for GetDefaultOrganization (called on nearly every request)
+	// Cache for GetDefaultOrganization (called on nearly every request).
+	//
+	// defaultOrgCache is owned exclusively by this repository: nothing outside
+	// GetDefaultOrganization/InvalidateDefaultOrgCache ever holds a pointer to
+	// it or to anything reachable from it. Both the value stored here and the
+	// value handed to a caller are produced by cloneOrganization, so a caller
+	// mutating its result cannot reach process-wide state.
+	//
+	// defaultOrgGen is the invalidation generation. It is bumped by
+	// InvalidateDefaultOrgCache and re-checked before a refill commits, so a
+	// database read that was already in flight when an invalidation happened
+	// cannot write its pre-invalidation result back into the cache.
 	defaultOrgMu    sync.RWMutex
 	defaultOrgCache *models.Organization
 	defaultOrgAt    time.Time
+	defaultOrgGen   uint64
 }
 
 const defaultOrgCacheTTL = 60 * time.Second
+
+// cloneOrganization returns an organization that shares no mutable state with
+// org, so the two can be handed to unrelated owners.
+//
+// models.Organization's only reference-typed fields are the *string IdpType
+// and IdpName, so a one-level deep copy — the struct plus fresh backing
+// strings for those two pointers — is exactly the depth required; there is no
+// slice, map, or nested struct pointer below them to follow. Strings and
+// time.Time are values and need no copying of their own. If a reference-typed
+// field is ever added to models.Organization, this function must grow with it
+// (TestCloneOrganizationCoversEveryReferenceField enforces that).
+func cloneOrganization(org *models.Organization) *models.Organization {
+	if org == nil {
+		return nil
+	}
+	cp := *org
+	if org.IdpType != nil {
+		v := *org.IdpType
+		cp.IdpType = &v
+	}
+	if org.IdpName != nil {
+		v := *org.IdpName
+		cp.IdpName = &v
+	}
+	return &cp
+}
 
 // NewOrganizationRepository creates a new organization repository
 func NewOrganizationRepository(db *sql.DB) *OrganizationRepository {
@@ -42,13 +80,30 @@ func NewOrganizationRepository(db *sql.DB) *OrganizationRepository {
 // authorization, and that never changes via Rename/Update. If the default org's
 // display fields are ever used for anything beyond display, shorten the TTL or
 // replace this cache with a shared invalidation signal (e.g. LISTEN/NOTIFY).
+//
+// The returned *models.Organization is always the caller's own: on every path
+// — cache hit and cache refill alike — it shares no memory with the cached
+// entry, so the idiomatic get-mutate-Update pattern
+// (org, _ := GetDefaultOrganization(ctx); org.DisplayName = x; Update(ctx, org))
+// cannot publish an uncommitted, or never-committed, edit to every other
+// caller in the process. Conversely, the cached entry is this repository's own
+// copy, so it cannot be reached through any value a caller still holds.
+//
+// A refill only commits if no invalidation occurred while its database read
+// was in flight. Without that check, a read that started before a concurrent
+// Rename/Update/Delete could land after InvalidateDefaultOrgCache and
+// reinstate the pre-change organization for a further full TTL on the very
+// instance whose cache the write had just cleared.
 func (r *OrganizationRepository) GetDefaultOrganization(ctx context.Context) (*models.Organization, error) {
 	r.defaultOrgMu.RLock()
 	if r.defaultOrgCache != nil && time.Since(r.defaultOrgAt) < defaultOrgCacheTTL {
-		org := *r.defaultOrgCache // return a copy
+		org := cloneOrganization(r.defaultOrgCache)
 		r.defaultOrgMu.RUnlock()
-		return &org, nil
+		return org, nil
 	}
+	// Read the generation under the same critical section that decided this
+	// is a miss, so the window being guarded starts no later than the miss.
+	gen := r.defaultOrgGen
 	r.defaultOrgMu.RUnlock()
 
 	org, err := r.GetByName(ctx, "default")
@@ -57,8 +112,12 @@ func (r *OrganizationRepository) GetDefaultOrganization(ctx context.Context) (*m
 	}
 	if org != nil {
 		r.defaultOrgMu.Lock()
-		r.defaultOrgCache = org
-		r.defaultOrgAt = time.Now()
+		if r.defaultOrgGen == gen {
+			// Cache a private copy; org itself is freshly scanned per call and
+			// belongs to the caller.
+			r.defaultOrgCache = cloneOrganization(org)
+			r.defaultOrgAt = time.Now()
+		}
 		r.defaultOrgMu.Unlock()
 	}
 	return org, nil
@@ -66,9 +125,15 @@ func (r *OrganizationRepository) GetDefaultOrganization(ctx context.Context) (*m
 
 // InvalidateDefaultOrgCache clears the cached default organization,
 // forcing the next call to GetDefaultOrganization to query the database.
+//
+// It also bumps the invalidation generation, which discards the result of any
+// GetDefaultOrganization refill whose read was already in flight — those
+// results predate the write that triggered this call, so caching them would
+// undo the invalidation.
 func (r *OrganizationRepository) InvalidateDefaultOrgCache() {
 	r.defaultOrgMu.Lock()
 	r.defaultOrgCache = nil
+	r.defaultOrgGen++
 	r.defaultOrgMu.Unlock()
 }
 

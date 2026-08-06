@@ -231,9 +231,20 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 		warningDays = 7
 	}
 
-	findCtx, cancel := context.WithTimeout(ctx, dbTimeout())
-	keys, err := n.apiKeyRepo.FindExpiringKeys(findCtx, warningDays)
-	cancel()
+	// Each timed call below is wrapped so its cancel func runs on a defer, not
+	// only on the straight-line path. The repositories are interfaces the host
+	// supplies, and runCheck runs behind safeloop.Guard's panic boundary
+	// (runTick), so a panic inside one of these calls is recovered and the
+	// loop keeps ticking — but a bare post-call cancel() would be skipped on
+	// the way past, leaving the timer and the context node attached to the
+	// parent (process-lifetime) context, one per faulting tick. The closures
+	// keep the cancels attached to the calls they bound, and keep them out of
+	// the loop body's defer stack.
+	keys, err := func() ([]*identitymodels.APIKey, error) {
+		findCtx, cancel := context.WithTimeout(ctx, dbTimeout())
+		defer cancel()
+		return n.apiKeyRepo.FindExpiringKeys(findCtx, warningDays)
+	}()
 	if err != nil {
 		log.Printf("API key expiry notifier: failed to query expiring keys: %v", err)
 		return
@@ -260,9 +271,11 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 			return
 		}
 
-		lookupCtx, cancel := context.WithTimeout(ctx, dbTimeout())
-		user, err := n.userRepo.GetUserByID(lookupCtx, *key.UserID)
-		cancel()
+		user, err := func() (*identitymodels.User, error) {
+			lookupCtx, cancel := context.WithTimeout(ctx, dbTimeout())
+			defer cancel()
+			return n.userRepo.GetUserByID(lookupCtx, *key.UserID)
+		}()
 		if err != nil {
 			log.Printf("API key expiry notifier: could not retrieve user %s for key %s: %v",
 				*key.UserID, key.ID, err)
@@ -286,9 +299,11 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 		// email this key: the conditional UPDATE is atomic, so exactly one replica
 		// wins the claim and the others skip. A send failure after a won claim is a
 		// missed notice (logged below), which is preferred over duplicate emails.
-		claimCtx, cancel := context.WithTimeout(ctx, dbTimeout())
-		claimed, err := n.apiKeyRepo.ClaimExpiryNotification(claimCtx, key.ID)
-		cancel()
+		claimed, err := func() (bool, error) {
+			claimCtx, cancel := context.WithTimeout(ctx, dbTimeout())
+			defer cancel()
+			return n.apiKeyRepo.ClaimExpiryNotification(claimCtx, key.ID)
+		}()
 		if err != nil {
 			log.Printf("API key expiry notifier: failed to claim notification for key %s: %v", key.ID, err)
 			continue

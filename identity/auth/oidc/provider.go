@@ -150,7 +150,12 @@ func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) 
 		ClientSecret: cfg.ClientSecret,
 		RedirectURL:  cfg.RedirectURL,
 		Endpoint:     provider.Endpoint(),
-		Scopes:       cfg.Scopes,
+		// Config arrives by value, so its string fields are already ours, but
+		// the Scopes slice header still points at the caller's backing array.
+		// Copy it: the provider requests these scopes on every subsequent
+		// authorization URL, and a caller that keeps its Config (the normal
+		// pattern) must not be able to change them after construction.
+		Scopes: append([]string(nil), cfg.Scopes...),
 	}
 
 	return &Provider{
@@ -176,8 +181,21 @@ func isHTTPSURL(rawURL string) bool {
 // ExchangeCode) without a live identity provider. Methods that depend on the
 // discovery document or verifier (VerifyIDToken, GetEndSessionEndpoint) are not
 // usable on a Provider built this way.
+//
+// The config is copied, not retained: the returned Provider shares no memory
+// with cfg, so the caller may keep and reuse (or mutate) its own *oauth2.Config
+// without changing the client id, secret, redirect URL, endpoint or scopes this
+// Provider will use for every later GetAuthURL/BeginAuth/ExchangeCode.
 func NewProviderForConfig(cfg *oauth2.Config) *Provider {
-	return &Provider{config: cfg}
+	if cfg == nil {
+		return &Provider{}
+	}
+	// oauth2.Config's only reference-typed field is Scopes ([]string); every
+	// other field, Endpoint included, is a struct of values. So the struct
+	// copy plus a fresh Scopes slice is the full depth required.
+	cp := *cfg
+	cp.Scopes = append([]string(nil), cfg.Scopes...)
+	return &Provider{config: &cp}
 }
 
 // GetAuthURL returns the OAuth2 authorization URL for the given state.

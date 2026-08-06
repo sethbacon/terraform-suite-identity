@@ -1,13 +1,17 @@
 package identity
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 )
 
@@ -182,5 +186,95 @@ func TestDownMigrationDoesNotDropSchema(t *testing.T) {
 			"version-tracking table still lives in the schema at that point in a full "+
 			"down-unwind, so the statement always fails and leaves migration state dirty",
 			downMigrationPath)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pooled-connection release (issue #139)
+// ---------------------------------------------------------------------------
+
+// TestNewMigratorReleasesTheBorrowedConnectionOnErrorPaths asserts that a
+// newMigrator call that fails hands its borrowed connection back to the pool
+// before returning.
+//
+// newMigrator checks a connection out of the caller's *sql.DB and the migrator
+// holds it until closeMigrator runs — but if construction fails there is no
+// migrator to close, so the release has to happen inside newMigrator. A
+// connection dropped on one of those paths is gone for the life of the
+// process: it counts against the consuming application's MaxOpenConns forever,
+// and enough of them wedge every other query in the app.
+//
+// The pool here is deliberately sized at exactly one connection, which turns
+// "the connection was not returned" from an accounting curiosity into an
+// observable failure: the follow-up checkout has nothing to wait for and
+// blocks until its context deadline. The db.Stats().InUse assertion is the
+// complementary direct reading of the same fact.
+//
+// The happy path (a migrator that is built, used, and closed) needs a real
+// PostgreSQL and is covered by TestIntegrationRunMigrationsReleasesPooledConnections.
+func TestNewMigratorReleasesTheBorrowedConnectionOnErrorPaths(t *testing.T) {
+	tests := []struct {
+		name   string
+		expect func(sqlmock.Sqlmock)
+	}{
+		{
+			// Fails inside ensureSchema, after the connection is borrowed.
+			name: "schema creation fails",
+			expect: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("CREATE SCHEMA IF NOT EXISTS identity").
+					WillReturnError(errors.New("permission denied for database"))
+			},
+		},
+		{
+			// Fails inside postgres.WithConnection, which probes the database
+			// name before it can build the driver.
+			name: "migration driver construction fails",
+			expect: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("CREATE SCHEMA IF NOT EXISTS identity").
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				m.ExpectQuery("SELECT CURRENT_DATABASE").
+					WillReturnError(errors.New("connection reset by peer"))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			db.SetMaxOpenConns(1)
+			tc.expect(mock)
+
+			if m, err := newMigrator(context.Background(), db); err == nil {
+				closeMigrator(m)
+				t.Fatal("expected newMigrator to fail, got a working migrator")
+			}
+
+			if inUse := db.Stats().InUse; inUse != 0 {
+				t.Errorf("db.Stats().InUse = %d after a failed newMigrator, want 0: "+
+					"the borrowed connection was not returned to the pool", inUse)
+			}
+
+			// The decisive check: the one-connection pool must be able to hand
+			// its connection out again. If newMigrator kept it, this blocks
+			// until the deadline instead of hanging the test forever.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("the pool could not serve a connection after a failed newMigrator "+
+					"(the borrowed connection was never released): %v", err)
+			}
+			_ = conn.Close()
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet sqlmock expectations: %v", err)
+			}
+		})
 	}
 }
