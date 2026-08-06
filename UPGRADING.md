@@ -477,6 +477,131 @@ SELECT count(*) FROM identity.audit_logs al
  WHERE al.organization_id IS NOT NULL
    AND NOT EXISTS (SELECT 1 FROM identity.organizations o WHERE o.id = al.organization_id);
 ```
+### 6. Schema routing must now be asserted at startup
+
+**No migration. No compile error. This is the one item in v0.25.0 that requires
+you to ADD code**, and it is the only item whose omission is silent.
+
+This module's repositories address every table unqualified (`FROM users`) while
+its migrations create every table qualified (`identity.users`), so which physical
+table a read reaches is decided by the `search_path` of the `*sql.DB` you supply.
+Both routings are supported and both are in use:
+
+| `search_path` | Repositories read and write |
+| --- | --- |
+| `identity,public` | the shared `identity` schema |
+| `"$user", public` (server default) | the app's own tables in `public` |
+
+Nothing checked that the connection selected the one you meant. The benign
+failure is `relation "users" does not exist`. The dangerous one is the situation
+both consuming applications are actually in: identity-**shaped** tables of their
+own (`public.users`, `public.organizations`, `public.api_keys`,
+`public.audit_logs`, …) in the same database as `identity.*`. A misordered
+`search_path` routes authentication reads and provisioning writes to the legacy
+tables and **succeeds** — same names, compatible columns, no error — leaving a
+split-brain identity store where a user removed from one set is still live in the
+other. Where the two settings are independent knobs (migrations on, `search_path`
+off is a reachable configuration), that is a one-variable mistake.
+
+Add the assertion once, at startup, on the **same pool the repositories are
+constructed over**, naming the schema this deployment intends:
+
+```go
+// Shared identity schema (pool carries search_path=identity,public).
+if err := identity.VerifySchemaRouting(ctx, identityDB, identity.SchemaName); err != nil {
+    return err // refuse to serve rather than read the wrong users table
+}
+
+// App-owned identity tables (plain pool, shared schema not enabled).
+if err := identity.VerifySchemaRouting(ctx, identityDB, "public"); err != nil {
+    return err
+}
+```
+
+Both calls are worth making. The value is that the deployment **states** which
+routing it means, so the configuration knobs that select it can no longer
+disagree in silence. If your app gates the shared schema behind a flag, pass the
+schema that flag selects — the assertion then fails on exactly the
+half-configured combination.
+
+Do **not** put it on the migration pool. The migrations are schema-qualified and
+do not care about `search_path`; a consumer that migrates on a plain connection
+is correct to do so, and asserting there would fail a working deployment.
+
+`identity.ResolveRouting(ctx, db)` returns the same information without failing —
+the `search_path` and the schema each table resolved to. Log it at startup: it is
+one line that says which physical tables the identity layer is about to use.
+
+### 7. `notification_channels` — the contract is now executable
+
+**No migration, deliberately.** `identity/notify` reads and writes a
+`notification_channels` table that this module does **not** create. That has not
+changed, and the reason it has not is worth stating, because shipping the
+migration is the change in this area that looks obviously right and is not:
+
+> Both consuming applications already hold live `notification_channels` rows, in
+> `public`, created by their own migration sets. A migration here would create a
+> **second, empty** `identity.notification_channels`, and every connection whose
+> `search_path` puts `identity` first — precisely the connection a consumer would
+> move this repository onto once the module claimed the table — would silently
+> re-point from the populated table to the empty one. Same statement, no error,
+> no rows. Moving rows across schemas is a consumer deploy step against a
+> database this module does not own, so the module cannot make that change safely
+> and does not attempt to.
+
+What is new is that the contract is no longer prose:
+
+- **`notify.ChannelTableDDL`** is the canonical `CREATE TABLE` statement. Apply
+  it from **your own** migration set. It is unqualified, so your migration
+  connection's `search_path` places it — the same rule that decides where the
+  repository later looks. This module's own integration tests execute this exact
+  statement and then drive every `ChannelRepository` method against the result,
+  so it cannot drift from the code that uses it.
+- **`notify.VerifyChannelTable(ctx, db)`** asserts, at startup, that the table
+  the repository will address exists and has the columns, types and nullability
+  its statements require, and **returns the schema-qualified name it resolved
+  to**. Log that name. It is the line that makes a re-point visible.
+
+```go
+channelTable, err := notify.VerifyChannelTable(ctx, appDB) // the pool the repo uses
+if err != nil {
+    return err
+}
+slog.Info("notification channels", "table", channelTable)
+```
+
+Nullability is asserted, not just types: the DAO scans `id`, `name`, `type`,
+`encrypted_target`, `events`, `enabled`, `created_at` and `updated_at` into
+non-pointer Go values, so a nullable column there is a scan failure waiting for
+its first NULL. `character varying(n)` satisfies a `text` requirement — every
+statement here behaves identically on both — but `json` does not satisfy `jsonb`
+(the fan-out query uses `jsonb_array_length` and `@>`), `bytea` does not satisfy
+`text`, and `timestamp without time zone` does not satisfy `timestamptz`.
+
+**If your table already matches, there is nothing to run.** Both shipped
+consumers' tables do. If it does not, reconcile it in your own migration set
+against `ChannelTableDDL` **before** deploying the bump, so the new assertion
+does not fail the boot that introduces it:
+
+1. Diff your `notification_channels` against `notify.ChannelTableDDL`.
+2. If it differs, add a migration in **your** repository that reconciles it, and
+   deploy that migration **first** — its own release, before the identity bump.
+3. Only then take the identity v0.25.0 bump and add the
+   `VerifyChannelTable` call.
+
+**If you decide to move the table into the `identity` schema** — this module does
+not ask you to, and does not support it with DDL — the row migration is yours and
+its ordering is not optional:
+
+1. Create `identity.notification_channels` from `ChannelTableDDL` on a connection
+   whose `search_path` is `identity`.
+2. `INSERT INTO identity.notification_channels SELECT * FROM public.notification_channels;`
+   **while nothing is writing** — the sealed targets are capability-bearing
+   secrets and a partial copy silently disables the channels it missed.
+3. Only then move the `ChannelRepository`'s pool to the identity-first
+   connection, and confirm with the name `VerifyChannelTable` returns.
+4. Keep `public.notification_channels` until step 3 is verified in production.
+   Dropping it first turns a rollback into a restore.
 
 ---
 

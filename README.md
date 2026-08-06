@@ -16,9 +16,9 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 
 | Package              | Purpose                                                                                                                                                                                                                                   |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `identity`           | Migration runner for the dedicated `identity` Postgres schema (isolated golang-migrate instance + `identity_schema_migrations` version table).                                                                                            |
+| `identity`           | Migration runner for the dedicated `identity` Postgres schema (isolated golang-migrate instance + `identity_schema_migrations` version table), plus `VerifySchemaRouting`/`ResolveRouting` — the startup assertion that the repositories' unqualified names resolve to the schema the deployment intends. |
 | `identity/models`    | The canonical identity data types — `User`, `Organization`, `OrganizationMember` (+ membership views), `APIKey`, `RoleTemplate`, `OIDCConfig`, `AuditLog`.                                                                                |
-| `identity/store`     | The data-access layer (repository pattern) for those types, plus `TokenRepository` (JWT revocation). Repos use **unqualified** table names so the connection's `search_path` selects the schema.                                          |
+| `identity/store`     | The data-access layer (repository pattern) for those types, plus `TokenRepository` (JWT revocation). Repos use **unqualified** table names so the connection's `search_path` selects the schema — assert it with `identity.VerifySchemaRouting`. |
 | `identity/auth`      | App-neutral auth primitives: scope checking (`HasScope`/`HasAnyScope`/`HasAllScopes` with wildcard `admin` + write-implies-read), the JWT `TokenManager` (HS256, JTI, secret rotation), and API-key generation/validation.                |
 | `identity/auth/oidc` | A generic OpenID Connect provider (discovery, auth URL, code exchange, ID-token verification, group/user-info extraction).                                                                                                                |
 | `identity/auth/oauthstate` | The OAuth `state` contract: `Manager` mints an unguessable state, stores an **opaque** app payload against it under a TTL, and consumes it exactly once. Ships a `MemoryStore`; HA deployments implement `Store` over their own backend.                     |
@@ -26,11 +26,17 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 | `identity/crypto`    | `TokenCipher`: AES-256-GCM authenticated encryption for capability-bearing secrets stored at rest (OAuth tokens, webhook destination URLs, **OIDC client secrets**). Key rotation via `NewTokenCipherWithPrevious`; `DeriveTokenCipher`/`GenerateKey`/`GenerateSalt` for key material. The module never owns a key — you supply one. |
 | `identity/httpsafe`  | An SSRF-safe HTTP client: outbound requests from library code (and from a host that wants the same guard) are restricted so a user-supplied destination cannot be steered at link-local, loopback or private-range addresses. |
 | `identity/mailer`    | An SMTP transport hardened against opportunistic-TLS downgrade, used to deliver notifications. |
-| `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. |
+| `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. Ships `ChannelTableDDL` (the canonical table definition, for the app's own migration set) and `VerifyChannelTable` (the startup shape assertion). |
 
 The `notification_channels` table `identity/notify` reads is **owned by the consuming
-app**, not created by this module's migrations — see the [schema
-reference](docs/schema.md#tables) for the exact shape it must have.
+app**, not created by this module's migrations. The shape is not prose you transcribe:
+apply **`notify.ChannelTableDDL`** from your own migration set (this module's integration
+tests execute that exact statement and then drive every `ChannelRepository` method against
+the result), and call **`notify.VerifyChannelTable(ctx, db)`** at startup — it asserts the
+columns, types and nullability the statements require and returns the schema-qualified name
+the repository will actually read. See the [schema reference](docs/schema.md#tables) for why
+the module ships no migration for it, and [UPGRADING.md](UPGRADING.md) for the consumer
+steps.
 
 ## Canonical identity model
 
@@ -165,11 +171,35 @@ back to `public`:
 dsn := baseDSN + " options='-c search_path=identity,public'"
 identityDB, _ := sql.Open("postgres", dsn)
 
+// Assert the routing before constructing anything over it. Skipping this is the
+// one mistake in this area that does not announce itself — see below.
+if err := identity.VerifySchemaRouting(ctx, identityDB, identity.SchemaName); err != nil {
+    return err
+}
+
 userRepo := store.NewUserRepository(identityDB) // reads/writes identity.users
 ```
 
 With a plain `public` connection the same repositories operate entirely in the app's own
 schema — so adopting the shared schema is **opt-in and reversible** behind a feature flag.
+Pass `"public"` to `VerifySchemaRouting` in that mode; the assertion supports both routings
+because the module does.
+
+**Why the assertion is not optional.** `relation "users" does not exist` is the benign
+failure. The dangerous one is the situation both consuming apps are in: identity-*shaped*
+tables of their own (`public.users`, `public.organizations`, `public.api_keys`,
+`public.audit_logs`, …) in the same database as `identity.*`. A misordered `search_path`
+routes authentication reads and provisioning writes to the legacy tables and **succeeds**
+— same names, compatible columns, no error — leaving a split-brain identity store where a
+user removed from one set is still live in the other. `VerifySchemaRouting` resolves every
+table the repositories address through `to_regclass` on one borrowed connection and refuses
+to return nil unless they all land in the schema you named. Call it on the pool the
+repositories use, not the migration pool: the migrations are schema-qualified and do not
+care about `search_path`.
+
+`identity.ResolveRouting(ctx, db)` reports the same picture without failing — the
+connection's `search_path` and the schema each table resolved to — which is worth logging
+at startup.
 
 ### Data layer
 

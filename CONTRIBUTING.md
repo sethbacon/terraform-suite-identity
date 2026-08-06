@@ -161,7 +161,17 @@ preserve them:
 - **Repository pattern with unqualified table names.** Store repositories must use
   unqualified table names so the connection's `search_path` selects the schema
   (see [docs/schema.md](docs/schema.md)). Do not hard-code `identity.` or
-  `public.` in repository SQL.
+  `public.` in repository SQL — only catalogue lookups may be qualified, and those
+  must use `pg_catalog.` so an introspection query cannot itself be redirected by
+  the `search_path` it exists to inspect.
+  <br>
+  Because the connection decides, a **new table means a new entry in
+  `identity.repositoryTables`**, which is what `VerifySchemaRouting` asserts over.
+  You do not have to remember: `TestRepositoryTablesMatchesTheSQLTheModuleEmits`
+  re-derives the list from the SQL in `identity/store` and fails in both
+  directions, and `TestModuleSQLQualifiesOnlyTheSystemCatalogue` fails on a
+  qualified application table. Both live in
+  `identity/schema_routing_class_test.go`.
 - **The `suite` package stays dependency-free** of any app or web framework so the
   coupling contract cannot drift between the two apps.
 - **Error wrapping.** Use `fmt.Errorf("context: %w", err)` to preserve the chain;

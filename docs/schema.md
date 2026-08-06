@@ -29,6 +29,48 @@ plain `public` connection to keep identity in the app's own schema. See
 > the registry, for example, gates it behind its own `TFR_IDENTITY_*` flags. This
 > document describes only what the library's migrations create.
 
+### Assert the routing at startup
+
+Because the connection decides, the connection can be wrong, and the interesting
+failure is not the loud one. `relation "users" does not exist` announces itself.
+The failure that does not is the one both consuming applications can reach: they
+have identity-**shaped** tables of their own (`public.users`,
+`public.organizations`, `public.api_keys`, `public.audit_logs`, …) in the same
+database as `identity.*`, so a misordered `search_path` routes authentication
+reads and provisioning writes to the legacy tables and **succeeds** — same names,
+compatible columns, no error, and a split-brain identity store.
+
+`identity.VerifySchemaRouting` turns that into a startup failure. Call it once,
+on the **same pool the repositories are constructed over**, naming the schema the
+deployment intends:
+
+```go
+// Shared identity schema (pool carries search_path=identity,public).
+if err := identity.VerifySchemaRouting(ctx, identityDB, identity.SchemaName); err != nil {
+    return err
+}
+
+// App-owned identity tables (plain pool; the shared schema is not enabled).
+if err := identity.VerifySchemaRouting(ctx, identityDB, "public"); err != nil {
+    return err
+}
+```
+
+It resolves every table in `identity.RepositoryTables()` through `to_regclass` on
+one borrowed connection — the same resolution the repositories' own SQL performs
+— and fails when any of them lands somewhere other than the named schema,
+resolves to nothing, or resolves to a relation that is not a table. The schema is
+a parameter rather than an assumption because **both** routings are genuinely
+supported; only the consumer knows which one it configured.
+
+`identity.ResolveRouting(ctx, db)` returns the same picture without failing (the
+connection's `search_path` and the schema each table resolved to), which is worth
+logging at startup.
+
+Do **not** point either function at the migration pool: the migrations are
+schema-qualified and do not care about `search_path`, so a consumer that migrates
+on a plain connection is correct to do so.
+
 ---
 
 ## The `identity_schema_migrations` version table
@@ -93,15 +135,31 @@ All tables live in the `identity` schema. UUID primary keys default to
 > **Not created here: `notification_channels`.** `identity/notify`'s `ChannelRepository`
 > reads and writes a `notification_channels` table, but **no migration in this module
 > creates it** — the consuming app owns it, because notification delivery is an app
-> concern layered on the shared identity store. An app that uses `identity/notify` must
-> create the table itself with this exact shape: `id UUID`, `name`/`type`/
-> `encrypted_target` `TEXT`, `events` `JSONB`, `enabled` `BOOLEAN`, `last_status`/
-> `last_error` `TEXT`, and `last_sent_at`/`created_at`/`updated_at` `TIMESTAMPTZ`. See the
-> package doc on `identity/notify/channel_repository.go` for the authoritative column list.
+> concern layered on the shared identity store. That is a decision, not an oversight, and
+> it is pinned by a test (`TestNoMigrationCreatesNotificationChannels`): both consuming
+> applications already hold live rows in their own `public.notification_channels`, so a
+> migration here would create a **second, empty** `identity.notification_channels` and
+> every `identity`-first connection would silently re-point to it — same statement, no
+> error, no rows. Moving rows across schemas is a consumer deploy step against a database
+> this module does not own.
+>
+> The contract is executable rather than prose. **`notify.ChannelTableDDL`** is the
+> canonical `CREATE TABLE` statement — apply it from the consuming app's own migration set
+> — and this module's integration tests run that exact statement and then drive every
+> `ChannelRepository` method against the result, so the definition cannot drift from the
+> code that uses it. **`notify.VerifyChannelTable(ctx, db)`** asserts at startup that the
+> table exists with the columns, types and nullability the statements require, and returns
+> the schema-qualified name it resolved to — log it; that name is what makes a re-point
+> visible. See [UPGRADING.md](../UPGRADING.md) for the consumer-side steps and their order.
 >
 > Two tables in the list above are created by the migrations but have **no Go accessor in
 > this module**: `org_quotas` and `system_settings`. They exist so both apps agree on the
-> shape; each app queries them from its own data layer.
+> shape; each app queries them from its own data layer — and therefore on its own
+> connection, which is why they are not in `identity.RepositoryTables()` and not covered by
+> `VerifySchemaRouting`. Note that a consuming app with its own `public.system_settings` of
+> a different shape has, on an `identity`-first connection, the same unqualified-name
+> hazard for **its** queries that `VerifySchemaRouting` closes for this module's; resolve
+> those from a connection whose `search_path` reaches the table you mean.
 
 ### Which tables are organization-owned, and how that is enforced
 
