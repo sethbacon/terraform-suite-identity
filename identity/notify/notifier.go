@@ -73,6 +73,13 @@ type Notifier struct {
 // outbound client (metadata endpoints, loopback, and RFC 1918 ranges are
 // blocked unless explicitly allow-listed). A nil guard yields the strict
 // default policy.
+//
+// A nil tokenCipher (a host constructed before its encryption key was wired
+// up) disables channel delivery: every send then fails with an explicit
+// "encryption key not configured" error recorded against the channel. It does
+// NOT panic — this constructor already tolerates a nil smtp and a nil guard,
+// so a nil pointer reaching a background goroutine's delivery path must fail
+// as an error, not as a process-terminating dereference.
 func NewNotifier(repo *ChannelRepository, smtp SMTPProvider, tokenCipher *crypto.TokenCipher, guard *httpsafe.Guard, opts Options) *Notifier {
 	if smtp == nil {
 		smtp = func() mailer.Config { return mailer.Config{} }
@@ -95,6 +102,13 @@ func (n *Notifier) Notify(ctx context.Context, ev Event) {
 	if n == nil {
 		return
 	}
+	// ChannelRepository's methods dereference their receiver's *sql.DB, so a
+	// Notifier built with a nil repo would panic here — inside whatever
+	// goroutine the caller was told was safe. Degrade to a logged no-op.
+	if n.repo == nil {
+		n.logger.Error("notification channels are not configured", "event", ev.Type)
+		return
+	}
 	channels, err := n.repo.ListEnabledForEvent(ctx, ev.Type)
 	if err != nil {
 		n.logger.Error("failed to load notification channels", "event", ev.Type, "error", err)
@@ -107,7 +121,7 @@ func (n *Notifier) Notify(ctx context.Context, ev Event) {
 
 // SendTest delivers a fixed test message to one channel (the admin UI "test" button).
 func (n *Notifier) SendTest(ctx context.Context, channelID string) error {
-	if n == nil {
+	if n == nil || n.repo == nil {
 		return fmt.Errorf("notifications are not available")
 	}
 	ch, err := n.repo.GetByID(ctx, channelID)
@@ -156,6 +170,13 @@ func (n *Notifier) deliver(ctx context.Context, ch *NotificationChannel, title, 
 func (n *Notifier) decryptTarget(ch *NotificationChannel) (string, error) {
 	if ch.EncryptedTarget == "" {
 		return "", fmt.Errorf("channel has no target configured")
+	}
+	// TokenCipher.Open has a pointer receiver and dereferences the master key
+	// past its empty-ciphertext short-circuit, so calling it on a nil cipher
+	// panics — and deliver reaches here for every channel type, from goroutines
+	// this package documents as safe to call. Fail the delivery instead.
+	if n.tokenCipher == nil {
+		return "", fmt.Errorf("notifications: encryption key not configured")
 	}
 	pt, err := n.tokenCipher.Open(ch.EncryptedTarget)
 	if err != nil {
@@ -307,6 +328,9 @@ func ParseRecipients(list string) ([]string, error) {
 // record stamps the outcome of a delivery attempt. Errors are logged only —
 // a failure to record delivery status must never surface as a notify failure.
 func (n *Notifier) record(ctx context.Context, channelID string, sendErr error) {
+	if n.repo == nil {
+		return
+	}
 	status, msg := "sent", ""
 	if sendErr != nil {
 		status, msg = "failed", sendErr.Error()

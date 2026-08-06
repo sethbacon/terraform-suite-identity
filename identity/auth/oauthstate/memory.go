@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/safeloop"
 )
 
 // Defaults applied by NewMemoryStore when a zero (or negative) argument is
@@ -59,7 +61,7 @@ func NewMemoryStore(cleanupInterval time.Duration, maxEntries int) *MemoryStore 
 		maxEntries: maxEntries,
 		stopCh:     make(chan struct{}),
 	}
-	go s.janitor(cleanupInterval)
+	go s.janitor(cleanupInterval, s.sweep)
 	return s
 }
 
@@ -129,19 +131,35 @@ func (s *MemoryStore) Close() error {
 	return nil
 }
 
-func (s *MemoryStore) janitor(interval time.Duration) {
+// janitor runs in a goroutine THIS package starts (see NewMemoryStore), inside
+// the host application's process. An unrecovered panic in the sweep would
+// therefore terminate the host, so each sweep runs behind the module's panic
+// boundary and the loop survives to try again on the next tick.
+// sweep is taken as a parameter (rather than called as s.sweep directly) so a
+// test can drive the loop with a body that faults on purpose and assert the
+// loop survives it.
+func (s *MemoryStore) janitor(interval time.Duration, sweep func()) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			s.mu.Lock()
-			s.purgeExpiredLocked(time.Now())
-			s.mu.Unlock()
+			safeloop.Guard("oauthstate-janitor", sweep)
 		case <-s.stopCh:
 			return
 		}
 	}
+}
+
+// sweep drops expired entries under the lock. The unlock is deferred, not
+// trailing: recovering a panic that unwound past a plain Unlock call would
+// leave s.mu held forever, converting a crash into a permanent deadlock of
+// every PutIfAbsent, Take and Close — a worse failure than the one being
+// recovered.
+func (s *MemoryStore) sweep() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeExpiredLocked(time.Now())
 }
 
 // purgeExpiredLocked drops every entry whose expiry has passed. Callers must

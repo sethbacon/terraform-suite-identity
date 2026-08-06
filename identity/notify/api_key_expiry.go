@@ -16,11 +16,29 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/safeloop"
 	"github.com/sethbacon/terraform-suite-identity/identity/mailer"
 	identitymodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 )
+
+// dbTimeout bounds each individual database round-trip made from inside the
+// notifier's loop.
+//
+// Start's context is an app-lifetime, cancel-at-shutdown context with no
+// deadline, and runCheck runs synchronously inside the ticker loop. A query
+// that never returns — a stalled connection, a lock wait with no server-side
+// timeout — would therefore not merely fail one check: it would hang the loop
+// for the life of the process, so no further expiry notification is ever sent
+// to anyone. Every query this job issues is a single-row or single-index
+// lookup, so a bound this generous cannot fail a healthy database, and any
+// finite bound converts a permanent wedge into one logged, retried tick.
+//
+// It is a var rather than a const only so tests can shorten it; nothing
+// outside this package can change it.
+var dbTimeout = 30 * time.Second
 
 // apiKeyRepo/userRepo are the minimal slices of identity/store's
 // APIKeyRepository / UserRepository this job depends on, so tests can stub
@@ -67,6 +85,10 @@ type APIKeyExpiryNotifier struct {
 	opts       ExpiryOptions
 	interval   time.Duration
 	stopChan   chan struct{}
+	// stopOnce makes Stop idempotent: closing an already-closed channel
+	// panics, and a graceful shutdown racing a signal handler (or a retry in
+	// an error path) is a realistic way to reach a second Stop.
+	stopOnce sync.Once
 }
 
 // NewAPIKeyExpiryNotifier creates a new APIKeyExpiryNotifier. cfg's
@@ -93,7 +115,24 @@ func (n *APIKeyExpiryNotifier) Name() string { return "api-key-expiry-notifier" 
 // Start runs the expiry-notification loop until ctx is cancelled or Stop is
 // called. It blocks (a jobs.Registry runs it in its own goroutine); the error
 // return is always nil — this job has no fatal startup error.
+//
+// Calling Start on a notifier that has already been stopped is a no-op: it
+// logs and returns without scanning. Start is not re-entrant — one notifier
+// runs one loop.
+//
+// A panic inside a single check is recovered and logged, and the loop
+// continues with the next tick (see runTick). The goroutine this runs in
+// belongs to the host application, so an unrecovered panic here would
+// terminate the host process rather than fail a library call.
 func (n *APIKeyExpiryNotifier) Start(ctx context.Context) error {
+	// Stop can legitimately land before Start — a shutdown signal racing a
+	// slow startup. Without this, a stopped notifier would still run one
+	// immediate check before the select noticed the closed channel.
+	if n.isStopped() {
+		log.Println("API key expiry notifier: not started (already stopped)")
+		return nil
+	}
+
 	cfg := n.cfg()
 	if !cfg.Enabled {
 		log.Println("API key expiry notifier: disabled (notifications.enabled=false)")
@@ -115,12 +154,12 @@ func (n *APIKeyExpiryNotifier) Start(ctx context.Context) error {
 		n.interval, cfg.WarningDays)
 
 	// Run once immediately on startup
-	n.runCheck(ctx)
+	n.runTick(ctx)
 
 	for {
 		select {
 		case <-ticker.C:
-			n.runCheck(ctx)
+			n.runTick(ctx)
 		case <-n.stopChan:
 			log.Println("API key expiry notifier stopped")
 			return nil
@@ -131,9 +170,32 @@ func (n *APIKeyExpiryNotifier) Start(ctx context.Context) error {
 	}
 }
 
-// Stop signals the background loop to exit.
+// runTick runs one check behind the module's panic boundary. This is the
+// repeating body of a loop the module owns and the host runs in its own
+// goroutine, so it is exactly where a fault must degrade one tick instead of
+// killing the process. The recovery is loud (safeloop.Guard logs the value and
+// the stack at error level) — a silently swallowed panic would leave the job
+// looking healthy while it quietly did nothing.
+func (n *APIKeyExpiryNotifier) runTick(ctx context.Context) {
+	safeloop.Guard(n.Name(), func() { n.runCheck(ctx) })
+}
+
+// isStopped reports whether Stop has already been called.
+func (n *APIKeyExpiryNotifier) isStopped() bool {
+	select {
+	case <-n.stopChan:
+		return true
+	default:
+		return false
+	}
+}
+
+// Stop signals the background loop to exit. It is safe to call more than once
+// and from several goroutines concurrently: closing an already-closed channel
+// panics, and an explicit registry shutdown racing a signal handler is a
+// realistic way to reach a second call. The error return is always nil.
 func (n *APIKeyExpiryNotifier) Stop() error {
-	close(n.stopChan)
+	n.stopOnce.Do(func() { close(n.stopChan) })
 	return nil
 }
 
@@ -146,13 +208,19 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 	if !cfg.Enabled || cfg.SMTP.Host == "" || !cfg.APIKeyExpiring {
 		return
 	}
+	if n.apiKeyRepo == nil {
+		log.Println("API key expiry notifier: no API key repository configured; skipping check")
+		return
+	}
 
 	warningDays := cfg.WarningDays
 	if warningDays <= 0 {
 		warningDays = 7
 	}
 
-	keys, err := n.apiKeyRepo.FindExpiringKeys(ctx, warningDays)
+	findCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+	keys, err := n.apiKeyRepo.FindExpiringKeys(findCtx, warningDays)
+	cancel()
 	if err != nil {
 		log.Printf("API key expiry notifier: failed to query expiring keys: %v", err)
 		return
@@ -165,14 +233,36 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 	log.Printf("API key expiry notifier: found %d key(s) approaching expiry", len(keys))
 
 	for _, key := range keys {
-		if key.UserID == nil {
+		// apiKeyRepo is an interface, so the rows come from whatever
+		// implementation the host wired in. The shipped one never yields a nil
+		// element or a nil ExpiresAt (its WHERE clause requires
+		// expires_at IS NOT NULL), but a dereference in this loop body is a
+		// host-process crash, not a failed call, so it is guarded rather than
+		// assumed.
+		if key == nil || key.UserID == nil || key.ExpiresAt == nil {
 			continue
 		}
+		if n.userRepo == nil {
+			log.Println("API key expiry notifier: no user repository configured; cannot resolve key owners")
+			return
+		}
 
-		user, err := n.userRepo.GetUserByID(ctx, *key.UserID)
+		lookupCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+		user, err := n.userRepo.GetUserByID(lookupCtx, *key.UserID)
+		cancel()
 		if err != nil {
 			log.Printf("API key expiry notifier: could not retrieve user %s for key %s: %v",
 				*key.UserID, key.ID, err)
+			continue
+		}
+		// GetUserByID reports "no such row" as (nil, nil), not as an error.
+		// api_keys.user_id is ON DELETE SET NULL, so deleting a user whose key
+		// is inside the warning window between the scan above and this lookup
+		// lands here — a routine administrative action, which must skip the
+		// key rather than dereference nil and take the host down with it.
+		if user == nil {
+			log.Printf("API key expiry notifier: user %s for key %s no longer exists; skipping",
+				*key.UserID, key.ID)
 			continue
 		}
 		if user.Email == "" {
@@ -183,7 +273,9 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 		// email this key: the conditional UPDATE is atomic, so exactly one replica
 		// wins the claim and the others skip. A send failure after a won claim is a
 		// missed notice (logged below), which is preferred over duplicate emails.
-		claimed, err := n.apiKeyRepo.ClaimExpiryNotification(ctx, key.ID)
+		claimCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+		claimed, err := n.apiKeyRepo.ClaimExpiryNotification(claimCtx, key.ID)
+		cancel()
 		if err != nil {
 			log.Printf("API key expiry notifier: failed to claim notification for key %s: %v", key.ID, err)
 			continue
