@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -137,11 +138,11 @@ func (r *APIKeyRepository) CreateAPIKey(ctx context.Context, apiKey *models.APIK
 // authentication path is GetAPIKeysByPrefix (indexed prefix candidates)
 // followed by auth.ValidateAPIKey (bcrypt compare) against each candidate.
 //
-// Returns (nil, nil) — not an error — when no key matches keyHash. Callers of
-// THIS function specifically must check `key == nil` before dereferencing,
-// since `if err != nil { return err }; use(key.UserID)` panics with a
-// nil-pointer dereference on any miss (e.g. a probed/garbage hash) instead of
-// cleanly denying the request.
+// Returns an error wrapping ErrNotFound when no key matches keyHash. It used to
+// return (nil, nil), which made the idiomatic
+// `if err != nil { return err }; use(key.UserID)` panic with a nil-pointer
+// dereference on any miss (e.g. a probed/garbage hash) instead of cleanly
+// denying the request — the sharpest instance of the trap ErrNotFound closes.
 func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) (*models.APIKey, error) {
 	query := `
 		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
@@ -151,8 +152,10 @@ func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) 
 	`
 
 	apiKey, err := scanAPIKey(r.db.QueryRowContext(ctx, query, keyHash))
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		// "api key by hash" names the axis, not the argument: keyHash is a
+		// credential digest and must not reach an error string.
+		return nil, notFound("api key by hash")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get api key by hash: %w", err)
@@ -160,7 +163,9 @@ func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) 
 	return apiKey, nil
 }
 
-// GetAPIKeyByID retrieves an API key by ID
+// GetAPIKeyByID retrieves an API key by ID.
+//
+// Returns an error wrapping ErrNotFound when no key has that ID.
 func (r *APIKeyRepository) GetAPIKeyByID(ctx context.Context, keyID string) (*models.APIKey, error) {
 	query := `
 		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
@@ -170,8 +175,8 @@ func (r *APIKeyRepository) GetAPIKeyByID(ctx context.Context, keyID string) (*mo
 	`
 
 	apiKey, err := scanAPIKey(r.db.QueryRowContext(ctx, query, keyID))
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("api key by id")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get api key by id: %w", err)
@@ -237,7 +242,13 @@ func (r *APIKeyRepository) ListAPIKeysByOrganization(ctx context.Context, orgID 
 	return apiKeys, rows.Err()
 }
 
-// UpdateLastUsed updates the last_used_at timestamp for an API key
+// UpdateLastUsed updates the last_used_at timestamp for an API key.
+//
+// Returns an error wrapping ErrNotFound when no key has that ID — a key
+// revoked between authentication and this bookkeeping write. Callers that treat
+// last-used tracking as best effort should test for ErrNotFound and ignore it
+// rather than failing the request; what they must NOT do is keep receiving a
+// nil error for a write that touched nothing.
 func (r *APIKeyRepository) UpdateLastUsed(ctx context.Context, keyID string) error {
 	query := `
 		UPDATE api_keys
@@ -245,35 +256,47 @@ func (r *APIKeyRepository) UpdateLastUsed(ctx context.Context, keyID string) err
 		WHERE id = $1
 	`
 
-	_, err := r.db.ExecContext(ctx, query, keyID, time.Now())
+	res, err := r.db.ExecContext(ctx, query, keyID, time.Now())
 	if err != nil {
 		return fmt.Errorf("failed to update api key last used: %w", err)
 	}
-	return nil
+	return requireRow(res, "api key by id")
 }
 
-// RevokeAPIKey deletes/revokes an API key
+// RevokeAPIKey deletes/revokes an API key.
+//
+// Returns an error wrapping ErrNotFound when no key has that ID. Revocation is
+// the operation this whole batch exists for: with a wrong, stale or (once
+// tenancy predicates land) cross-tenant id, the previous nil return let a
+// consuming app tell an operator "API key revoked" and write that to its audit
+// log while the credential stayed live.
 func (r *APIKeyRepository) RevokeAPIKey(ctx context.Context, keyID string) error {
 	query := `DELETE FROM api_keys WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, keyID)
+	res, err := r.db.ExecContext(ctx, query, keyID)
 	if err != nil {
 		return fmt.Errorf("failed to revoke api key: %w", err)
 	}
-	return nil
+	return requireRow(res, "api key by id")
 }
 
-// DeleteExpiredKeys deletes all expired API keys (for cleanup/cron job)
-func (r *APIKeyRepository) DeleteExpiredKeys(ctx context.Context) error {
+// DeleteExpiredKeys deletes all expired API keys (for cleanup/cron job) and
+// returns how many it deleted.
+//
+// This is a bulk sweep, so zero rows is a normal outcome ("nothing had expired")
+// and NOT an error — but a caller still has to be able to tell a sweep that
+// cleaned up from one that found nothing, which is what the count is for.
+// Mirrors DeleteAuditLogsBefore.
+func (r *APIKeyRepository) DeleteExpiredKeys(ctx context.Context) (int64, error) {
 	query := `
 		DELETE FROM api_keys
 		WHERE expires_at IS NOT NULL AND expires_at < $1
 	`
 
-	_, err := r.db.ExecContext(ctx, query, time.Now())
+	res, err := r.db.ExecContext(ctx, query, time.Now())
 	if err != nil {
-		return fmt.Errorf("failed to delete expired api keys: %w", err)
+		return 0, fmt.Errorf("failed to delete expired api keys: %w", err)
 	}
-	return nil
+	return affectedRows(res, "expired api keys")
 }
 
 // GetAPIKeysByPrefix retrieves the non-expired API keys matching a prefix
@@ -385,11 +408,11 @@ func (r *APIKeyRepository) ClaimExpiryNotification(ctx context.Context, keyID st
 // sending before either marks. Retained for backward compatibility.
 func (r *APIKeyRepository) MarkExpiryNotificationSent(ctx context.Context, keyID string) error {
 	query := `UPDATE api_keys SET expiry_notification_sent_at = $1 WHERE id = $2`
-	_, err := r.db.ExecContext(ctx, query, time.Now(), keyID)
+	res, err := r.db.ExecContext(ctx, query, time.Now(), keyID)
 	if err != nil {
 		return fmt.Errorf("failed to mark api key expiry notification sent: %w", err)
 	}
-	return nil
+	return requireRow(res, "api key by id")
 }
 
 // Create is an alias for CreateAPIKey to match admin handlers
@@ -402,7 +425,9 @@ func (r *APIKeyRepository) GetByID(ctx context.Context, keyID string) (*models.A
 	return r.GetAPIKeyByID(ctx, keyID)
 }
 
-// Update updates an API key's information
+// Update updates an API key's information.
+//
+// Returns an error wrapping ErrNotFound when no key has apiKey.ID.
 func (r *APIKeyRepository) Update(ctx context.Context, apiKey *models.APIKey) error {
 	// Marshal scopes to JSONB
 	scopesJSON, err := json.Marshal(apiKey.Scopes)
@@ -416,7 +441,7 @@ func (r *APIKeyRepository) Update(ctx context.Context, apiKey *models.APIKey) er
 		WHERE id = $1
 	`
 
-	_, err = r.db.ExecContext(ctx, query,
+	res, err := r.db.ExecContext(ctx, query,
 		apiKey.ID,
 		apiKey.Name,
 		apiKey.Description,
@@ -427,7 +452,7 @@ func (r *APIKeyRepository) Update(ctx context.Context, apiKey *models.APIKey) er
 		return fmt.Errorf("failed to update api key: %w", err)
 	}
 
-	return nil
+	return requireRow(res, "api key by id")
 }
 
 // Delete is an alias for RevokeAPIKey to match admin handlers

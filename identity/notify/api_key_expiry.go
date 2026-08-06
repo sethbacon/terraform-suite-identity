@@ -13,6 +13,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/sethbacon/terraform-suite-identity/identity/internal/safeloop"
 	"github.com/sethbacon/terraform-suite-identity/identity/mailer"
 	identitymodels "github.com/sethbacon/terraform-suite-identity/identity/models"
+	"github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
 // defaultDBTimeout bounds each individual database round-trip made from inside
@@ -276,19 +278,28 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 			defer cancel()
 			return n.userRepo.GetUserByID(lookupCtx, *key.UserID)
 		}()
+		// GetUserByID reports "no such row" as store.ErrNotFound. api_keys.user_id
+		// is ON DELETE SET NULL, so deleting a user whose key is inside the
+		// warning window between the scan above and this lookup lands here — a
+		// routine administrative action, logged as such and skipped, kept
+		// distinct from a database failure so an operator reading the log can
+		// tell an expected gap from a broken lookup.
+		if errors.Is(err, store.ErrNotFound) {
+			log.Printf("API key expiry notifier: user %s for key %s no longer exists; skipping",
+				*key.UserID, key.ID)
+			continue
+		}
 		if err != nil {
 			log.Printf("API key expiry notifier: could not retrieve user %s for key %s: %v",
 				*key.UserID, key.ID, err)
 			continue
 		}
-		// GetUserByID reports "no such row" as (nil, nil), not as an error.
-		// api_keys.user_id is ON DELETE SET NULL, so deleting a user whose key
-		// is inside the warning window between the scan above and this lookup
-		// lands here — a routine administrative action, which must skip the
-		// key rather than dereference nil and take the host down with it.
 		if user == nil {
-			log.Printf("API key expiry notifier: user %s for key %s no longer exists; skipping",
-				*key.UserID, key.ID)
+			// The repository is an interface; a host-supplied implementation that
+			// still uses the pre-v0.24.0 (nil, nil) convention would otherwise
+			// crash the host process on the dereference below.
+			log.Printf("API key expiry notifier: user repository returned no user and no error for %s; skipping",
+				*key.UserID)
 			continue
 		}
 		if user.Email == "" {

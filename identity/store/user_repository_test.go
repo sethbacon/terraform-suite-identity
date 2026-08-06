@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,8 +64,8 @@ func TestGetUserByID_NotFound(t *testing.T) {
 		WillReturnRows(emptyUserRow())
 
 	user, err := repo.GetUserByID(context.Background(), "missing")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if user != nil {
 		t.Errorf("expected nil user for not found, got %v", user)
@@ -109,8 +110,8 @@ func TestGetUserByEmail_NotFound(t *testing.T) {
 		WillReturnRows(emptyUserRow())
 
 	user, err := repo.GetUserByEmail(context.Background(), "nobody@example.com")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if user != nil {
 		t.Errorf("expected nil user, got %v", user)
@@ -143,8 +144,8 @@ func TestGetUserByOIDCSub_NotFound(t *testing.T) {
 		WillReturnRows(emptyUserRow())
 
 	user, err := repo.GetUserByOIDCSub(context.Background(), "sub-missing")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if user != nil {
 		t.Error("expected nil, got non-nil")
@@ -441,6 +442,36 @@ func TestGetOrCreateUserFromOIDC_NewUser(t *testing.T) {
 	}
 }
 
+// TestGetOrCreateUserFromOIDC_InsertRowsAffectedUnreadable pins that the INSERT's
+// RowsAffected error is NOT discarded. Reading it as zero would send a
+// successful creation down the lost-the-race re-read path, where it would
+// either return another request's row or fail with a misleading "conflicting
+// row not found on re-read".
+func TestGetOrCreateUserFromOIDC_InsertRowsAffectedUnreadable(t *testing.T) {
+	repo, mock := newUserRepo(t)
+
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
+		WithArgs("sub-new").
+		WillReturnRows(emptyUserRow())
+	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
+		WithArgs("new@example.com").
+		WillReturnRows(emptyUserRow())
+	// A driver that cannot report how many rows the INSERT affected.
+	mock.ExpectExec("INSERT INTO users").
+		WillReturnResult(sqlmock.NewErrorResult(errDB))
+
+	user, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-new", "new@example.com", "New User", true)
+	if err == nil {
+		t.Fatal("an unreadable RowsAffected was reported as a successful login")
+	}
+	if !strings.Contains(err.Error(), "rows affected") {
+		t.Errorf("error = %q, want it to name the unreadable rows-affected result", err)
+	}
+	if user != nil {
+		t.Errorf("expected nil user alongside the error, got %v", user)
+	}
+}
+
 func TestGetOrCreateUserFromOIDC_NewUser_ConcurrentCreateLostViaZeroRowsAffected(t *testing.T) {
 	repo, mock := newUserRepo(t)
 
@@ -710,8 +741,8 @@ func TestGetUserWithOrgRoles_NotFound(t *testing.T) {
 		WillReturnRows(emptyUserRow())
 
 	result, err := repo.GetUserWithOrgRoles(context.Background(), "missing")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if result != nil {
 		t.Error("expected nil for not found user")

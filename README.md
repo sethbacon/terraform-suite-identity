@@ -65,6 +65,20 @@ scope *contents*, and each app seeds its own scopes onto `role_templates` at set
   Second, revocation is a hard delete (no soft flag), so a revoked key disappears rather
   than being marked. JWT revocation is different again: it is tracked in `revoked_tokens`
   but is entirely host-enforced — see the Auth section below.
+- **Not-found has ONE spelling: `store.ErrNotFound`.** Every read that can miss and
+  every by-identifier `UPDATE`/`DELETE` that can match zero rows returns an error
+  wrapping it; test with `errors.Is(err, store.ErrNotFound)`. Before v0.24.0 a read
+  returned `(nil, nil)` and a zero-row mutation returned `nil` — so "I did the work"
+  and "there was nothing to do" arrived over the same wire, which made a revoked-nothing
+  revocation report success and made the idiomatic `if err != nil { return err }` panic
+  on a miss. Three deliberate exceptions: **list/search** accessors return an empty
+  slice (an empty result set is an answer, not a miss); **bulk sweeps**
+  (`DeleteExpiredKeys`, `RemoveAllMembershipsForUser`, `DeactivateAllOIDCConfigs`,
+  `CleanupExpiredRevocations`, `DeleteAuditLogsBefore`) return an affected-row **count**,
+  since zero is a normal outcome for a sweep; and `CheckMembership` /
+  `GetUserScopesForOrg` **absorb** the sentinel because their `bool` / empty scope set
+  already says "nothing matched" in band — both still propagate a real failure, so a
+  database fault can never read as "not a member".
 - **Multi-org by default** — `UserWithOrgRoles` aggregates scopes across all memberships.
   **`GetAllowedScopes`/`GetUserCombinedScopes` (both marked `Deprecated:` in code) union
   those scopes into one flat, GLOBAL set

@@ -113,8 +113,12 @@ func TestCleanupExpiredRevocations_Success(t *testing.T) {
 	mock.ExpectExec("DELETE FROM revoked_tokens").
 		WillReturnResult(sqlmock.NewResult(0, 3))
 
-	if err := repo.CleanupExpiredRevocations(context.Background()); err != nil {
+	n, err := repo.CleanupExpiredRevocations(context.Background())
+	if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("cleaned %d revocations, want 3", n)
 	}
 }
 
@@ -124,7 +128,7 @@ func TestCleanupExpiredRevocations_DBError(t *testing.T) {
 	mock.ExpectExec("DELETE FROM revoked_tokens").
 		WillReturnError(errDB)
 
-	if err := repo.CleanupExpiredRevocations(context.Background()); err == nil {
+	if _, err := repo.CleanupExpiredRevocations(context.Background()); err == nil {
 		t.Error("expected error, got nil")
 	}
 }

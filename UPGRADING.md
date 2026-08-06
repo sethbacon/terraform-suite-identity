@@ -10,6 +10,160 @@ live database. That is the reason a release that ships DDL gets an entry here.
 
 ---
 
+## v0.24.0 — `store.ErrNotFound`: not-found is no longer silent
+
+**BREAKING. No migration.** Every consuming application needs a code review pass
+before upgrading — and, critically, **most of the affected call sites still
+compile**.
+
+### What changed
+
+Three related contracts:
+
+1. **Reads that miss now return an error wrapping `store.ErrNotFound`**, where they
+   previously returned `(nil, nil)`.
+2. **By-identifier `UPDATE`/`DELETE`s that match zero rows now return an error
+   wrapping `store.ErrNotFound`**, where they previously returned `nil` (success).
+3. **Bulk sweeps now return their affected-row count** — a signature change, so
+   these are the only ones the compiler catches for you.
+
+`models.OIDCConfig.GetScopes()` also gained an `error` return (it previously
+discarded a JSON-unmarshal failure and fell back to the default scopes exactly as
+if the column had been empty).
+
+### Why it is breaking in a way the compiler will not tell you
+
+`return nil, nil` becoming `return nil, ErrNotFound` changes no signature, and the
+mutators already returned `error`. **A consumer that does**
+
+```go
+x, err := repo.GetThing(ctx, id)
+if err != nil {
+    c.JSON(http.StatusInternalServerError, ...)   // was: only reached on a real failure
+    return
+}
+if x == nil {
+    c.JSON(http.StatusNotFound, ...)              // now: DEAD CODE
+    return
+}
+```
+
+**still builds, and turns every previously-correct 404 into a 500.** The same
+shape appears in existence probes (`GetUserByEmail` before creating a user,
+`GetByName` before creating an organization, `GetMember` before adding a member),
+where not-found is the HAPPY path — those become unconditional 500s.
+
+### The migration, in order
+
+**Step 1 — fix the compile errors.** These four signatures changed:
+
+| Before | After |
+| --- | --- |
+| `APIKeyRepository.DeleteExpiredKeys(ctx) error` | `(ctx) (int64, error)` |
+| `OrganizationRepository.RemoveAllMembershipsForUser(ctx, userID) error` | `(ctx, userID) (int64, error)` |
+| `OIDCConfigRepository.DeactivateAllOIDCConfigs(ctx) error` | `(ctx) (int64, error)` |
+| `TokenRepository.CleanupExpiredRevocations(ctx) error` | `(ctx) (int64, error)` |
+| `models.OIDCConfig.GetScopes() []string` | `() ([]string, error)` |
+
+`if err := repo.X(ctx); err != nil {` becomes `if _, err := repo.X(ctx); err != nil {`
+(or keep the count and log it).
+
+**Step 2 — grep for the dead nil branch.** Every site of the form
+`if err != nil { … }` followed by `if value == nil { … }` needs the two branches
+merged or reordered:
+
+```go
+x, err := repo.GetThing(ctx, id)
+if errors.Is(err, store.ErrNotFound) {
+    c.JSON(http.StatusNotFound, ...)
+    return
+}
+if err != nil {
+    c.JSON(http.StatusInternalServerError, ...)
+    return
+}
+```
+
+A site already written as `if err != nil || x == nil { … }` keeps working
+unchanged — the collapsed check absorbs the new error.
+
+**Step 3 — fix the existence probes.** Anywhere not-found is the SUCCESS case
+("is this email free?", "is this name taken?", "is this user already a member?"),
+invert the check:
+
+```go
+existing, err := repo.GetUserByEmail(ctx, email)
+switch {
+case err == nil:
+    // taken
+case errors.Is(err, store.ErrNotFound):
+    // free — proceed
+default:
+    return err
+}
+```
+
+**Step 4 — make the idempotent loops idempotent again.** SCIM/IdP reconciliation
+and deprovisioning loops that call `RemoveMember`, `UpdateMemberRole` or
+`RevokeAPIKey` over a set will now abort on the first already-applied element.
+Treat `store.ErrNotFound` as "already in the desired state" and continue:
+
+```go
+if err := orgRepo.RemoveMember(ctx, orgID, userID); err != nil &&
+    !errors.Is(err, store.ErrNotFound) {
+    return err
+}
+```
+
+**Step 5 — decide about repeat DELETEs.** A handler with no prior existence check
+that deletes by id (users, organizations, notification channels) now returns an
+error on the second call. Either pre-check, or map `store.ErrNotFound` to 404 (or
+to 204 if you want the endpoint to stay idempotent).
+
+### Accessors whose behaviour changed
+
+Reads (`(nil, nil)` → `ErrNotFound`): `UserRepository.GetUserByID`,
+`GetUserByEmail`, `GetUserByOIDCSub`, `GetUserWithOrgRoles`;
+`OrganizationRepository.GetByID`, `GetByName`, `GetDefaultOrganization`,
+`GetMember`, `GetMemberWithRole`; `APIKeyRepository.GetAPIKeyByHash`,
+`GetAPIKeyByID` (and its `GetByID` alias); `OIDCConfigRepository.GetActiveOIDCConfig`,
+`GetOIDCConfig`; `RoleTemplateRepository.GetRoleTemplate`, `GetRoleTemplateByName`
+(and its `GetByID` alias); `AuditRepository.GetAuditLog`;
+`notify.ChannelRepository.GetByID`, `Update`.
+
+Mutations (`nil` on zero rows → `ErrNotFound`): `UserRepository.UpdateUser`,
+`DeleteUser` (and the `Update`/`Delete` aliases); `APIKeyRepository.RevokeAPIKey`
+(and `Delete`), `Update`, `UpdateLastUsed`, `MarkExpiryNotificationSent`;
+`OrganizationRepository.RemoveMember`, `UpdateMemberRoleTemplate` (and
+`UpdateMemberRole`/`UpdateMember`), `Update`, `Rename`, `Delete`;
+`OIDCConfigRepository.DeleteOIDCConfig`, `UpdateOIDCConfigExtraConfig`,
+`ActivateOIDCConfig`; `notify.ChannelRepository.Delete`, `RecordDelivery`.
+`RoleTemplateRepository.UpdateRoleTemplate`/`DeleteRoleTemplate` already errored
+on zero rows; their errors now WRAP `ErrNotFound`, so one `errors.Is` covers the
+whole package.
+
+`ActivateOIDCConfig` additionally **rolls back** on a miss. Previously, activating
+a non-existent id committed the deactivate-all step on its own and returned `nil` —
+a deployment silently lost SSO while the admin API reported success.
+
+### What did NOT change
+
+- List and search accessors still return an empty slice and a `nil` error.
+- `CheckMembership` still returns `(false, nil, nil)` for a non-member, and
+  `GetUserScopesForOrg` still returns an empty scope set. Both absorb the sentinel
+  deliberately; both still surface a real database failure.
+- `RevokeToken` is still idempotent (zero rows means "already revoked").
+- No tenancy semantics changed. That is a separate release.
+
+### Why this shipped first
+
+A write that carries a tenant predicate and matches no row means "that row is not
+yours". Without a distinguishable zero-row result, adding such a predicate would
+**fail open**: the caller would be told the write succeeded precisely when the
+guard stopped it. This release is what makes that guard meaningful.
+
+---
+
 ## v0.23.0 — migration `000006_hot_path_indexes`
 
 **Non-breaking.** No exported signature changed. Applying the release requires no

@@ -131,7 +131,7 @@ func TestIntegrationCleanupExpiredRevocationsStillSweepsImmediately(t *testing.T
 	justExpired := insertRevocation(t, db, userID, -time.Minute)
 	unexpired := insertRevocation(t, db, userID, time.Hour)
 
-	if err := repo.CleanupExpiredRevocations(context.Background()); err != nil {
+	if _, err := repo.CleanupExpiredRevocations(context.Background()); err != nil {
 		t.Fatalf("CleanupExpiredRevocations failed: %v", err)
 	}
 	if revocationExists(t, db, justExpired) {

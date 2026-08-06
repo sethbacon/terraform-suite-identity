@@ -55,13 +55,24 @@ func TestParseRoleTemplateID(t *testing.T) {
 
 func TestOIDCConfig_GetScopes(t *testing.T) {
 	cases := []struct {
-		name   string
-		scopes string
-		want   []string
+		name    string
+		scopes  string
+		want    []string
+		wantErr bool
 	}{
-		{"empty defaults", "", []string{"openid", "email", "profile"}},
-		{"json array", `["openid","email","groups"]`, []string{"openid", "email", "groups"}},
-		{"single", `["openid"]`, []string{"openid"}},
+		{name: "empty defaults", scopes: "", want: []string{"openid", "email", "profile"}},
+		{name: "json array", scopes: `["openid","email","groups"]`, want: []string{"openid", "email", "groups"}},
+		{name: "single", scopes: `["openid"]`, want: []string{"openid"}},
+		{name: "empty array defaults", scopes: `[]`, want: []string{"openid", "email", "profile"}},
+		// The reason GetScopes grew an error return: before v0.24.0 each of the
+		// three below fell back to the defaults indistinguishably from the
+		// legitimately-empty case above.
+		{name: "corrupt json reports and still yields usable defaults", scopes: `{"not":"an array"}`,
+			want: []string{"openid", "email", "profile"}, wantErr: true},
+		{name: "truncated json", scopes: `["openid"`,
+			want: []string{"openid", "email", "profile"}, wantErr: true},
+		{name: "array of the wrong element type", scopes: `[1,2,3]`,
+			want: []string{"openid", "email", "profile"}, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,7 +80,15 @@ func TestOIDCConfig_GetScopes(t *testing.T) {
 			if tc.scopes != "" {
 				c.Scopes = json.RawMessage(tc.scopes)
 			}
-			got := c.GetScopes()
+			got, err := c.GetScopes()
+			if tc.wantErr && err == nil {
+				t.Fatalf("GetScopes(%s) returned no error; a corrupt scopes column must be distinguishable from an empty one", tc.scopes)
+			}
+			// Assert BOTH directions: a table that only checks for errors would
+			// still pass if GetScopes started erroring on every input.
+			if !tc.wantErr && err != nil {
+				t.Fatalf("GetScopes(%s) = unexpected error %v", tc.scopes, err)
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}

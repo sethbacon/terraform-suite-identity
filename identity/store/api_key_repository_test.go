@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,11 +121,16 @@ func TestGetAPIKeyByHash_NotFound(t *testing.T) {
 		WillReturnRows(emptyAPIKeyRow())
 
 	key, err := repo.GetAPIKeyByHash(context.Background(), "missing")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if key != nil {
 		t.Error("expected nil, got non-nil")
+	}
+	// The whole point of the sentinel: the error must not leak the lookup key,
+	// which for this accessor is credential material.
+	if strings.Contains(err.Error(), "missing") {
+		t.Errorf("error %q embeds the key hash it was looking up", err)
 	}
 }
 
@@ -152,8 +159,8 @@ func TestGetAPIKeyByID_NotFound(t *testing.T) {
 		WillReturnRows(emptyAPIKeyRow())
 
 	key, err := repo.GetAPIKeyByID(context.Background(), "missing")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if key != nil {
 		t.Error("expected nil, got non-nil")
@@ -246,10 +253,30 @@ func TestRevokeAPIKey_Success(t *testing.T) {
 func TestDeleteExpiredKeys_Success(t *testing.T) {
 	repo, mock := newAPIKeyRepo(t)
 	mock.ExpectExec("DELETE FROM api_keys.*WHERE.*expires_at").
+		WillReturnResult(sqlmock.NewResult(0, 4))
+
+	n, err := repo.DeleteExpiredKeys(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 4 {
+		t.Fatalf("deleted %d keys, want 4", n)
+	}
+}
+
+// TestDeleteExpiredKeys_NoRowsIsNotAnError pins the bulk half of the not-found
+// contract: a sweep that finds nothing reports 0, not ErrNotFound.
+func TestDeleteExpiredKeys_NoRowsIsNotAnError(t *testing.T) {
+	repo, mock := newAPIKeyRepo(t)
+	mock.ExpectExec("DELETE FROM api_keys.*WHERE.*expires_at").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	if err := repo.DeleteExpiredKeys(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	n, err := repo.DeleteExpiredKeys(context.Background())
+	if err != nil {
+		t.Fatalf("a bulk sweep that matched nothing must not be an error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("deleted %d keys, want 0", n)
 	}
 }
 

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -205,8 +206,8 @@ func TestGetAuditLog_NotFound(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(auditGetCols))
 
 	log, err := repo.GetAuditLog(context.Background(), "missing", AuditScopeAllOrganizations())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if log != nil {
 		t.Errorf("expected nil, got %v", log)

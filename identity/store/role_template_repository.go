@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -86,14 +87,16 @@ func (r *RoleTemplateRepository) ListRoleTemplates(ctx context.Context) ([]*mode
 }
 
 // GetRoleTemplate retrieves a role template by ID.
+//
+// Returns an error wrapping ErrNotFound when no template has that ID.
 func (r *RoleTemplateRepository) GetRoleTemplate(ctx context.Context, id uuid.UUID) (*models.RoleTemplate, error) {
 	query := `SELECT id, name, display_name, description, scopes, is_system, created_at, updated_at
 			  FROM role_templates WHERE id = $1`
 
 	var row roleTemplateRow
 	err := r.db.QueryRowxContext(ctx, query, id).StructScan(&row)
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("role template by id")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get role template: %w", err)
@@ -103,14 +106,16 @@ func (r *RoleTemplateRepository) GetRoleTemplate(ctx context.Context, id uuid.UU
 }
 
 // GetRoleTemplateByName retrieves a role template by name.
+//
+// Returns an error wrapping ErrNotFound when no template has that name.
 func (r *RoleTemplateRepository) GetRoleTemplateByName(ctx context.Context, name string) (*models.RoleTemplate, error) {
 	query := `SELECT id, name, display_name, description, scopes, is_system, created_at, updated_at
 			  FROM role_templates WHERE name = $1`
 
 	var row roleTemplateRow
 	err := r.db.QueryRowxContext(ctx, query, name).StructScan(&row)
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("role template by name")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get role template by name: %w", err)
@@ -138,6 +143,13 @@ func (r *RoleTemplateRepository) CreateRoleTemplate(ctx context.Context, templat
 }
 
 // UpdateRoleTemplate updates an existing role template (non-system only).
+//
+// This method already refused to report a zero-row update as success before
+// v0.24.0; what changed is that its error now WRAPS ErrNotFound, so one
+// errors.Is check covers every accessor in the package instead of this one
+// needing a string match. The WHERE also filters is_system, so the sentinel here
+// means "no such template, or it is a system template" — both are "matched no
+// row", and the message says which possibilities apply.
 func (r *RoleTemplateRepository) UpdateRoleTemplate(ctx context.Context, template *models.RoleTemplate) error {
 	scopesJSON, err := json.Marshal(template.Scopes)
 	if err != nil {
@@ -160,12 +172,15 @@ func (r *RoleTemplateRepository) UpdateRoleTemplate(ctx context.Context, templat
 		// The WHERE also matches on is_system = false, so zero rows means the
 		// template does not exist or is a system template. Surface it instead of
 		// reporting a silent success.
-		return fmt.Errorf("role template %s not found or is a system template (immutable)", template.ID)
+		return fmt.Errorf("role template %s not found or is a system template (immutable): %w", template.ID, ErrNotFound)
 	}
 	return nil
 }
 
 // DeleteRoleTemplate deletes a role template (non-system only).
+//
+// As with UpdateRoleTemplate, the zero-row error now wraps ErrNotFound and
+// covers both "no such template" and "that template is a system template".
 func (r *RoleTemplateRepository) DeleteRoleTemplate(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM role_templates WHERE id = $1 AND is_system = false`
 	result, err := r.db.ExecContext(ctx, query, id)
@@ -177,7 +192,7 @@ func (r *RoleTemplateRepository) DeleteRoleTemplate(ctx context.Context, id uuid
 		return fmt.Errorf("failed to get rows affected deleting role template: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("role template %s not found or is a system template (immutable)", id)
+		return fmt.Errorf("role template %s not found or is a system template (immutable): %w", id, ErrNotFound)
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -82,14 +83,30 @@ func (c *OIDCConfig) SetGroupMappingConfig(claimName string, mappings []OIDCGrou
 }
 
 // GetScopes parses and returns the scopes as a string slice, defaulting to the
-// standard OIDC scopes when empty.
-func (c *OIDCConfig) GetScopes() []string {
+// standard OIDC scopes when the column is empty or holds an empty list.
+//
+// It returns an error when the scopes column does not decode as a JSON string
+// array. Until v0.24.0 that error was discarded behind a `// nolint:errcheck`,
+// so a corrupted or hand-edited scopes value fell back to the defaults exactly
+// as if the column had been empty — the same "nothing matched is
+// indistinguishable from success" shape the store's accessors carried, and one
+// that silently narrows the scopes an OIDC login requests.
+//
+// The defaults are returned ALONGSIDE the error so a caller that decides a
+// broken column should not take SSO down can still proceed with a usable value;
+// what it can no longer do is proceed without knowing. models is a pure data
+// package with no logger of its own, so an error return — not a log line — is
+// the only way it can report this.
+func (c *OIDCConfig) GetScopes() ([]string, error) {
+	defaults := []string{"openid", "email", "profile"}
 	var scopes []string
 	if len(c.Scopes) > 0 {
-		_ = json.Unmarshal(c.Scopes, &scopes) // nolint:errcheck
+		if err := json.Unmarshal(c.Scopes, &scopes); err != nil {
+			return defaults, fmt.Errorf("failed to parse oidc config scopes: %w", err)
+		}
 	}
 	if len(scopes) == 0 {
-		return []string{"openid", "email", "profile"}
+		return defaults, nil
 	}
-	return scopes
+	return scopes, nil
 }

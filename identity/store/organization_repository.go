@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -70,6 +71,9 @@ func NewOrganizationRepository(db *sql.DB) *OrganizationRepository {
 // GetDefaultOrganization retrieves the default organization for single-tenant mode.
 // Results are cached in memory with a 60-second TTL since the default org rarely changes.
 //
+// Returns an error wrapping ErrNotFound when no organization is named
+// "default"; that result is never cached.
+//
 // The cache is per-instance: InvalidateDefaultOrgCache (called by Rename/Update/Delete)
 // only clears the cache on the OrganizationRepository that performed the write. In a
 // horizontally scaled deployment, another replica's cache is unaffected and continues
@@ -105,20 +109,22 @@ func (r *OrganizationRepository) GetDefaultOrganization(ctx context.Context) (*m
 	gen := r.defaultOrgGen
 	r.defaultOrgMu.RUnlock()
 
+	// ErrNotFound propagates: a deployment with no "default" organization is a
+	// misconfiguration the caller must see, not an empty value it should try to
+	// use. Nothing is cached on that path either — caching a miss would pin the
+	// misconfiguration for a further TTL after it was fixed.
 	org, err := r.GetByName(ctx, "default")
 	if err != nil {
 		return nil, err
 	}
-	if org != nil {
-		r.defaultOrgMu.Lock()
-		if r.defaultOrgGen == gen {
-			// Cache a private copy; org itself is freshly scanned per call and
-			// belongs to the caller.
-			r.defaultOrgCache = cloneOrganization(org)
-			r.defaultOrgAt = time.Now()
-		}
-		r.defaultOrgMu.Unlock()
+	r.defaultOrgMu.Lock()
+	if r.defaultOrgGen == gen {
+		// Cache a private copy; org itself is freshly scanned per call and
+		// belongs to the caller.
+		r.defaultOrgCache = cloneOrganization(org)
+		r.defaultOrgAt = time.Now()
 	}
+	r.defaultOrgMu.Unlock()
 	return org, nil
 }
 
@@ -136,7 +142,9 @@ func (r *OrganizationRepository) InvalidateDefaultOrgCache() {
 	r.defaultOrgMu.Unlock()
 }
 
-// GetByName retrieves an organization by its name
+// GetByName retrieves an organization by its name.
+//
+// Returns an error wrapping ErrNotFound when no organization has that name.
 func (r *OrganizationRepository) GetByName(ctx context.Context, name string) (*models.Organization, error) {
 	query := `
 		SELECT id, name, display_name, idp_type, idp_name, created_at, updated_at
@@ -156,8 +164,8 @@ func (r *OrganizationRepository) GetByName(ctx context.Context, name string) (*m
 	)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil // Not found
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, notFound("organization by name")
 		}
 		return nil, fmt.Errorf("failed to get organization: %w", err)
 	}
@@ -165,7 +173,9 @@ func (r *OrganizationRepository) GetByName(ctx context.Context, name string) (*m
 	return org, nil
 }
 
-// GetByID retrieves an organization by ID
+// GetByID retrieves an organization by ID.
+//
+// Returns an error wrapping ErrNotFound when no organization has that ID.
 func (r *OrganizationRepository) GetByID(ctx context.Context, id string) (*models.Organization, error) {
 	query := `
 		SELECT id, name, display_name, idp_type, idp_name, created_at, updated_at
@@ -185,8 +195,8 @@ func (r *OrganizationRepository) GetByID(ctx context.Context, id string) (*model
 	)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil // Not found
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, notFound("organization by id")
 		}
 		return nil, fmt.Errorf("failed to get organization: %w", err)
 	}
@@ -260,18 +270,25 @@ func (r *OrganizationRepository) AddMemberWithParams(ctx context.Context, orgID,
 	return r.AddMemberWithRoleTemplate(ctx, orgID, userID, id)
 }
 
-// RemoveMember removes a user from an organization
+// RemoveMember removes a user from an organization.
+//
+// Returns an error wrapping ErrNotFound when that user is not a member of that
+// organization, so "member removed" cannot be reported for a no-op.
 func (r *OrganizationRepository) RemoveMember(ctx context.Context, orgID, userID string) error {
 	query := `DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2`
-	_, err := r.db.ExecContext(ctx, query, orgID, userID)
+	res, err := r.db.ExecContext(ctx, query, orgID, userID)
 	if err != nil {
 		return fmt.Errorf("failed to remove member: %w", err)
 	}
 
-	return nil
+	return requireRow(res, "organization member")
 }
 
-// UpdateMemberRoleTemplate changes a user's role template in an organization
+// UpdateMemberRoleTemplate changes a user's role template in an organization.
+//
+// Returns an error wrapping ErrNotFound when that user is not a member of that
+// organization. A privilege change reported as applied when it matched no row
+// is the same defect as a revocation that revokes nothing.
 func (r *OrganizationRepository) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string) error {
 	query := `
 		UPDATE organization_members
@@ -279,12 +296,12 @@ func (r *OrganizationRepository) UpdateMemberRoleTemplate(ctx context.Context, o
 		WHERE organization_id = $1 AND user_id = $2
 	`
 
-	_, err := r.db.ExecContext(ctx, query, orgID, userID, roleTemplateID)
+	res, err := r.db.ExecContext(ctx, query, orgID, userID, roleTemplateID)
 	if err != nil {
 		return fmt.Errorf("failed to update member role template: %w", err)
 	}
 
-	return nil
+	return requireRow(res, "organization member")
 }
 
 // UpdateMemberRole changes a user's role template in an organization (by template name)
@@ -297,7 +314,11 @@ func (r *OrganizationRepository) UpdateMemberRole(ctx context.Context, orgID, us
 	return r.UpdateMemberRoleTemplate(ctx, orgID, userID, id)
 }
 
-// GetMember retrieves a user's membership in an organization
+// GetMember retrieves a user's membership in an organization.
+//
+// Returns an error wrapping ErrNotFound when that user is not a member. A
+// caller that only wants a yes/no answer should use CheckMembership, which
+// absorbs the sentinel into its boolean.
 func (r *OrganizationRepository) GetMember(ctx context.Context, orgID, userID string) (*models.OrganizationMember, error) {
 	query := `
 		SELECT organization_id, user_id, role_template_id, created_at
@@ -313,8 +334,8 @@ func (r *OrganizationRepository) GetMember(ctx context.Context, orgID, userID st
 		&member.CreatedAt,
 	)
 
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("organization member")
 	}
 
 	if err != nil {
@@ -394,28 +415,38 @@ func (r *OrganizationRepository) GetUserOrganizations(ctx context.Context, userI
 	return organizations, rows.Err()
 }
 
-// CheckMembership checks if a user is a member of an organization and returns their role template ID
+// CheckMembership checks if a user is a member of an organization and returns
+// their role template ID.
+//
+// This is one of the two accessors that deliberately ABSORB ErrNotFound: its
+// boolean already carries "not a member" in band, so surfacing the sentinel as
+// well would give a caller two ways to spell the same answer and invite it to
+// handle only one. Every other error still propagates — a lookup that FAILED
+// must not be reported as "not a member", which would be a fail-open for any
+// caller reading only the boolean.
 func (r *OrganizationRepository) CheckMembership(ctx context.Context, orgID, userID string) (bool, *string, error) {
 	member, err := r.GetMember(ctx, orgID, userID)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil, nil
+	}
 	if err != nil {
 		return false, nil, err
-	}
-
-	if member == nil {
-		return false, nil, nil
 	}
 
 	return true, member.RoleTemplateID, nil
 }
 
-// GetMemberWithRole retrieves a user's membership in an organization with role template info
+// GetMemberWithRole retrieves a user's membership in an organization with role
+// template info.
+//
+// Returns an error wrapping ErrNotFound when that user is not a member.
 func (r *OrganizationRepository) GetMemberWithRole(ctx context.Context, orgID, userID string) (*models.OrganizationMemberWithUser, error) {
 	// See membership.go for the shared query constant and scan helper. The helper
 	// returns the Scan error unwrapped so the sql.ErrNoRows check below still works.
 	member, scopesJSON, err := scanOrgMemberWithUser(r.db.QueryRowContext(ctx, orgMemberByOrgAndUserQuery, orgID, userID))
 
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("organization member")
 	}
 
 	if err != nil {
@@ -435,7 +466,12 @@ func (r *OrganizationRepository) Create(ctx context.Context, org *models.Organiz
 	return r.CreateOrganization(ctx, org)
 }
 
-// Update updates an organization
+// Update updates an organization.
+//
+// Returns an error wrapping ErrNotFound when no organization has org.ID. The
+// default-org cache is invalidated either way: the invalidation is cheap and
+// skipping it on the error path would leave a stale entry behind on exactly the
+// call whose outcome is least certain.
 func (r *OrganizationRepository) Update(ctx context.Context, org *models.Organization) error {
 	query := `
 		UPDATE organizations
@@ -443,41 +479,47 @@ func (r *OrganizationRepository) Update(ctx context.Context, org *models.Organiz
 		WHERE id = $1
 	`
 
-	_, err := r.db.ExecContext(ctx, query, org.ID, org.DisplayName, org.IdpType, org.IdpName)
+	res, err := r.db.ExecContext(ctx, query, org.ID, org.DisplayName, org.IdpType, org.IdpName)
 	if err != nil {
 		return fmt.Errorf("failed to update organization: %w", err)
 	}
 
 	r.InvalidateDefaultOrgCache()
-	return nil
+	return requireRow(res, "organization by id")
 }
 
 // Rename renames an organization (the identity row only) and invalidates the
-// default-org cache. Apps that store the organization name denormalized in their
+// default-org cache. Returns an error wrapping ErrNotFound when no organization
+// has that ID — a consuming app that cascades the new name into its own
+// denormalized tables must not do so on the strength of a rename that renamed
+// nothing. Apps that store the organization name denormalized in their
 // own domain tables (e.g. the registry's module/provider namespaces) are
 // responsible for cascading the new name on their side.
 func (r *OrganizationRepository) Rename(ctx context.Context, orgID, newName string) error {
-	if _, err := r.db.ExecContext(ctx,
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE organizations SET name = $1, updated_at = NOW() WHERE id = $2`,
 		newName, orgID,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("rename organization: %w", err)
 	}
 
 	r.InvalidateDefaultOrgCache()
-	return nil
+	return requireRow(res, "organization by id")
 }
 
-// Delete deletes an organization
+// Delete deletes an organization.
+//
+// Returns an error wrapping ErrNotFound when no organization has that ID.
 func (r *OrganizationRepository) Delete(ctx context.Context, orgID string) error {
 	query := `DELETE FROM organizations WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, orgID)
+	res, err := r.db.ExecContext(ctx, query, orgID)
 	if err != nil {
 		return fmt.Errorf("failed to delete organization: %w", err)
 	}
 
 	r.InvalidateDefaultOrgCache()
-	return nil
+	return requireRow(res, "organization by id")
 }
 
 // List retrieves a paginated list of organizations
@@ -699,8 +741,13 @@ func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, user
 // organization; this returns that membership's deduplicated RoleTemplateScopes.
 //
 // If the user has no membership in orgID, this returns an empty (non-nil) slice and a nil
-// error — mirroring GetMember/GetMemberWithRole's "no rows -> empty result, not error"
-// convention in this file, rather than returning sql.ErrNoRows.
+// error. This is the second of the two accessors that deliberately ABSORB
+// ErrNotFound: an empty scope set already denies everything, so "not a member"
+// and "a member with no scopes" reach the same authorization decision and do not
+// need to be distinguished by the caller. A lookup that FAILED still returns its
+// error rather than an empty set, so a database fault cannot be mistaken for a
+// principal with no permissions and then papered over by a caller that ignores
+// errors.
 //
 // Use this (or models.UserWithOrgRoles.GetScopesForOrg) whenever an authorization decision is
 // scoped to a specific organization — pair the result with
@@ -710,11 +757,11 @@ func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, user
 // why that global accessor must not be used for this purpose.
 func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID, orgID string) ([]string, error) {
 	member, err := r.GetMemberWithRole(ctx, orgID, userID)
+	if errors.Is(err, ErrNotFound) {
+		return []string{}, nil
+	}
 	if err != nil {
 		return nil, err
-	}
-	if member == nil {
-		return []string{}, nil
 	}
 
 	// Deduplicate defensively, mirroring GetUserCombinedScopes, in case the role template's
@@ -732,13 +779,19 @@ func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID
 	return scopes, nil
 }
 
-// RemoveAllMembershipsForUser removes a user from all organizations.
+// RemoveAllMembershipsForUser removes a user from all organizations and returns
+// how many memberships it removed.
 // Used by SCIM deprovisioning to soft-delete/deactivate a user.
-func (r *OrganizationRepository) RemoveAllMembershipsForUser(ctx context.Context, userID string) error {
+//
+// Bulk, so zero is not an error: deprovisioning a user who belonged to no
+// organization is a legitimate no-op. The count is what lets a caller log or
+// audit what the deprovisioning actually did instead of asserting it did
+// something.
+func (r *OrganizationRepository) RemoveAllMembershipsForUser(ctx context.Context, userID string) (int64, error) {
 	query := `DELETE FROM organization_members WHERE user_id = $1`
-	_, err := r.db.ExecContext(ctx, query, userID)
+	res, err := r.db.ExecContext(ctx, query, userID)
 	if err != nil {
-		return fmt.Errorf("failed to remove all memberships for user %s: %w", userID, err)
+		return 0, fmt.Errorf("failed to remove all memberships for user %s: %w", userID, err)
 	}
-	return nil
+	return affectedRows(res, "organization memberships for user")
 }

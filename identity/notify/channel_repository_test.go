@@ -8,6 +8,8 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
 var errDB = errors.New("db error")
@@ -127,8 +129,8 @@ func TestChannelRepo_GetByID_NotFound(t *testing.T) {
 	repo, mock := newChannelRepo(t)
 	mock.ExpectQuery("FROM notification_channels WHERE id").WillReturnError(sql.ErrNoRows)
 	ch, err := repo.GetByID(context.Background(), testChannelID1)
-	if err != nil || ch != nil {
-		t.Errorf("GetByID(no rows) = (%v, %v), want (nil, nil)", ch, err)
+	if !errors.Is(err, store.ErrNotFound) || ch != nil {
+		t.Errorf("GetByID(no rows) = (%v, %v), want (nil, store.ErrNotFound)", ch, err)
 	}
 }
 
@@ -182,8 +184,8 @@ func TestChannelRepo_Update_NotFound(t *testing.T) {
 	repo, mock := newChannelRepo(t)
 	mock.ExpectQuery("UPDATE notification_channels").WillReturnError(sql.ErrNoRows)
 	ch, err := repo.Update(context.Background(), testChannelID1, "n", "webhook", nil, true, "E")
-	if err != nil || ch != nil {
-		t.Errorf("Update(no rows) = (%v, %v), want (nil, nil)", ch, err)
+	if !errors.Is(err, store.ErrNotFound) || ch != nil {
+		t.Errorf("Update(no rows) = (%v, %v), want (nil, store.ErrNotFound)", ch, err)
 	}
 }
 

@@ -85,8 +85,8 @@ func TestGetRoleTemplate_NotFound(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(roleTemplateCols))
 
 	tpl, err := repo.GetRoleTemplate(context.Background(), uuid.New())
-	if err != nil || tpl != nil {
-		t.Fatalf("got (%v, %v), want (nil, nil)", tpl, err)
+	if !errors.Is(err, ErrNotFound) || tpl != nil {
+		t.Fatalf("got (%v, %v), want (nil, ErrNotFound)", tpl, err)
 	}
 }
 
@@ -117,8 +117,8 @@ func TestGetRoleTemplateByName_NotFound(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(roleTemplateCols))
 
 	tpl, err := repo.GetRoleTemplateByName(context.Background(), "unknown")
-	if err != nil || tpl != nil {
-		t.Fatalf("got (%v, %v), want (nil, nil)", tpl, err)
+	if !errors.Is(err, ErrNotFound) || tpl != nil {
+		t.Fatalf("got (%v, %v), want (nil, ErrNotFound)", tpl, err)
 	}
 }
 

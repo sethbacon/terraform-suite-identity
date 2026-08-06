@@ -166,6 +166,16 @@ preserve them:
   coupling contract cannot drift between the two apps.
 - **Error wrapping.** Use `fmt.Errorf("context: %w", err)` to preserve the chain;
   do not swallow errors.
+- **One not-found sentinel.** A read that can miss returns an error wrapping
+  `store.ErrNotFound`; a by-identifier `UPDATE`/`DELETE` routes its `sql.Result`
+  through `store.requireRow`; a bulk sweep reports its count via
+  `store.affectedRows`. Never `return nil, nil` from an accessor, and never add a
+  second not-found sentinel — a package with two has none. `sql.ErrNoRows` must
+  not escape the repository boundary. Two tests in
+  `identity/store/notfound_class_test.go` enforce this structurally
+  (`TestNotFoundClass_NoAccessorReturnsNilNil` and
+  `TestNotFoundClass_ExecResultDiscardersAreEnumerated`), because the mistake
+  changes no signature and would otherwise compile and pass silently.
 
 ---
 

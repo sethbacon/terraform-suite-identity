@@ -10,6 +10,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -101,6 +102,12 @@ const oidcConfigColumns = `id, name, provider_type, issuer_url, client_id, ` +
 
 // GetActiveOIDCConfig retrieves the currently active OIDC configuration.
 //
+// Returns an error wrapping ErrNotFound when no configuration is active — the
+// state of a deployment that has not finished SSO setup, or one whose only
+// config was just deactivated. A caller that treats "no SSO configured" as a
+// normal state should test for ErrNotFound explicitly rather than inferring it
+// from a nil value.
+//
 // The query orders by updated_at DESC as a defensive, deterministic tie-break:
 // the schema now enforces at most one is_active=true row via a partial unique
 // index (see migration 000005), but the ORDER BY keeps behavior deterministic
@@ -109,8 +116,8 @@ func (r *OIDCConfigRepository) GetActiveOIDCConfig(ctx context.Context) (*models
 	var config models.OIDCConfig
 	query := `SELECT ` + oidcConfigColumns + ` FROM oidc_config WHERE is_active = true ORDER BY updated_at DESC LIMIT 1`
 	err := r.db.GetContext(ctx, &config, query)
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("active oidc config")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get active oidc config: %w", err)
@@ -119,12 +126,14 @@ func (r *OIDCConfigRepository) GetActiveOIDCConfig(ctx context.Context) (*models
 }
 
 // GetOIDCConfig retrieves an OIDC configuration by ID.
+//
+// Returns an error wrapping ErrNotFound when no configuration has that ID.
 func (r *OIDCConfigRepository) GetOIDCConfig(ctx context.Context, id uuid.UUID) (*models.OIDCConfig, error) {
 	var config models.OIDCConfig
 	query := `SELECT ` + oidcConfigColumns + ` FROM oidc_config WHERE id = $1`
 	err := r.db.GetContext(ctx, &config, query, id)
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("oidc config by id")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get oidc config %s: %w", id, err)
@@ -144,33 +153,44 @@ func (r *OIDCConfigRepository) ListOIDCConfigs(ctx context.Context) ([]*models.O
 }
 
 // DeleteOIDCConfig deletes an OIDC configuration.
+//
+// Returns an error wrapping ErrNotFound when no configuration has that ID.
 func (r *OIDCConfigRepository) DeleteOIDCConfig(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM oidc_config WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
+	res, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete oidc config %s: %w", id, err)
 	}
-	return nil
+	return requireRow(res, "oidc config by id")
 }
 
 // UpdateOIDCConfigExtraConfig updates only the extra_config column (used for group mapping settings).
+//
+// Returns an error wrapping ErrNotFound when no configuration has that ID, so a
+// group-to-role mapping saved against a deleted config is not reported as
+// stored.
 func (r *OIDCConfigRepository) UpdateOIDCConfigExtraConfig(ctx context.Context, id uuid.UUID, extraConfig []byte) error {
 	query := `UPDATE oidc_config SET extra_config = $1, updated_at = $2 WHERE id = $3`
-	_, err := r.db.ExecContext(ctx, query, extraConfig, time.Now(), id)
+	res, err := r.db.ExecContext(ctx, query, extraConfig, time.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update oidc config %s extra_config: %w", id, err)
 	}
-	return nil
+	return requireRow(res, "oidc config by id")
 }
 
-// DeactivateAllOIDCConfigs sets is_active=false for all configurations.
-func (r *OIDCConfigRepository) DeactivateAllOIDCConfigs(ctx context.Context) error {
+// DeactivateAllOIDCConfigs sets is_active=false for all configurations and
+// returns how many rows it touched.
+//
+// Bulk, so zero is not an error: there may simply be no configurations. The
+// count lets an administrative caller report what the deactivation actually
+// did — including that it did nothing.
+func (r *OIDCConfigRepository) DeactivateAllOIDCConfigs(ctx context.Context) (int64, error) {
 	query := `UPDATE oidc_config SET is_active = false, updated_at = $1`
-	_, err := r.db.ExecContext(ctx, query, time.Now())
+	res, err := r.db.ExecContext(ctx, query, time.Now())
 	if err != nil {
-		return fmt.Errorf("failed to deactivate oidc configs: %w", err)
+		return 0, fmt.Errorf("failed to deactivate oidc configs: %w", err)
 	}
-	return nil
+	return affectedRows(res, "oidc configs")
 }
 
 // deactivateAllOIDCConfigsTx sets is_active=false for all configurations
@@ -187,6 +207,12 @@ func deactivateAllOIDCConfigsTx(ctx context.Context, tx *sqlx.Tx) error {
 }
 
 // ActivateOIDCConfig activates a specific configuration (deactivates others first).
+//
+// Returns an error wrapping ErrNotFound when no configuration has that ID, and
+// the transaction is rolled back so the deactivate-all step does NOT commit on
+// its own. Before this check, activating a stale id both silently failed AND
+// left every configuration inactive — a deployment losing SSO entirely while the
+// admin API reported success.
 func (r *OIDCConfigRepository) ActivateOIDCConfig(ctx context.Context, id uuid.UUID) error {
 	tx, err := r.db.BeginTxx(ctx, nil)
 	if err != nil {
@@ -199,12 +225,17 @@ func (r *OIDCConfigRepository) ActivateOIDCConfig(ctx context.Context, id uuid.U
 	}
 
 	// Activate the specified config
-	_, err = tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`UPDATE oidc_config SET is_active = true, updated_at = $1 WHERE id = $2`,
 		time.Now(), id,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to activate oidc config %s: %w", id, err)
+	}
+	// Returning before Commit lets the deferred Rollback undo the
+	// deactivate-all above, so a miss leaves the previously active config alone.
+	if err := requireRow(res, "oidc config by id"); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
