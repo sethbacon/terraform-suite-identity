@@ -32,9 +32,24 @@ Each app serves a self-description at:
 GET /api/v1/suite/manifest
 ```
 
-The path is a package constant (`manifestPath` in `discovery.go`) — both the
-publisher and the discovery client use it, so it cannot diverge. The payload is
-the `Manifest` struct (`manifest.go`):
+The path is the **exported** package constant `suite.ManifestPath`
+(`discovery.go`). The discovery client builds its request URL from it, and each
+app **should** register its publishing route from it too:
+
+```go
+// In the publishing app's router, instead of a copied "/api/v1/suite/manifest":
+router.GET(suite.ManifestPath, suiteManifestHandler(cfg))
+```
+
+Do that and the publisher and the client provably cannot diverge, because there is
+one definition. **Note this is a convention the library enables, not a guarantee it
+enforces**: a publisher that registers the route from a hand-copied literal — as
+both consuming apps currently do — has to keep that literal in sync by hand. The
+failure mode is loud but total (the sibling reports permanently `unreachable`), so
+prefer the constant. Changing `ManifestPath`'s value is a breaking wire change for
+every already-deployed sibling, not a refactor.
+
+The payload is the `Manifest` struct (`manifest.go`):
 
 ```go
 type Manifest struct {
@@ -107,14 +122,20 @@ Major("suite/v2.3")  // "v2"
 Major("v1")          // "v1"  (no slash → returned unchanged)
 ```
 
-`NegotiateCompat(self, sibling)` returns `(false, reason)` in exactly three cases
+`NegotiateCompat(self, sibling)` returns `(false, reason)` in exactly five cases
 and `(true, "")` otherwise:
 
 | Condition | Why it is rejected |
 | --------- | ------------------ |
 | `sibling.App == ""` | An empty app id means an unparseable or non-suite endpoint. |
 | `sibling.App == self.App` | Pointing at yourself — a misconfiguration where the sibling URL resolves back to this app. |
+| `Major(self.SchemaVersion) == ""` | This app's own manifest has no schema version — a construction bug here, not a sibling problem; fail closed rather than negotiate against an unknown. |
+| `Major(sibling.SchemaVersion) == ""` | The sibling's manifest has no schema version, so there is nothing to compare a major against. |
 | `Major(sibling.SchemaVersion) != Major(self.SchemaVersion)` | Incompatible wire protocol (e.g. `suite/v1` vs `suite/v2`). |
+
+The two empty-version cases are what make this fail **closed**: an empty
+`SchemaVersion` on either side is treated as incompatible, never as a wildcard that
+matches anything.
 
 Note what is **not** checked: the running `Version`, the capability set, and any
 minor/patch of `SchemaVersion` are all irrelevant to compatibility — that is the
@@ -136,6 +157,14 @@ client) — only transport security defends the fetch from a network-position
 attacker injecting a spoofed manifest. Use `NewInsecureDiscoveryClient` instead
 only for local/dev setups where the sibling is reached over plaintext HTTP
 (e.g. loopback); its name is the deliberate opt-out.
+
+Be precise about the scope of that check: it rejects a **case-insensitive
+`http://` prefix** (after trimming trailing slashes) and nothing else. A
+scheme-less value such as `sibling.example.com` is accepted at construction time
+and fails later at request time; an `https://` URL is accepted, as is any other
+scheme. The constructor is a guard against the one mistake that silently works —
+configuring plaintext HTTP — not a URL validator. Validate operator-supplied
+sibling URLs in the app's own config layer.
 
 ```go
 self := suite.Manifest{SchemaVersion: suite.SchemaVersionV1, App: "terraform-registry", /* … */}
@@ -217,28 +246,45 @@ case, a default port, a trailing FQDN dot, an accidental scheme prefix, or Unico
 `CanonicalHost(raw)` (`host.go`) folds those variants so the exact-match join
 compares like-for-like. It:
 
-- trims whitespace and, if a scheme slipped in (a full URL), keeps only the
-  authority;
-- splits off any port;
+- trims whitespace, and **rejects any input containing `@`** (userinfo is never
+  legitimate in a bare host-identity join key) by returning `""`;
+- if a scheme slipped in (a full URL), keeps only the authority;
+- splits off any port (`splitHostPort`), handling four shapes: no colon at all, a
+  clean `host:port` / `[ipv6]:port`, a bare zone-scoped IPv6 literal such as
+  `fe80::1%eth0`, and a `url.Parse` fallback that recovers a bare unbracketed IPv6
+  literal like `::1` — while **rejecting** genuinely malformed shapes such as
+  `host:443:extra`, again returning `""`;
+- unwraps IPv6 brackets, so `[::1]` and `::1` fold to the same key;
 - lowercases the host and removes a trailing dot;
 - folds an internationalized (Unicode) host to its **punycode ASCII** form via the
   IDNA *lookup* profile, so a Unicode source address matches a punycode-stored
   host;
-- drops a **default** port (`:80` / `:443`) while preserving any non-default port.
+- canonicalizes the port **numerically**, so `:080` and `:80` fold identically and
+  `:08443` becomes `:8443`; drops a **default** port (`:80` / `:443`) while
+  preserving any non-default port.
 
 ```go
-suite.CanonicalHost("Registry.Example.com.")        // "registry.example.com"
+suite.CanonicalHost("Registry.Example.com.")         // "registry.example.com"
 suite.CanonicalHost("https://registry.example.com")  // "registry.example.com"
 suite.CanonicalHost("registry.example.com:443")      // "registry.example.com"
 suite.CanonicalHost("registry.example.com:8443")     // "registry.example.com:8443"
 suite.CanonicalHost("регистр.example")               // punycode "xn--..." form
+suite.CanonicalHost("[::1]:443")                     // "::1"
+suite.CanonicalHost("::1")                           // "::1"  (same key)
+suite.CanonicalHost("attacker@registry.example.com") // ""     (rejected)
+suite.CanonicalHost("host:443:extra")                // ""     (rejected)
 ```
 
 IDN folding is **best-effort**: a host the IDNA lookup profile rejects (e.g. one
 containing underscores) is left as the lowercased value rather than dropped or
-mangled — the function never discards input. Empty/whitespace input returns the
-empty string. Apply it to **both** sides of the join (the stored host and the
-incoming host) so they normalize identically.
+mangled. A non-numeric port (`:notaport`) is likewise re-emitted verbatim.
+Empty/whitespace input returns the empty string. Apply it to **both** sides of the
+join (the stored host and the incoming host) so they normalize identically.
+
+One pinned known gap: a doubled scheme (`https://https://evil.com`) is mangled
+rather than rejected — `url.Parse` reads `https:` as the host, so the real host is
+dropped and the result is `"https"`. It is covered by a regression test that
+records the behaviour rather than blessing it.
 
 ---
 

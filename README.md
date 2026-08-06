@@ -22,7 +22,15 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 | `identity/auth`      | App-neutral auth primitives: scope checking (`HasScope`/`HasAnyScope`/`HasAllScopes` with wildcard `admin` + write-implies-read), the JWT `TokenManager` (HS256, JTI, secret rotation), and API-key generation/validation.                |
 | `identity/auth/oidc` | A generic OpenID Connect provider (discovery, auth URL, code exchange, ID-token verification, group/user-info extraction).                                                                                                                |
 | `identity/auth/oauthstate` | The OAuth `state` contract: `Manager` mints an unguessable state, stores an **opaque** app payload against it under a TTL, and consumes it exactly once. Ships a `MemoryStore`; HA deployments implement `Store` over their own backend.                     |
-| `identity/suite`     | The shared runtime-coupling contract used by **both** apps: the capability `Manifest` each app publishes, `NegotiateCompat` version negotiation, the polling `DiscoveryClient`, and `CanonicalHost` for the cross-app "Consumed by" join. |
+| `identity/suite`     | The shared runtime-coupling contract used by **both** apps: the capability `Manifest` each app publishes, `NegotiateCompat` version negotiation, the polling `DiscoveryClient`, `ManifestPath` (the route both apps serve it at), and `CanonicalHost` for the cross-app "Consumed by" join. |
+| `identity/crypto`    | `TokenCipher`: AES-256-GCM authenticated encryption for capability-bearing secrets stored at rest (OAuth tokens, webhook destination URLs, **OIDC client secrets**). Key rotation via `NewTokenCipherWithPrevious`; `DeriveTokenCipher`/`GenerateKey`/`GenerateSalt` for key material. The module never owns a key — you supply one. |
+| `identity/httpsafe`  | An SSRF-safe HTTP client: outbound requests from library code (and from a host that wants the same guard) are restricted so a user-supplied destination cannot be steered at link-local, loopback or private-range addresses. |
+| `identity/mailer`    | An SMTP transport hardened against opportunistic-TLS downgrade, used to deliver notifications. |
+| `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. |
+
+The `notification_channels` table `identity/notify` reads is **owned by the consuming
+app**, not created by this module's migrations — see the [schema
+reference](docs/schema.md#tables) for the exact shape it must have.
 
 ## Canonical identity model
 
@@ -31,7 +39,7 @@ only per-app variance is the **role → scope mapping**: the module is app-agnos
 scope *contents*, and each app seeds its own scopes onto `role_templates` at setup (the
 "identity-core + app-extended" model).
 
-Notable modelling choices:
+### Notable modelling choices
 
 - **No soft-active flag on users, api keys, or organizations.** Access derives entirely
   from organization memberships and the scopes their role templates grant; "disabling" a
@@ -41,15 +49,25 @@ Notable modelling choices:
   reappear as a working kill-switch. (`oidc_config.is_active` is the one exception: it is
   genuinely read/written by `GetActiveOIDCConfig`/`ActivateOIDCConfig`/
   `DeactivateAllOIDCConfigs`.)
-- **API keys** carry an optional `expires_at`, but this library does not enforce it at
-  lookup/validate time — `GetAPIKeysByPrefix` (the query the auth path uses) returns rows
-  regardless of expiry, and `auth.ValidateAPIKey` is a pure bcrypt comparison with no
-  expiry check at all. **Hosts must check `expires_at` themselves** before accepting a key
-  as valid. Revocation is a hard delete (no soft flag). JWT revocation is tracked
-  separately in `revoked_tokens`, but is likewise host-enforced — see the Auth section
-  below.
+- **API keys** carry an optional `expires_at`, and **the auth path's lookup enforces it in
+  SQL**: `store.APIKeyRepository.GetAPIKeysByPrefix` — the query an authenticating host
+  runs to find candidate keys for a presented prefix — filters with
+  `(expires_at IS NULL OR expires_at > NOW())`, so an expired key is never returned as a
+  candidate. `auth.ValidateAPIKey` is a pure bcrypt comparison and performs no expiry
+  check of its own; it does not need to, because it only ever sees candidates the query
+  already filtered. A host that re-checks `ExpiresAt` on the returned keys is performing a
+  harmless redundant second check.
+  <br>
+  Two limits worth planning for. First, expiry enforcement lives in **that one query**:
+  the admin/listing lookups (`GetAPIKeyByID`, `ListAPIKeysByUser`,
+  `ListAPIKeysByOrganization`, `ListAll`, …) deliberately return expired rows so an
+  operator can see and clean them up — **never build an authentication path on those**.
+  Second, revocation is a hard delete (no soft flag), so a revoked key disappears rather
+  than being marked. JWT revocation is different again: it is tracked in `revoked_tokens`
+  but is entirely host-enforced — see the Auth section below.
 - **Multi-org by default** — `UserWithOrgRoles` aggregates scopes across all memberships.
-  **`GetAllowedScopes`/`GetUserCombinedScopes` union those scopes into one flat, GLOBAL set
+  **`GetAllowedScopes`/`GetUserCombinedScopes` (both marked `Deprecated:` in code) union
+  those scopes into one flat, GLOBAL set
   with no per-organization qualifier — do not feed that set into a JWT (or any other
   authorization decision) as "what the user can do" for a specific organization**, since a
   role in one organization would silently authorize an action in another. Use
@@ -64,9 +82,15 @@ go get github.com/sethbacon/terraform-suite-identity@latest
 ```
 
 Pin a minimum version in `go.mod`. Schema migrations are additive within a major version,
-with two documented exceptions — an in-place `ALTER COLUMN` (migration `000003`) and a
-verified-dead-column `DROP COLUMN` (migration `000004`) — see
-[docs/schema.md](docs/schema.md). Requires Go 1.25 or newer.
+with **four documented exceptions** — a seed-data `UPDATE` (`000002`), in-place
+`ALTER COLUMN … TYPE` on three tables (`000003`), a verified-dead-column `DROP COLUMN`
+(`000004`), and a data `UPDATE` plus a new `UNIQUE` index (`000005`) — see
+[docs/schema.md](docs/schema.md).
+
+Requires **Go 1.25** or newer as the language floor (`go 1.25.0` in `go.mod`). `go.mod`
+also pins `toolchain go1.26.5`, which is the version CI builds and tests with; the `go`
+command downloads it automatically, so a local Go 1.25 works unless you have set
+`GOTOOLCHAIN=local`.
 
 ## Usage
 
@@ -142,7 +166,8 @@ ok := auth.HasScope(userScopes, auth.ScopeUsersRead,
     auth.ReadWritePairs{auth.ScopeUsersRead: auth.ScopeUsersWrite})
 
 // JWT — secret + issuer injected (never read from the environment by the module).
-tm := auth.NewTokenManager([]byte(secret), "terraform-registry")
+// Note both parameters are strings here; NewCoupledTokenManager below takes []byte.
+tm := auth.NewTokenManager(secret, "terraform-registry")
 
 // GLOBAL (org-less) token: `scopes` here is typically a flat union across every
 // organization the user belongs to (e.g. GetUserCombinedScopes/GetAllowedScopes).
@@ -234,9 +259,9 @@ import identityoidc "github.com/sethbacon/terraform-suite-identity/identity/auth
 
 prov, _ := identityoidc.NewProvider(identityoidc.Config{
     IssuerURL: issuer, ClientID: id, ClientSecret: secret,
-    RedirectURL: cb, Scopes: []string{"openid", "email", "profile"},
-    // HTTPS is required by default; set AllowInsecureIssuer: true only for a
-    // local/dev http issuer.
+    RedirectURL: redirectURL, Scopes: []string{"openid", "email", "profile"},
+    // HTTPS is required by default on BOTH the issuer and the redirect URL; set
+    // AllowInsecureIssuer: true only for a local/dev http issuer.
 })
 
 // Login: BeginAuthSession takes no state parameter — it mints one, and stores this
@@ -254,6 +279,13 @@ rawIDToken := token.Extra("id_token").(string)
 idToken, err := prov.VerifyIDToken(ctx, rawIDToken, identityoidc.WithExpectedNonce(cb.Nonce))
 // cb.Payload is your bytes, byte for byte.
 ```
+
+**OIDC client secrets are stored verbatim.** `OIDCConfigRepository` reads and writes
+`OIDCConfig.ClientSecretCiphertext` exactly as given — it performs no cryptography and
+does not own an encryption key. If you want encryption at rest for that column, this
+module ships the tool for it: **[`identity/crypto`](identity/crypto/tokencipher.go)'s
+`TokenCipher`** (AES-256-GCM, with `NewTokenCipherWithPrevious` for key rotation). Seal
+before writing and open after reading; the key stays yours.
 
 **Use `BeginAuthSession`/`CompleteAuthSession` for new integrations.** `BeginAuth` is
 still correct and supported — it is the right entry point for an app that already owns a
@@ -329,17 +361,27 @@ go dc.Start(ctx)
 state, sibling := dc.Snapshot() // active / degraded / unreachable / unknown
 ```
 
-The poller calls `NegotiateCompat` for you (incompatible when the sibling app id is
-empty, equals self, or its schema MAJOR differs); call it directly when you receive
-a manifest by other means.
+The poller calls `NegotiateCompat` for you; call it directly when you receive a manifest
+by other means. It reports incompatible when the sibling app id is empty, when it equals
+self, when either side's `SchemaVersion` is empty, or when the two schema MAJORs differ —
+five rejection cases in all, listed in
+[docs/suite-coupling.md](docs/suite-coupling.md#version-negotiation-negotiatecompat).
+
+The manifest route is `suite.ManifestPath`; register your handler from that constant
+rather than a copied literal so the publisher and the discovery client cannot drift apart.
 
 **`CanonicalHost`** normalizes a registry host so the suite "Consumed by" join
-compares like-for-like across apps — folding away case, a default port (`:80`/`:443`),
-a trailing FQDN dot, an accidental scheme prefix, and Unicode (IDN) vs punycode
-encoding:
+compares like-for-like across apps. It folds away case, a default port (`:80`/`:443`,
+compared numerically so `:080` folds too), a trailing FQDN dot, an accidental scheme
+prefix, IPv6 brackets, and Unicode (IDN) vs punycode encoding. Input that is never
+legitimate as a bare host-identity join key — anything containing userinfo (`@`), or a
+malformed multi-colon shape like `host:443:extra` — is **rejected outright** and returns
+`""`:
 
 ```go
 suite.CanonicalHost("https://Registry.Example.com:443/") // "registry.example.com"
+suite.CanonicalHost("[::1]:443")                         // "::1"
+suite.CanonicalHost("attacker@registry.example.com")     // "" (rejected)
 ```
 
 See the canonical-host and suite-coupling design notes for the full rationale.
@@ -351,7 +393,8 @@ and, when it merges, tags the version and drafts the GitHub Release. `release.ym
 publishes that draft — there are no build artifacts to attach, since this is a pure Go
 library. The module is in the `0.x` series while the API stabilises — breaking changes bump
 the **minor** version, and consumers pin and upgrade in lockstep. Schema migrations are
-additive, with one documented in-place exception (see [docs/schema.md](docs/schema.md)).
+additive, with the documented exceptions listed under
+[Installation](#installation) and detailed in [docs/schema.md](docs/schema.md).
 
 ## Development
 

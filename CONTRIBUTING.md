@@ -35,9 +35,15 @@ is not acceptable.
 
 ### Prerequisites
 
-- Go 1.25 or later (the module sets `go 1.25.0` in `go.mod`).
+- Go 1.25 or later — the module sets `go 1.25.0` in `go.mod` as its language floor.
+  `go.mod` also pins `toolchain go1.26.5`, and CI resolves its Go version from
+  `go.mod` (`actions/setup-go` with `go-version-file`), so **CI builds and tests
+  with 1.26.5**. The `go` command downloads that toolchain automatically; if you
+  have set `GOTOOLCHAIN=local`, you need 1.26.5 installed locally to match CI.
 - A POSIX-ish shell for the `go` toolchain. No database is required for the unit
   test suite — the data layer is tested entirely with [`go-sqlmock`](https://github.com/DATA-DOG/go-sqlmock).
+  The one live-PostgreSQL test file is behind a `//go:build integration` tag, so a
+  plain `go test ./...` never needs a database.
 
 ### Fork and Clone
 
@@ -178,14 +184,27 @@ See [docs/schema.md](docs/schema.md) for the full table and migration reference.
   `0000NN_description.up.sql` and `0000NN_description.down.sql`.
 - **Migrations must be additive within a major version.** Both apps consume the
   same schema; a destructive change would break whichever app upgrades first.
-  Prefer `ADD COLUMN … IF NOT EXISTS` and new tables.
+  Prefer `ADD COLUMN … IF NOT EXISTS` and new tables. Four shipped migrations
+  (`000002`–`000005`) break this rule and are documented exceptions, each resting
+  on a stated precondition — read
+  [docs/schema.md](docs/schema.md#where-the-additive-rule-has-been-broken-and-why)
+  before assuming a similar change is acceptable. In particular, a precondition of
+  the form "these tables hold only seed data" is **not verifiable from inside this
+  repository**: check it against every consuming app before you rely on it.
 - Use idempotent, attach-safe DDL: `CREATE … IF NOT EXISTS`,
   `ON CONFLICT DO NOTHING`. The runner takes an advisory lock so concurrent
   detect-and-attach by two apps is safe (`identity.RunMigrations`).
-- The `.down.sql` must fully reverse the `.up.sql`. (The one existing exception is
-  migration `000003`, whose `TEXT[]`↔`JSONB` column-type round-trip is best-effort
-  rather than an exact reversal — see [docs/schema.md](docs/schema.md). This is
-  not a precedent: new migrations must still fully reverse.)
+- The `.down.sql` must fully reverse the `.up.sql`. There are **two** existing
+  exceptions, both best-effort and both self-labelled in the file: `000003`'s
+  `TEXT[]`↔`JSONB` column-type round-trip, and `000005`'s index drop, which does
+  not restore the `is_active` values its up-migration cleared. See
+  [docs/schema.md](docs/schema.md#down-migrations). Neither is a precedent: new
+  migrations must still fully reverse.
+- **A new migration must be added to `docs/schema.md`'s migration table in the same
+  PR.** This is enforced — `TestSchemaDocMigrationTableIsComplete` and
+  `TestSchemaDocCurrentVersionMatchesMigrations` in `identity/docs_drift_test.go`
+  fail when a migration exists that the table does not list, or when the stated
+  "current version" is no longer the highest on disk.
 
 There is no migration CLI in this repo. Exercise both directions through a
 consuming app, or in a throwaway database via `identity.RunMigrations(db, "up")`
@@ -233,12 +252,28 @@ gosec ./...
 
 - **Coverage threshold is 75%** (`THRESHOLD=75` in `ci.yml`). Keep total coverage
   at or above it.
+- **There is a second, per-package 75% floor**, also in `ci.yml`, and it is the one
+  that usually bites: the package set is *derived* from `coverage.out`, so every
+  package is gated by default and a new package is gated the moment it has tests.
+  A PR can clear the aggregate gate and still fail here, because an easy-to-cover
+  models package can otherwise mask a security-critical one. Only `identity` is
+  EXEMPT (its migration runner needs a live database); adding an exemption is a
+  deliberate, CODEOWNER-reviewed act, and a *stale* exemption fails the build too.
 - **gosec must be clean.** The module is small, so CI fails on *any* finding. If a
   finding is an accepted risk, suppress it inline and narrowly with
   `// #nosec <rule> -- <justification>` rather than lowering the bar globally.
-- The data layer (`identity/store`) is unit-tested with sqlmock; **no live
-  database is used in CI**. The migration runner (`identity.RunMigrations`)
-  requires live PostgreSQL and is exercised by the **consuming apps'**
+- **Documentation claims that state a number, a version, a path or an inventory are
+  asserted mechanically** in `identity/docs_drift_test.go` — the migration table in
+  `docs/schema.md`, the README package table, the manifest path, the coverage
+  threshold, the gosec version, the dependency-review severity and the Go floor.
+  If you change one of those in code or CI, the corresponding sentence must change
+  too or `go test ./identity/` fails. Prefer adding a check there over trusting a
+  sentence to stay true.
+- The data layer (`identity/store`) is unit-tested with sqlmock; **the default
+  `go test ./...` run uses no live database**. The migration runner
+  (`identity.RunMigrations`) requires live PostgreSQL: it is exercised in CI by the
+  separate, required **Integration Tests (PostgreSQL)** job (`-tags=integration`
+  against a `postgres` service container) and by the **consuming apps'**
   integration/UAT suites — add or update those when you change migration behavior.
 
 Security-sensitive code (JWT, API-key generation/validation, OIDC verification,
@@ -258,8 +293,17 @@ will not be merged.
    - `docs: document the identity schema migration list`
 4. Write a clear PR description: what changed, why, how you tested it, and the
    issue link.
-5. **All CI checks must pass** — Tests & Quality, Security Scan (gosec),
-   Conventional PR Title, and Dependency review (`fail-on-severity: high`).
+5. **All CI checks must pass**:
+   - **Tests & Quality** (`ci.yml`) — build, vet, `go mod tidy` diff, tests with
+     race + coverage, the total and per-package coverage floors.
+   - **Integration Tests (PostgreSQL)** (`ci.yml`) — the migration runner against a
+     real database, `-tags=integration`. This is a **required status check on
+     `main`**: a non-blocking migration gate is the same as no migration gate.
+   - **Security Scan (gosec)** (`ci.yml`) — fails on any finding.
+   - **Vulnerability Scan (govulncheck)** (`ci.yml`) — known-vulnerability scan of
+     the module and its dependencies.
+   - **Conventional PR Title** (`pr-checks.yml`).
+   - **Dependency review** (`pr-checks.yml`) — `fail-on-severity: moderate`.
 6. At least one approval is required. `@sethbacon` is the default reviewer/owner
    (`.github/CODEOWNERS`); changes under `.github/` and `identity/` require their
    explicit review.
@@ -270,8 +314,9 @@ will not be merged.
 
 ## Releasing
 
-Releases are fully automated; the only human action is merging the release PR.
-The flow is **main-only** and mirrors the registry's two-stage release.
+Releases are automated; the human actions are merging the release PR and then
+approving the `release` deployment environment. The flow is **main-only** and
+mirrors the registry's two-stage release.
 
 1. Merging Conventional-Commit PRs to `main` drives
    [release-please](https://github.com/googleapis/release-please)
@@ -284,10 +329,14 @@ The flow is **main-only** and mirrors the registry's two-stage release.
    the default `GITHUB_TOKEN` cannot, due to GitHub's workflow-recursion guard.
 3. Squash-merging the release PR pushes a `vX.Y.Z` tag and a **draft** GitHub
    Release (`"draft": true` in `.release-please-config.json`).
-4. The tag push triggers `release.yml`, which **guards that the tag is reachable
-   from `origin/main`** and then publishes the draft. This is a pure Go library
-   with **no build artifacts** — there are no binaries, container images, or
-   signatures to attach (the registry attaches those; this module does not).
+4. The tag push triggers `release.yml`, whose `Verify tag is on main` job **guards
+   that the tag is reachable from `origin/main`**. The `Publish GitHub Release`
+   job then runs behind the **`release` deployment environment**, which requires
+   reviewer approval and restricts deployments to `v*` tags — so publishing is a
+   deliberate second human step, not an automatic consequence of the tag. This is
+   a pure Go library with **no build artifacts** — there are no binaries, container
+   images, or signatures to attach (the registry attaches those; this module does
+   not).
 
 To publish an already-tagged version manually:
 `gh workflow run release.yml --ref vX.Y.Z`.
