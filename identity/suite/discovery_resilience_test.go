@@ -104,9 +104,10 @@ func TestDiscovery_PanickingPollIsContainedAndLogged(t *testing.T) {
 	}
 }
 
-// A recovered panic must not leave the state lock held: Snapshot (called per
-// request by the consuming app) would otherwise block forever, turning a crash
-// into a permanent wedge.
+// A recovered poll must leave the client usable: Snapshot is called per request
+// by the consuming app, so a poll that faulted and left the state lock held
+// would turn a crash into a permanent wedge of every request. pollOnce releases
+// d.mu with a deferred unlock, which is what makes recovery safe here.
 func TestDiscovery_RecoveredPollDoesNotHoldTheStateLock(t *testing.T) {
 	captureSlog(t)
 	d := faultingClient(t)

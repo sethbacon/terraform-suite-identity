@@ -98,10 +98,17 @@ func TestJanitor_PanickingSweepIsContainedAndLogged(t *testing.T) {
 	}
 }
 
-// The store must stay usable after the janitor recovers: the sweep releases
-// s.mu with a deferred unlock, so an unwinding panic cannot leave the map lock
-// held. A trailing (non-deferred) Unlock would turn a recovered crash into a
-// permanent deadlock of every login.
+// The store must stay usable after the janitor recovers a panic raised while
+// the map lock was held: recovering past a trailing (non-deferred) Unlock would
+// turn a crash into a permanent deadlock of every login, which is worse than
+// the fault being recovered.
+//
+// This pins the contract the janitor imposes on any sweep body — fault while
+// holding s.mu and the lock must still be released. It cannot detect a
+// regression in the shipped MemoryStore.sweep specifically: nothing inside that
+// critical section (a map walk and a time comparison) can fault, so its
+// deferred unlock has no reachable trigger and is prophylactic. That is why the
+// contract is asserted here at the boundary instead.
 func TestJanitor_RecoveredSweepDoesNotHoldTheMapLock(t *testing.T) {
 	captureSlog(t)
 
