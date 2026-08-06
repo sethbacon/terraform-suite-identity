@@ -106,6 +106,14 @@ var (
 	// ErrAlreadyExists is returned by Store.PutIfAbsent when a live entry
 	// already exists for the key. Manager.Reserve turns it into reserved=false.
 	ErrAlreadyExists = errors.New("oauthstate: entry already exists")
+
+	// ErrCapacityExhausted means a capacity-bounded Store cannot accept a new
+	// entry without discarding one it is already holding. It exists so that a
+	// full store is a visible, loud failure rather than a silent decision about
+	// which piece of security state to forget: Issue turns it into a failed
+	// login (fail closed) and Reserve into reserved=false plus an error, which
+	// denies the assertion on either channel a caller inspects.
+	ErrCapacityExhausted = errors.New("oauthstate: store capacity exhausted")
 )
 
 // Store is the persistence primitive behind Manager. It is deliberately
@@ -131,6 +139,12 @@ type Store interface {
 	// check-and-set MUST be atomic — Manager.Reserve relies on it for
 	// single-use replay detection. Implementations must not retain or mutate
 	// the caller's slice.
+	//
+	// A capacity-bounded implementation MUST NOT discard a live Reserve marker
+	// to admit a new entry: the marker's absence is what makes a replayed
+	// identifier acceptable again, so dropping one silently re-opens replay.
+	// Refuse the write with ErrCapacityExhausted instead — a failed reservation
+	// denies, a forgotten one grants.
 	PutIfAbsent(ctx context.Context, key string, entry []byte, ttl time.Duration) error
 
 	// Take atomically retrieves and removes the entry for key, returning
@@ -275,6 +289,21 @@ func (m *Manager) Consume(ctx context.Context, purpose, state string) ([]byte, e
 // and that must not be honoured twice, such as a SAML assertion ID checked at
 // the ACS endpoint. It is stored in a separate namespace from issued states,
 // so a marker can never be redeemed by Consume.
+//
+// A marker's absence is what grants, so Reserve is the one primitive here whose
+// storage must not quietly forget. Callers must treat a non-nil error as a
+// DENIAL and not merely as a failed bookkeeping call: reserved is false
+// alongside every error precisely so that `if !reserved { reject }` is already
+// the correct handling. MemoryStore never evicts a marker to make room and
+// returns ErrCapacityExhausted instead; a Store implemented over another
+// backend must uphold the same property — do not configure a marker keyspace
+// with an eviction policy that can drop live keys (for Redis, that means not
+// letting markers live in a maxmemory-policy allkeys-* keyspace).
+//
+// ttl bounds how long a marker is remembered, so it must cover the whole window
+// in which a replayed identifier would still be honoured — for a SAML assertion
+// that is at least its NotOnOrAfter. A marker that expires early is a marker
+// that stops denying.
 func (m *Manager) Reserve(ctx context.Context, key string, ttl time.Duration) (bool, error) {
 	if key == "" {
 		return false, errors.New("oauthstate: key is required")

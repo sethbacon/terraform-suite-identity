@@ -3,6 +3,7 @@ package oauthstate
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,10 @@ const (
 	// DefaultMaxEntries bounds the map. The endpoint that issues a state is
 	// typically unauthenticated, so without a cap, abandoned or scripted
 	// logins grow it without bound.
+	//
+	// The cap is applied PER NAMESPACE (login states and replay markers are
+	// budgeted separately — see MemoryStore), so the worst-case entry count is
+	// twice this value.
 	DefaultMaxEntries = 4096
 )
 
@@ -31,6 +36,32 @@ const (
 // and development deployments only. Across multiple replicas a callback can
 // land on a replica that never saw the login, and the state will not verify —
 // an HA deployment implements Store over a shared backend instead.
+//
+// # Capacity is budgeted per namespace, and replay markers are never evicted
+//
+// The store holds two kinds of entry with opposite failure directions. A login
+// state (Manager.Issue) is a credential: losing one fails CLOSED, costing a
+// user one retry. A replay marker (Manager.Reserve) is the ABSENCE of which
+// grants — dropping one lets the assertion it guards be presented a second
+// time, so losing one fails OPEN.
+//
+// Evicting purely by nearest expiry cannot tell those apart. At equal TTLs — the
+// natural configuration, with both sides passing DefaultTTL — an existing marker
+// is by definition nearer to expiring than a state minted a moment ago, so the
+// marker is exactly what a flood of unauthenticated Issue calls would shed
+// first. This store therefore does not rank the two against each other at all:
+//
+//   - Each namespace gets its own budget of maxEntries, so neither can starve
+//     the other.
+//   - Only login states are ever evicted, and only to admit another login
+//     state, nearest-expiry within that namespace.
+//   - A replay marker is never evicted. When the marker budget is full,
+//     PutIfAbsent returns ErrCapacityExhausted and Manager.Reserve surfaces it
+//     as reserved=false plus an error — deny on both channels — rather than
+//     making room by forgetting that an assertion was already used.
+//
+// Keys are classified by the namespace prefix Manager writes; anything that is
+// not a replay marker is treated as an evictable login state.
 type MemoryStore struct {
 	mu      sync.Mutex
 	entries map[string]memoryEntry
@@ -49,6 +80,10 @@ type memoryEntry struct {
 // expired entries every cleanupInterval. Pass 0 for cleanupInterval or
 // maxEntries to take DefaultCleanupInterval / DefaultMaxEntries. Call Close to
 // stop the janitor.
+//
+// maxEntries is the budget for EACH namespace (login states, replay markers),
+// not the total — see MemoryStore for why the two are not ranked against each
+// other.
 func NewMemoryStore(cleanupInterval time.Duration, maxEntries int) *MemoryStore {
 	if cleanupInterval <= 0 {
 		cleanupInterval = DefaultCleanupInterval
@@ -67,6 +102,9 @@ func NewMemoryStore(cleanupInterval time.Duration, maxEntries int) *MemoryStore 
 
 // PutIfAbsent stores entry under key for ttl, refusing to overwrite a live
 // entry. The refusal is what makes Manager.Reserve an atomic single-use check.
+//
+// It returns ErrCapacityExhausted when the key's namespace is full and no room
+// can be made without dropping security state — see MemoryStore.
 func (s *MemoryStore) PutIfAbsent(_ context.Context, key string, entry []byte, ttl time.Duration) error {
 	if key == "" {
 		return errors.New("oauthstate: memory store: key is required")
@@ -84,9 +122,8 @@ func (s *MemoryStore) PutIfAbsent(_ context.Context, key string, entry []byte, t
 		return ErrAlreadyExists
 	}
 
-	s.purgeExpiredLocked(now)
-	if len(s.entries) >= s.maxEntries {
-		s.evictNearestExpiryLocked()
+	if err := s.makeRoomLocked(key, now); err != nil {
+		return err
 	}
 
 	// Copy: the caller owns its slice and may reuse or mutate it after this
@@ -162,31 +199,81 @@ func (s *MemoryStore) sweep() {
 	s.purgeExpiredLocked(time.Now())
 }
 
-// purgeExpiredLocked drops every entry whose expiry has passed. Callers must
-// hold s.mu.
-func (s *MemoryStore) purgeExpiredLocked(now time.Time) {
+// isReplayMarker reports whether key names a Manager.Reserve replay marker
+// rather than a login state. Markers are the entries whose ABSENCE grants, so
+// this is the predicate that decides what may never be evicted.
+func isReplayMarker(key string) bool {
+	return strings.HasPrefix(key, reservePrefix)
+}
+
+// purgeExpiredLocked drops every entry whose expiry has passed and reports how
+// many live entries remain in each namespace. The counts are a by-product of
+// the sweep the caller already pays for, so the capacity decision in
+// makeRoomLocked needs no second pass over the map. Callers must hold s.mu.
+func (s *MemoryStore) purgeExpiredLocked(now time.Time) (states, markers int) {
 	for k, e := range s.entries {
 		if now.After(e.expiresAt) {
 			delete(s.entries, k)
+			continue
+		}
+		if isReplayMarker(k) {
+			markers++
+		} else {
+			states++
 		}
 	}
+	return states, markers
 }
 
-// evictNearestExpiryLocked drops the live entry closest to expiring, so a
-// flood of new logins degrades other in-flight logins rather than exhausting
-// memory. Nearest-expiry (rather than random or oldest-inserted) is chosen so
-// that short-lived login states are shed before longer-lived Reserve markers:
-// evicting a replay marker early would let the assertion it guards be
-// presented a second time. Callers must hold s.mu.
-func (s *MemoryStore) evictNearestExpiryLocked() {
+// makeRoomLocked reclaims expired entries and then ensures key's own namespace
+// can accept one more entry, or fails closed. Login states may be evicted to
+// admit another login state; replay markers are never evicted, by anything.
+// Callers must hold s.mu.
+func (s *MemoryStore) makeRoomLocked(key string, now time.Time) error {
+	states, markers := s.purgeExpiredLocked(now)
+
+	if isReplayMarker(key) {
+		// Refusing the write is the fail-closed answer: Manager.Reserve reports
+		// reserved=false alongside the error, so a caller reading either channel
+		// rejects the assertion. Silently making room by dropping an existing
+		// marker would instead let an already-used assertion through.
+		if markers >= s.maxEntries {
+			return ErrCapacityExhausted
+		}
+		return nil
+	}
+
+	for states >= s.maxEntries {
+		if !s.evictNearestExpiryStateLocked() {
+			// Unreachable while states >= maxEntries >= 1, but exceeding the cap
+			// is not an acceptable alternative to failing the write.
+			return ErrCapacityExhausted
+		}
+		states--
+	}
+	return nil
+}
+
+// evictNearestExpiryStateLocked drops the live LOGIN STATE closest to expiring
+// and reports whether it found one, so a flood of new logins degrades other
+// in-flight logins rather than exhausting memory. Losing a login state costs a
+// user one retry; replay markers are skipped outright because losing one of
+// those would let the assertion it guards be presented a second time. Callers
+// must hold s.mu.
+func (s *MemoryStore) evictNearestExpiryStateLocked() bool {
 	var victim string
 	var soonest time.Time
 	for k, e := range s.entries {
+		if isReplayMarker(k) {
+			continue
+		}
 		if victim == "" || e.expiresAt.Before(soonest) {
 			victim, soonest = k, e.expiresAt
 		}
 	}
-	if victim != "" {
-		delete(s.entries, victim)
+	if victim == "" {
+		return false
 	}
+	delete(s.entries, victim)
+	return true
 }
