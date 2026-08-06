@@ -22,9 +22,21 @@ type RoleTemplateRepository struct {
 	db *sqlx.DB
 }
 
-// NewRoleTemplateRepository creates a new RoleTemplateRepository.
-func NewRoleTemplateRepository(db *sqlx.DB) *RoleTemplateRepository {
-	return &RoleTemplateRepository{db: db}
+// NewRoleTemplateRepository creates a new RoleTemplateRepository over the same
+// *sql.DB every other repository in this package takes.
+//
+// sqlx is an implementation detail here, not part of the contract: the read
+// methods use StructScan against the db-tagged roleTemplateRow, so the
+// dependency earns its keep internally, but it is wrapped with sqlx.NewDb —
+// which adorns an existing pool rather than opening a second one — instead of
+// being pushed onto the caller. Until v0.25.0 this constructor and
+// NewOIDCConfigRepository were the only two in the package that demanded a
+// *sqlx.DB, which forced every consuming application to construct and inject
+// two handle types for one identity layer; terraform-state-manager-backend was
+// literally writing sqlx.NewDb(identityDB, "postgres") at the call site to
+// satisfy it. That wrapping now happens once, here.
+func NewRoleTemplateRepository(db *sql.DB) *RoleTemplateRepository {
+	return &RoleTemplateRepository{db: newSqlxDB(db)}
 }
 
 // roleTemplateRow is the sqlx StructScan target for a role_templates row.
@@ -195,33 +207,4 @@ func (r *RoleTemplateRepository) DeleteRoleTemplate(ctx context.Context, id uuid
 		return fmt.Errorf("role template %s not found or is a system template (immutable): %w", id, ErrNotFound)
 	}
 	return nil
-}
-
-// Create is an alias for CreateRoleTemplate to match admin handlers, mirroring
-// the short-name alias convention already used by UserRepository,
-// APIKeyRepository, and OrganizationRepository. Added so a consumer can call
-// RoleTemplateRepository directly with the same naming convention instead of
-// needing its own wrapper type.
-func (r *RoleTemplateRepository) Create(ctx context.Context, template *models.RoleTemplate) error {
-	return r.CreateRoleTemplate(ctx, template)
-}
-
-// GetByID is an alias for GetRoleTemplate to match admin handlers.
-func (r *RoleTemplateRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.RoleTemplate, error) {
-	return r.GetRoleTemplate(ctx, id)
-}
-
-// Update is an alias for UpdateRoleTemplate to match admin handlers.
-func (r *RoleTemplateRepository) Update(ctx context.Context, template *models.RoleTemplate) error {
-	return r.UpdateRoleTemplate(ctx, template)
-}
-
-// Delete is an alias for DeleteRoleTemplate to match admin handlers.
-func (r *RoleTemplateRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	return r.DeleteRoleTemplate(ctx, id)
-}
-
-// List is an alias for ListRoleTemplates to match admin handlers.
-func (r *RoleTemplateRepository) List(ctx context.Context) ([]*models.RoleTemplate, error) {
-	return r.ListRoleTemplates(ctx)
 }

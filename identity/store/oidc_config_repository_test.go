@@ -9,7 +9,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 )
@@ -23,7 +22,7 @@ func newOIDCConfigRepo(t *testing.T) (*OIDCConfigRepository, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewOIDCConfigRepository(sqlx.NewDb(db, "sqlmock")), mock
+	return NewOIDCConfigRepository(db), mock
 }
 
 var oidcConfigCols = []string{

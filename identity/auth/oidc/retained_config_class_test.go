@@ -43,7 +43,7 @@ func TestNewProviderForConfigDoesNotRetainTheCallersConfig(t *testing.T) {
 	cfg.Scopes[0] = "changed-scope"
 	cfg.Scopes = append(cfg.Scopes, "extra-scope")
 
-	authURL := p.GetAuthURL("state-123")
+	authURL := authURLFor(t, p, "state-123")
 	for _, want := range []string{
 		"https://idp.example.com/authorize",
 		"client_id=client-id",
@@ -100,7 +100,7 @@ func TestNewProviderWithContextDoesNotRetainTheCallersScopes(t *testing.T) {
 	// The caller still owns `scopes` and writes through it.
 	scopes[0] = "changed-scope"
 
-	authURL := p.GetAuthURL("state-123")
+	authURL := authURLFor(t, p, "state-123")
 	if !strings.Contains(authURL, "scope=openid+email") {
 		t.Errorf("auth URL %q does not request the scopes the provider was built with: "+
 			"the provider is reading the caller's slice", authURL)

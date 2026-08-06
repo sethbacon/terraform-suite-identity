@@ -77,6 +77,38 @@ func syncTokenID(c *Claims) {
 // DefaultExpiry is applied when Generate is called with expiresIn == 0.
 const DefaultExpiry = time.Hour
 
+// GlobalScopes is a flat scope set unioned across EVERY organization a
+// principal belongs to. It carries no per-organization qualifier: a user who is
+// an admin in one organization and a viewer in another contributes admin-level
+// scopes to this set, and nothing in it records which organization granted
+// which scope.
+//
+// It is produced by store.OrganizationRepository.GetUserCombinedScopes and
+// models.UserWithOrgRoles.GetAllowedScopes, and it is accepted by exactly one
+// consumer in this module: Generate, which mints a matching GLOBAL, org-less
+// token.
+//
+// # Why this is a distinct type
+//
+// GenerateForOrg takes OrgScopes, not GlobalScopes, so the escalation this
+// module most needs to prevent — minting an org-BOUND token (one that
+// HasScopeInOrg will honour for a specific organization) from a cross-org scope
+// union — does not compile. Wiring it anyway requires writing
+// auth.OrgScopes(global) explicitly, which is greppable, reviewable, and
+// impossible to do by accident while migrating a call site from Generate to
+// GenerateForOrg.
+//
+// A plain []string literal remains assignable to either type; the barrier is
+// specifically between the two library-produced scope sets, which is where the
+// misuse arises.
+type GlobalScopes []string
+
+// OrgScopes is the scope set a SINGLE organization grants a principal, as
+// produced by store.OrganizationRepository.GetUserScopesForOrg or
+// models.UserWithOrgRoles.GetScopesForOrg. It is what GenerateForOrg accepts.
+// See GlobalScopes for why the two are distinct types.
+type OrgScopes []string
+
 // ErrNoSigningSecret is returned by Generate/GenerateForOrg and Validate when
 // the TokenManager holds no signing secret — a zero-value TokenManager, or one
 // built by NewTokenManager("", …) or rotated onto an empty secret.
@@ -277,15 +309,15 @@ func (m *TokenManager) currentSecret() []byte {
 // enforceable from the token alone via HasScopeInOrg (or HasAnyScopeInOrg /
 // HasAllScopesInOrg) instead of trusting a flat scope list.
 //
-// Deprecated: prefer GenerateForOrg for any multi-tenant deployment. Generate
-// mints a GLOBAL, org-less token from a flat scope union and is safe only for
-// a genuinely single-tenant consumer or a deliberate suite-wide/superuser
-// decision; feeding a cross-org scope union (e.g.
-// store.OrganizationRepository.GetUserCombinedScopes or
-// models.UserWithOrgRoles.GetAllowedScopes) into Generate is the cross-org
-// privilege-escalation primitive this warning describes. Retained (not
-// removed) for that narrow legitimate use.
-func (m *TokenManager) Generate(userID, email string, scopes []string, expiresIn time.Duration) (string, error) {
+// The scopes parameter is typed GlobalScopes, not []string, precisely so that
+// the two library scope sets cannot be crossed by accident: the value
+// GetUserScopesForOrg returns (OrgScopes) does not satisfy this parameter, and
+// the value GetUserCombinedScopes returns (GlobalScopes) does not satisfy
+// GenerateForOrg's. Generate is NOT marked deprecated: it is the only way to
+// mint an org-less token, which both suite consumers do deliberately today, and
+// a doc-comment deprecation on a method with no replacement is a warning, not a
+// remedy. What used to be advisory here is now enforced by the type checker.
+func (m *TokenManager) Generate(userID, email string, scopes GlobalScopes, expiresIn time.Duration) (string, error) {
 	return m.generate(userID, email, "", scopes, expiresIn)
 }
 
@@ -299,7 +331,14 @@ func (m *TokenManager) Generate(userID, email string, scopes []string, expiresIn
 // resource being accessed, so a token minted for one organization cannot
 // authorize an action in another. See the warning on Generate for the
 // cross-org escalation this closes.
-func (m *TokenManager) GenerateForOrg(userID, email, orgID string, scopes []string, expiresIn time.Duration) (string, error) {
+//
+// scopes is typed OrgScopes so that a GlobalScopes value — the cross-org union
+// — cannot reach an org-BOUND token without an explicit auth.OrgScopes(...)
+// conversion at the call site. That combination (an org-bound token carrying
+// another organization's scopes, which HasScopeInOrg would then honour) is the
+// sharpest form of the escalation the module guards against, and it is exactly
+// the mistake available while migrating a call site from Generate.
+func (m *TokenManager) GenerateForOrg(userID, email, orgID string, scopes OrgScopes, expiresIn time.Duration) (string, error) {
 	return m.generate(userID, email, orgID, scopes, expiresIn)
 }
 

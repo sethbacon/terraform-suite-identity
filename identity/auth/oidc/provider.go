@@ -177,15 +177,16 @@ func isHTTPSURL(rawURL string) bool {
 
 // NewProviderForConfig constructs a Provider backed by the given oauth2 config
 // without performing OIDC discovery. Intended for sibling packages (e.g. an
-// Azure AD adapter) and tests that need the OAuth2 methods (GetAuthURL,
-// ExchangeCode) without a live identity provider. Methods that depend on the
-// discovery document or verifier (VerifyIDToken, GetEndSessionEndpoint) are not
-// usable on a Provider built this way.
+// Azure AD adapter) and tests that need the OAuth2 methods (BeginAuth, and the
+// token-exchange half of ExchangeAndVerify) without a live identity provider.
+// Methods that depend on the discovery document or verifier (the verification
+// half of ExchangeAndVerify, GetEndSessionEndpoint) are not usable on a
+// Provider built this way.
 //
 // The config is copied, not retained: the returned Provider shares no memory
 // with cfg, so the caller may keep and reuse (or mutate) its own *oauth2.Config
 // without changing the client id, secret, redirect URL, endpoint or scopes this
-// Provider will use for every later GetAuthURL/BeginAuth/ExchangeCode.
+// Provider will use for every later BeginAuth/BeginAuthSession/ExchangeAndVerify.
 func NewProviderForConfig(cfg *oauth2.Config) *Provider {
 	if cfg == nil {
 		return &Provider{}
@@ -198,47 +199,29 @@ func NewProviderForConfig(cfg *oauth2.Config) *Provider {
 	return &Provider{config: &cp}
 }
 
-// GetAuthURL returns the OAuth2 authorization URL for the given state.
-//
-// The state is supplied by the caller and this package cannot check it: it MUST
-// be an unguessable random value the caller stores server-side and consumes
-// exactly once at the callback. See the warning on BeginAuth about
-// self-describing states.
-//
-// Deprecated: GetAuthURL builds a bare OAuth2 authorization URL with no OIDC
-// nonce and no PKCE challenge, so a caller using it (together with a
-// no-options VerifyIDToken call) is not defended against token injection/replay
-// or authorization-code interception. Use BeginAuthSession, which additionally
-// mints and verifies the state for you; or BeginAuth if the caller already owns
-// a correct store-and-consume state, which returns an AuthChallenge carrying a
-// generated nonce and PKCE verifier alongside the URL.
-func (p *Provider) GetAuthURL(state string) string {
-	return p.config.AuthCodeURL(state)
-}
-
 // nonceLength is the number of random bytes used for the OIDC nonce.
 const nonceLength = 32
 
-// AuthChallenge holds an authorization URL together with the per-login secrets
+// AuthChallenge holds an authorization URL together with the per-login bindings
 // the caller must persist (keyed to the state token) and supply back at the
-// callback: the OIDC nonce and the PKCE code verifier.
+// callback.
 type AuthChallenge struct {
 	// URL is the authorization endpoint URL to redirect the user agent to.
 	URL string
-	// Nonce must be persisted and passed to VerifyIDToken via WithExpectedNonce.
-	Nonce string
-	// CodeVerifier must be persisted and passed to ExchangeCode via
-	// WithPKCEVerifier.
-	CodeVerifier string
+	// Session carries this login's OIDC nonce and PKCE code verifier. Persist
+	// it as ONE value keyed to the state token and hand it back to
+	// ExchangeAndVerify verbatim: there is no per-binding option to apply, and
+	// therefore none to forget. CallbackSession is JSON-serializable for that
+	// purpose.
+	Session CallbackSession
 }
 
 // BeginAuth builds an authorization URL that includes a random nonce and a PKCE
-// (S256) code challenge, returning it alongside the generated nonce and code
-// verifier. The caller MUST persist Nonce and CodeVerifier server-side (keyed to
-// the state token) and pass them back at the callback via WithExpectedNonce (to
-// VerifyIDToken) and WithPKCEVerifier (to ExchangeCode). The nonce binds the ID
-// token to this specific login (defending against token injection/replay) and
-// PKCE proves possession of the authorization code.
+// (S256) code challenge, returning it alongside the CallbackSession that binds
+// the callback to this login. The caller MUST persist that CallbackSession
+// server-side (keyed to the state token) and pass it back to ExchangeAndVerify.
+// The nonce binds the ID token to this specific login (defending against token
+// injection/replay) and PKCE proves possession of the authorization code.
 //
 // # The state parameter is the caller's responsibility here
 //
@@ -273,7 +256,10 @@ func (p *Provider) BeginAuth(state string) (AuthChallenge, error) {
 		oidc.Nonce(nonce),
 		oauth2.S256ChallengeOption(verifier),
 	)
-	return AuthChallenge{URL: authURL, Nonce: nonce, CodeVerifier: verifier}, nil
+	return AuthChallenge{
+		URL:     authURL,
+		Session: CallbackSession{Nonce: nonce, CodeVerifier: verifier},
+	}, nil
 }
 
 // randomNonce returns a URL-safe, high-entropy random string for use as an
@@ -303,106 +289,82 @@ func (p *Provider) GetEndSessionEndpoint() string {
 	return claims.EndSessionEndpoint
 }
 
-// ExchangeOption customizes the authorization-code exchange.
-type ExchangeOption func(*exchangeConfig)
-
-type exchangeConfig struct {
-	codeVerifier string
-}
-
-// WithPKCEVerifier supplies the PKCE code verifier generated by BeginAuth so the
-// token endpoint can bind the authorization code to this login (proof of
-// possession). Omit it only for providers that do not support PKCE.
-func WithPKCEVerifier(verifier string) ExchangeOption {
-	return func(c *exchangeConfig) { c.codeVerifier = verifier }
-}
-
-// ExchangeCode exchanges the authorization code for tokens. When a PKCE verifier
-// is supplied via WithPKCEVerifier it is sent on the token request as the
-// code_verifier parameter. Every token-exchange HTTP round trip is bounded by
-// oidcHTTPTimeout (via contextWithBoundedClient), the same as discovery and
-// JWKS fetches, so a slow or hostile token endpoint cannot hang the calling
-// goroutine indefinitely; a client the caller already installed on ctx is
-// preserved, with only its Timeout capped. Note that golang.org/x/oauth2
-// auto-probes the client-auth style on the first exchange against a given
-// token endpoint, trying one style and, on failure, retrying once with the
-// other (see internal.RetrieveToken) — so the very first call can perform up
-// to two bounded round trips (worst case ~2x oidcHTTPTimeout) rather than one.
-func (p *Provider) ExchangeCode(ctx context.Context, code string, opts ...ExchangeOption) (*oauth2.Token, error) {
-	var cfg exchangeConfig
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
-	var authCodeOpts []oauth2.AuthCodeOption
-	if cfg.codeVerifier != "" {
-		authCodeOpts = append(authCodeOpts, oauth2.VerifierOption(cfg.codeVerifier))
-	}
-
-	ctx = contextWithBoundedClient(ctx)
-
-	token, err := p.config.Exchange(ctx, code, authCodeOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to exchange code for token: %w", err)
-	}
-	return token, nil
-}
-
-// VerifyOption customizes ID-token verification.
-type VerifyOption func(*verifyConfig)
-
-type verifyConfig struct {
-	expectedNonce string
-}
-
-// WithExpectedNonce requires the ID token's `nonce` claim to equal the nonce
-// generated by BeginAuth for this login, binding the token to the session and
-// defending against token injection/replay.
-func WithExpectedNonce(nonce string) VerifyOption {
-	return func(c *verifyConfig) { c.expectedNonce = nonce }
-}
-
-// VerifyIDToken verifies and parses the raw ID token. When an expected nonce is
-// supplied via WithExpectedNonce, the token's `nonce` claim must match it.
+// ExchangeAndVerify completes an OIDC login: it exchanges the authorization
+// code for tokens and verifies the resulting ID token, applying BOTH of this
+// login's bindings itself. It is the ONLY way this package will complete an
+// exchange.
 //
-// Calling VerifyIDToken without WithExpectedNonce is a discouraged, legacy
-// calling convention. It remains supported ONLY for tokens that carry no
-// `nonce` claim at all (the fully-legacy GetAuthURL flow, which never
-// requests one, so there is nothing to bind). If the ID token DOES carry a
-// `nonce` claim — meaning the authorization request was started with
-// BeginAuth — but the caller omits WithExpectedNonce, VerifyIDToken now fails
-// closed instead of silently skipping the check: accepting such a token would
-// silently drop the nonce binding and reopen ID-token injection/replay across
-// concurrent authorization attempts, even though the caller believed it was
-// using the hardened BeginAuth flow. New call sites built against a flow
-// started with BeginAuth should always pass
-// WithExpectedNonce(challenge.Nonce).
-func (p *Provider) VerifyIDToken(ctx context.Context, rawIDToken string, opts ...VerifyOption) (*oidc.IDToken, error) {
+// # Why there is no option-based alternative
+//
+// This method replaces ExchangeCode(WithPKCEVerifier)/VerifyIDToken(
+// WithExpectedNonce), which were removed in v0.25.0. Under that shape the two
+// bindings were opt-in strings the caller had to remember to carry forward, and
+// omitting WithPKCEVerifier COMPILED CLEANLY and produced a token request with
+// no code_verifier at all — the exchange then succeeded or failed entirely at
+// the identity provider's discretion (RFC 7636 §4.6 requires a compliant token
+// endpoint to reject it; a lenient one does not). A remedy a caller can omit is
+// not a remedy, so the omittable path was deleted rather than left beside a
+// safer sibling.
+//
+// session must be the CallbackSession produced for THIS login, by
+// CompleteAuthSession (which reads it from server-side storage) or by BeginAuth
+// (which returns it in AuthChallenge.Session for the caller to persist). Both
+// bindings are REQUIRED: an empty Nonce or CodeVerifier is rejected before any
+// network call, so a caller that loses one — a dropped struct field, a state
+// entry written by an older version, a zero-value struct — fails closed with a
+// clear error instead of silently completing an unbound exchange.
+//
+// Every HTTP round trip is bounded by oidcHTTPTimeout (via
+// contextWithBoundedClient), the same as discovery and JWKS fetches, so a slow
+// or hostile token endpoint cannot hang the calling goroutine indefinitely; a
+// client the caller already installed on ctx is preserved, with only its
+// Timeout capped. Note that golang.org/x/oauth2 auto-probes the client-auth
+// style on the first exchange against a given token endpoint, trying one style
+// and, on failure, retrying once with the other (see internal.RetrieveToken) —
+// so the very first call can perform up to two bounded round trips (worst case
+// ~2x oidcHTTPTimeout) rather than one.
+//
+// It returns the OAuth2 token (for the access/refresh tokens) alongside the
+// verified ID token; pass the latter to ExtractUserInfo / ExtractGroups.
+func (p *Provider) ExchangeAndVerify(ctx context.Context, code string, session CallbackSession) (*oauth2.Token, *oidc.IDToken, error) {
 	// A Provider built via NewProviderForConfig has no verifier (it skipped
-	// discovery). Return a descriptive error rather than panicking on a nil
-	// verifier deref.
+	// discovery). Fail before the exchange rather than performing a network
+	// call whose result could not be verified — an unverifiable ID token must
+	// never be handed back, and returning the token alone would invite exactly
+	// that.
 	if p.verifier == nil {
-		return nil, fmt.Errorf("VerifyIDToken is unavailable: this Provider was built with NewProviderForConfig (no discovery); use NewProvider or NewProviderWithContext")
+		return nil, nil, fmt.Errorf("ExchangeAndVerify is unavailable: this Provider was built with NewProviderForConfig (no discovery); use NewProvider or NewProviderWithContext")
+	}
+	// Fail closed on a missing binding. These are the two checks that make the
+	// deleted option-based API unnecessary: there is no longer any way to reach
+	// the token endpoint without a code_verifier, or to accept an ID token
+	// without matching its nonce.
+	if session.CodeVerifier == "" {
+		return nil, nil, fmt.Errorf("oidc: ExchangeAndVerify requires the PKCE code verifier for this login; CallbackSession.CodeVerifier is empty")
+	}
+	if session.Nonce == "" {
+		return nil, nil, fmt.Errorf("oidc: ExchangeAndVerify requires the nonce for this login; CallbackSession.Nonce is empty")
 	}
 
-	var cfg verifyConfig
-	for _, opt := range opts {
-		opt(&cfg)
+	exchangeCtx := contextWithBoundedClient(ctx)
+	token, err := p.config.Exchange(exchangeCtx, code, oauth2.VerifierOption(session.CodeVerifier))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to exchange code for token: %w", err)
+	}
+
+	rawIDToken, ok := token.Extra("id_token").(string)
+	if !ok || rawIDToken == "" {
+		return nil, nil, fmt.Errorf("oidc: token response contains no id_token")
 	}
 
 	idToken, err := p.verifier.Verify(ctx, rawIDToken)
 	if err != nil {
-		return nil, fmt.Errorf("failed to verify ID token: %w", err)
+		return nil, nil, fmt.Errorf("failed to verify ID token: %w", err)
 	}
-
-	if idToken.Nonce != "" && cfg.expectedNonce == "" {
-		return nil, fmt.Errorf("ID token includes a nonce but no expected nonce was supplied for verification; call VerifyIDToken with WithExpectedNonce(challenge.Nonce) from the BeginAuth challenge")
+	if idToken.Nonce != session.Nonce {
+		return nil, nil, fmt.Errorf("ID token nonce does not match the expected value")
 	}
-
-	if cfg.expectedNonce != "" && idToken.Nonce != cfg.expectedNonce {
-		return nil, fmt.Errorf("ID token nonce does not match the expected value")
-	}
-	return idToken, nil
+	return token, idToken, nil
 }
 
 // ExtractGroups reads the named claim from the ID token and returns its string

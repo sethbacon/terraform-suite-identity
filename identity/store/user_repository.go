@@ -226,10 +226,14 @@ func (r *UserRepository) DeleteUser(ctx context.Context, userID string) error {
 	return requireRow(res, "user by id")
 }
 
-// listUsersPage runs the shared paginated users SELECT, used by both ListUsers
-// (which also returns a total count) and List (which does not). Extracted so
-// the two never drift into two independently-maintained copies of the same
-// query.
+// listUsersPage runs the paginated users SELECT for ListUsers.
+//
+// It was extracted when this package still exported a second name for the same
+// page query (List, which omitted the total count and had drifted into an
+// independently-maintained copy of the SQL). That alias was removed in v0.25.0;
+// the helper is kept because ListUsers reads better with the count query and the
+// page query separated, and because batch 11's tenancy predicate has one place
+// to land instead of two.
 func (r *UserRepository) listUsersPage(ctx context.Context, limit, offset int) ([]*models.User, error) {
 	query := `
 		SELECT id, email, name, oidc_sub, created_at, updated_at
@@ -442,26 +446,6 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 	return nil, fmt.Errorf("oidc user creation: conflicting row for oidc_sub %q not found on re-read", oidcSub)
 }
 
-// Create is an alias for CreateUser to match the admin handlers
-func (r *UserRepository) Create(ctx context.Context, user *models.User) error {
-	return r.CreateUser(ctx, user)
-}
-
-// Update is an alias for UpdateUser to match the admin handlers
-func (r *UserRepository) Update(ctx context.Context, user *models.User) error {
-	return r.UpdateUser(ctx, user)
-}
-
-// Delete is an alias for DeleteUser to match the admin handlers
-func (r *UserRepository) Delete(ctx context.Context, userID string) error {
-	return r.DeleteUser(ctx, userID)
-}
-
-// List is an alias for ListUsers that omits the total count, to match admin handlers
-func (r *UserRepository) List(ctx context.Context, limit, offset int) ([]*models.User, error) {
-	return r.listUsersPage(ctx, limit, offset)
-}
-
 // Count returns the total number of users
 func (r *UserRepository) Count(ctx context.Context) (int, error) {
 	var total int
@@ -508,11 +492,6 @@ func (r *UserRepository) Search(ctx context.Context, query string, limit, offset
 	}
 
 	return users, rows.Err()
-}
-
-// GetOrCreateUserByOIDC is an alias for GetOrCreateUserFromOIDC
-func (r *UserRepository) GetOrCreateUserByOIDC(ctx context.Context, oidcSub, email, name string, emailVerified bool) (*models.User, error) {
-	return r.GetOrCreateUserFromOIDC(ctx, oidcSub, email, name, emailVerified)
 }
 
 // GetUserWithOrgRoles retrieves a user with their per-organization role
@@ -620,10 +599,4 @@ func (r *UserRepository) SearchWithMemberships(ctx context.Context, query string
 		return nil, err
 	}
 	return r.loadMembershipsForUsers(ctx, users)
-}
-
-// ListUsersWithRoles is deprecated - use ListUsers instead
-// Role templates are now per-organization, not per-user
-func (r *UserRepository) ListUsersWithRoles(ctx context.Context, limit, offset int) ([]*models.User, int, error) {
-	return r.ListUsers(ctx, limit, offset)
 }

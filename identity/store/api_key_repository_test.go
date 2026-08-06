@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -87,50 +86,6 @@ func TestCreateAPIKey_DBError(t *testing.T) {
 	key := &models.APIKey{ID: "key-new", Scopes: []string{"modules:read"}}
 	if err := repo.CreateAPIKey(context.Background(), key); err == nil {
 		t.Error("expected error, got nil")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// GetAPIKeyByHash
-// ---------------------------------------------------------------------------
-
-func TestGetAPIKeyByHash_Found(t *testing.T) {
-	repo, mock := newAPIKeyRepo(t)
-	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE key_hash").
-		WithArgs("hashedkey").
-		WillReturnRows(sampleAPIKeyRow())
-
-	key, err := repo.GetAPIKeyByHash(context.Background(), "hashedkey")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key == nil {
-		t.Fatal("expected key, got nil")
-	}
-	if key.ID != "key-1" {
-		t.Errorf("ID = %s, want key-1", key.ID)
-	}
-	if len(key.Scopes) != 2 {
-		t.Errorf("len(Scopes) = %d, want 2", len(key.Scopes))
-	}
-}
-
-func TestGetAPIKeyByHash_NotFound(t *testing.T) {
-	repo, mock := newAPIKeyRepo(t)
-	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE key_hash").
-		WillReturnRows(emptyAPIKeyRow())
-
-	key, err := repo.GetAPIKeyByHash(context.Background(), "missing")
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
-	if key != nil {
-		t.Error("expected nil, got non-nil")
-	}
-	// The whole point of the sentinel: the error must not leak the lookup key,
-	// which for this accessor is credential material.
-	if strings.Contains(err.Error(), "missing") {
-		t.Errorf("error %q embeds the key hash it was looking up", err)
 	}
 }
 
@@ -376,33 +331,8 @@ func TestListByUserAndOrganization_Success(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Delegate aliases (Create / GetByID / Update / Delete / ListByUser / ListByOrganization)
+// Update
 // ---------------------------------------------------------------------------
-
-func TestAPIKey_Create_Delegate(t *testing.T) {
-	repo, mock := newAPIKeyRepo(t)
-	mock.ExpectExec("INSERT INTO api_keys").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	key := &models.APIKey{ID: "k1", OrganizationID: "org-1", Name: "k", KeyHash: "h", KeyPrefix: "p", Scopes: []string{"read"}}
-	if err := repo.Create(context.Background(), key); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestAPIKey_GetByID_Delegate(t *testing.T) {
-	repo, mock := newAPIKeyRepo(t)
-	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*id").
-		WillReturnRows(sampleAPIKeyRow())
-
-	k, err := repo.GetByID(context.Background(), "key-1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if k == nil {
-		t.Fatal("expected key, got nil")
-	}
-}
 
 func TestAPIKey_Update_Success(t *testing.T) {
 	repo, mock := newAPIKeyRepo(t)
@@ -423,44 +353,6 @@ func TestAPIKey_Update_DBError(t *testing.T) {
 	key := &models.APIKey{ID: "key-1", Name: "updated", Scopes: []string{"read"}}
 	if err := repo.Update(context.Background(), key); err == nil {
 		t.Error("expected error")
-	}
-}
-
-func TestAPIKey_Delete_Delegate(t *testing.T) {
-	repo, mock := newAPIKeyRepo(t)
-	mock.ExpectExec("DELETE FROM api_keys WHERE id").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	if err := repo.Delete(context.Background(), "key-1"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestAPIKey_ListByUser_Delegate(t *testing.T) {
-	repo, mock := newAPIKeyRepo(t)
-	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*user_id").
-		WillReturnRows(sampleAPIKeyListRow())
-
-	keys, err := repo.ListByUser(context.Background(), "user-1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(keys) != 1 {
-		t.Errorf("len = %d, want 1", len(keys))
-	}
-}
-
-func TestAPIKey_ListByOrganization_Delegate(t *testing.T) {
-	repo, mock := newAPIKeyRepo(t)
-	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*organization_id").
-		WillReturnRows(sampleAPIKeyListRow())
-
-	keys, err := repo.ListByOrganization(context.Background(), "org-1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(keys) != 1 {
-		t.Errorf("len = %d, want 1", len(keys))
 	}
 }
 
@@ -515,32 +407,6 @@ func TestFindExpiringKeys_DBError(t *testing.T) {
 
 	_, err := repo.FindExpiringKeys(context.Background(), 7)
 	if err == nil {
-		t.Error("expected error, got nil")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// MarkExpiryNotificationSent
-// ---------------------------------------------------------------------------
-
-func TestMarkExpiryNotificationSent_Success(t *testing.T) {
-	repo, mock := newAPIKeyRepo(t)
-
-	mock.ExpectExec("UPDATE api_keys SET expiry_notification_sent_at").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	if err := repo.MarkExpiryNotificationSent(context.Background(), "key-1"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestMarkExpiryNotificationSent_DBError(t *testing.T) {
-	repo, mock := newAPIKeyRepo(t)
-
-	mock.ExpectExec("UPDATE api_keys SET expiry_notification_sent_at").
-		WillReturnError(errDB)
-
-	if err := repo.MarkExpiryNotificationSent(context.Background(), "key-1"); err == nil {
 		t.Error("expected error, got nil")
 	}
 }

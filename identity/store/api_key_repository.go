@@ -125,44 +125,6 @@ func (r *APIKeyRepository) CreateAPIKey(ctx context.Context, apiKey *models.APIK
 	return nil
 }
 
-// GetAPIKeyByHash retrieves an API key by an EXACT match on its stored
-// key_hash column.
-//
-// key_hash holds a salted bcrypt digest, which is non-deterministic: hashing
-// the same plaintext key twice produces two different strings. Because of
-// that, this method can only ever find a row whose key_hash was itself
-// round-tripped verbatim out of the database — it can NEVER match a hash
-// freshly computed from an incoming plaintext API key, so it is NOT usable as
-// an authentication lookup despite what its former doc comment claimed. It
-// exists for exact-hash administrative/dedup lookups only. The real
-// authentication path is GetAPIKeysByPrefix (indexed prefix candidates)
-// followed by auth.ValidateAPIKey (bcrypt compare) against each candidate.
-//
-// Returns an error wrapping ErrNotFound when no key matches keyHash. It used to
-// return (nil, nil), which made the idiomatic
-// `if err != nil { return err }; use(key.UserID)` panic with a nil-pointer
-// dereference on any miss (e.g. a probed/garbage hash) instead of cleanly
-// denying the request — the sharpest instance of the trap ErrNotFound closes.
-func (r *APIKeyRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) (*models.APIKey, error) {
-	query := `
-		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
-		       expires_at, last_used_at, expiry_notification_sent_at, created_at
-		FROM api_keys
-		WHERE key_hash = $1
-	`
-
-	apiKey, err := scanAPIKey(r.db.QueryRowContext(ctx, query, keyHash))
-	if errors.Is(err, sql.ErrNoRows) {
-		// "api key by hash" names the axis, not the argument: keyHash is a
-		// credential digest and must not reach an error string.
-		return nil, notFound("api key by hash")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get api key by hash: %w", err)
-	}
-	return apiKey, nil
-}
-
 // GetAPIKeyByID retrieves an API key by ID.
 //
 // Returns an error wrapping ErrNotFound when no key has that ID.
@@ -400,31 +362,6 @@ func (r *APIKeyRepository) ClaimExpiryNotification(ctx context.Context, keyID st
 	return n > 0, nil
 }
 
-// MarkExpiryNotificationSent unconditionally records that the expiry warning was
-// sent for a key.
-//
-// Deprecated: prefer ClaimExpiryNotification, which is safe under horizontal
-// scaling. This unconditional UPDATE cannot prevent two replicas from both
-// sending before either marks. Retained for backward compatibility.
-func (r *APIKeyRepository) MarkExpiryNotificationSent(ctx context.Context, keyID string) error {
-	query := `UPDATE api_keys SET expiry_notification_sent_at = $1 WHERE id = $2`
-	res, err := r.db.ExecContext(ctx, query, time.Now(), keyID)
-	if err != nil {
-		return fmt.Errorf("failed to mark api key expiry notification sent: %w", err)
-	}
-	return requireRow(res, "api key by id")
-}
-
-// Create is an alias for CreateAPIKey to match admin handlers
-func (r *APIKeyRepository) Create(ctx context.Context, apiKey *models.APIKey) error {
-	return r.CreateAPIKey(ctx, apiKey)
-}
-
-// GetByID is an alias for GetAPIKeyByID to match admin handlers
-func (r *APIKeyRepository) GetByID(ctx context.Context, keyID string) (*models.APIKey, error) {
-	return r.GetAPIKeyByID(ctx, keyID)
-}
-
 // Update updates an API key's information.
 //
 // Returns an error wrapping ErrNotFound when no key has apiKey.ID.
@@ -453,21 +390,6 @@ func (r *APIKeyRepository) Update(ctx context.Context, apiKey *models.APIKey) er
 	}
 
 	return requireRow(res, "api key by id")
-}
-
-// Delete is an alias for RevokeAPIKey to match admin handlers
-func (r *APIKeyRepository) Delete(ctx context.Context, keyID string) error {
-	return r.RevokeAPIKey(ctx, keyID)
-}
-
-// ListByUser is an alias for ListAPIKeysByUser to match admin handlers
-func (r *APIKeyRepository) ListByUser(ctx context.Context, userID string) ([]*models.APIKey, error) {
-	return r.ListAPIKeysByUser(ctx, userID)
-}
-
-// ListByOrganization is an alias for ListAPIKeysByOrganization to match admin handlers
-func (r *APIKeyRepository) ListByOrganization(ctx context.Context, orgID string) ([]*models.APIKey, error) {
-	return r.ListAPIKeysByOrganization(ctx, orgID)
 }
 
 // ListByUserAndOrganization retrieves API keys for a specific user within a specific organization

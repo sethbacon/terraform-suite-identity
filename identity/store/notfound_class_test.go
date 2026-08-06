@@ -42,7 +42,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 )
@@ -66,13 +65,12 @@ func newClassRepos(t *testing.T) (*classRepos, sqlmock.Sqlmock) {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	sx := sqlx.NewDb(db, "sqlmock")
 	return &classRepos{
 		users:  NewUserRepository(db),
 		orgs:   NewOrganizationRepository(db),
 		keys:   NewAPIKeyRepository(db),
-		oidc:   NewOIDCConfigRepository(sx),
-		roles:  NewRoleTemplateRepository(sx),
+		oidc:   NewOIDCConfigRepository(db),
+		roles:  NewRoleTemplateRepository(db),
 		audit:  NewAuditRepository(db),
 		tokens: NewTokenRepository(db),
 	}, mock
@@ -225,19 +223,6 @@ func notFoundReadAxes() []notFoundReadAxis {
 			call: func(r *classRepos) (bool, error) {
 				mem, err := r.orgs.GetMemberWithRole(context.Background(), "org-1", "user-1")
 				return mem != nil, err
-			},
-		},
-		{
-			name: "APIKeyRepository.GetAPIKeyByHash",
-			primeHit: func(m sqlmock.Sqlmock) {
-				m.ExpectQuery("SELECT.*FROM api_keys.*WHERE key_hash").WillReturnRows(sampleAPIKeyRow())
-			},
-			primeMiss: func(m sqlmock.Sqlmock) {
-				m.ExpectQuery("SELECT.*FROM api_keys.*WHERE key_hash").WillReturnRows(emptyAPIKeyRow())
-			},
-			call: func(r *classRepos) (bool, error) {
-				k, err := r.keys.GetAPIKeyByHash(context.Background(), "hash")
-				return k != nil, err
 			},
 		},
 		{
@@ -416,11 +401,6 @@ func zeroRowMutationAxes() []zeroRowMutationAxis {
 			call: func(r *classRepos) error {
 				return r.keys.Update(context.Background(), &models.APIKey{ID: "key-1"})
 			},
-		},
-		{
-			name:  "APIKeyRepository.MarkExpiryNotificationSent",
-			prime: exec("UPDATE api_keys SET expiry_notification_sent_at"),
-			call:  func(r *classRepos) error { return r.keys.MarkExpiryNotificationSent(context.Background(), "key-1") },
 		},
 		{
 			name:  "OrganizationRepository.RemoveMember",
@@ -818,7 +798,6 @@ func TestNotFoundClass_ExecResultDiscardersAreEnumerated(t *testing.T) {
 		"CreateRoleTemplate":         "plain INSERT",
 		"CreateOIDCConfig":           "plain INSERT (both the plain and transactional paths)",
 		"AddMemberWithRoleTemplate":  "plain INSERT",
-		"AddMember":                  "plain INSERT",
 		"RevokeToken":                "INSERT ... ON CONFLICT DO NOTHING; zero rows means already revoked, an idempotent success",
 		"deactivateAllOIDCConfigsTx": "bulk UPDATE inside a transaction; zero rows means there were no configs",
 		"maybePruneExpiredRevocations": "best-effort bounded prune; it must never fail the revocation " +
