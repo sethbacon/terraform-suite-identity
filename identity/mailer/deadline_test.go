@@ -59,9 +59,8 @@ func stalledRelay(t *testing.T) (host string, port int) {
 // observe it firing without waiting the production budget.
 func shortSendTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
-	prev := sendTimeout
-	sendTimeout = d
-	t.Cleanup(func() { sendTimeout = prev })
+	sendTimeoutOverride.Store(int64(d))
+	t.Cleanup(func() { sendTimeoutOverride.Store(0) })
 }
 
 func TestSend_StalledRelay_TimesOutInsteadOfBlocking(t *testing.T) {

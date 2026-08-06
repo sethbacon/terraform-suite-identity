@@ -17,6 +17,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/internal/safeloop"
@@ -24,8 +25,8 @@ import (
 	identitymodels "github.com/sethbacon/terraform-suite-identity/identity/models"
 )
 
-// dbTimeout bounds each individual database round-trip made from inside the
-// notifier's loop.
+// defaultDBTimeout bounds each individual database round-trip made from inside
+// the notifier's loop.
 //
 // Start's context is an app-lifetime, cancel-at-shutdown context with no
 // deadline, and runCheck runs synchronously inside the ticker loop. A query
@@ -35,10 +36,22 @@ import (
 // to anyone. Every query this job issues is a single-row or single-index
 // lookup, so a bound this generous cannot fail a healthy database, and any
 // finite bound converts a permanent wedge into one logged, retried tick.
-//
-// It is a var rather than a const only so tests can shorten it; nothing
-// outside this package can change it.
-var dbTimeout = 30 * time.Second
+const defaultDBTimeout = 30 * time.Second
+
+// dbTimeoutOverride shortens that bound. It exists only so a test can watch it
+// fire without waiting the production budget, and it is atomic because runCheck
+// reads it on the job's goroutine while a finished test may be restoring it — a
+// plain var would be a data race by construction. Zero (the default, and what a
+// test restores) means defaultDBTimeout.
+var dbTimeoutOverride atomic.Int64
+
+// dbTimeout is the per-query bound in force right now.
+func dbTimeout() time.Duration {
+	if ns := dbTimeoutOverride.Load(); ns > 0 {
+		return time.Duration(ns)
+	}
+	return defaultDBTimeout
+}
 
 // apiKeyRepo/userRepo are the minimal slices of identity/store's
 // APIKeyRepository / UserRepository this job depends on, so tests can stub
@@ -218,7 +231,7 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 		warningDays = 7
 	}
 
-	findCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+	findCtx, cancel := context.WithTimeout(ctx, dbTimeout())
 	keys, err := n.apiKeyRepo.FindExpiringKeys(findCtx, warningDays)
 	cancel()
 	if err != nil {
@@ -247,7 +260,7 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 			return
 		}
 
-		lookupCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+		lookupCtx, cancel := context.WithTimeout(ctx, dbTimeout())
 		user, err := n.userRepo.GetUserByID(lookupCtx, *key.UserID)
 		cancel()
 		if err != nil {
@@ -273,7 +286,7 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 		// email this key: the conditional UPDATE is atomic, so exactly one replica
 		// wins the claim and the others skip. A send failure after a won claim is a
 		// missed notice (logged below), which is preferred over duplicate emails.
-		claimCtx, cancel := context.WithTimeout(ctx, dbTimeout)
+		claimCtx, cancel := context.WithTimeout(ctx, dbTimeout())
 		claimed, err := n.apiKeyRepo.ClaimExpiryNotification(claimCtx, key.ID)
 		cancel()
 		if err != nil {

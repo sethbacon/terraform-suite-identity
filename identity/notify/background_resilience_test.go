@@ -60,9 +60,8 @@ func captureSlog(t *testing.T) *syncBuffer {
 // query does not wedge the loop" assertion runs in milliseconds.
 func shortDBTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
-	prev := dbTimeout
-	dbTimeout = d
-	t.Cleanup(func() { dbTimeout = prev })
+	dbTimeoutOverride.Store(int64(d))
+	t.Cleanup(func() { dbTimeoutOverride.Store(0) })
 }
 
 // stubAPIKeyRepo is a scriptable apiKeyRepo: it can fault, stall, or return a
