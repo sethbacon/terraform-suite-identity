@@ -60,6 +60,23 @@ func discoveryServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// authURLFor returns the authorization URL BeginAuth builds for state.
+//
+// Before v0.25.0 these assertions were made against GetAuthURL, the bare
+// authorization-URL builder that requested neither a nonce nor a PKCE
+// challenge. That method was deleted, so the URL-shape assertions move onto the
+// only remaining builder. BeginAuth adds nonce and code_challenge parameters;
+// every assertion below is a "contains", so the additions are transparent to
+// them.
+func authURLFor(t *testing.T, p *Provider, state string) string {
+	t.Helper()
+	ch, err := p.BeginAuth(state)
+	if err != nil {
+		t.Fatalf("BeginAuth: %v", err)
+	}
+	return ch.URL
+}
+
 func TestNewProvider_DiscoveryAndAuthURL(t *testing.T) {
 	srv := discoveryServer(t)
 	defer srv.Close()
@@ -76,7 +93,7 @@ func TestNewProvider_DiscoveryAndAuthURL(t *testing.T) {
 		t.Fatalf("NewProviderWithContext: %v", err)
 	}
 
-	authURL := p.GetAuthURL("state-123")
+	authURL := authURLFor(t, p, "state-123")
 	for _, want := range []string{
 		srv.URL + "/auth",
 		"client_id=my-client",
@@ -358,7 +375,8 @@ func TestExchangeCode_SlowTokenEndpointFailsFast(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err = p.ExchangeCode(context.Background(), "auth-code")
+	_, _, err = p.ExchangeAndVerify(context.Background(), "auth-code",
+		CallbackSession{Nonce: "n", CodeVerifier: "v"})
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -441,7 +459,7 @@ func TestContextWithBoundedClient_LeavesStricterCallerTimeoutAlone(t *testing.T)
 	}
 }
 
-func TestNewProviderForConfig_GetAuthURL(t *testing.T) {
+func TestNewProviderForConfig_BeginAuth(t *testing.T) {
 	// A discovery-free provider still builds authorization URLs.
 	p := NewProviderForConfig(&oauth2.Config{
 		ClientID:    "my-client",
@@ -449,7 +467,7 @@ func TestNewProviderForConfig_GetAuthURL(t *testing.T) {
 		Endpoint:    oauth2.Endpoint{AuthURL: "https://issuer.example/auth"},
 		Scopes:      []string{"openid"},
 	})
-	authURL := p.GetAuthURL("state-xyz")
+	authURL := authURLFor(t, p, "state-xyz")
 	for _, want := range []string{"https://issuer.example/auth", "client_id=my-client", "state=state-xyz"} {
 		if !strings.Contains(authURL, want) {
 			t.Errorf("auth URL %q missing %q", authURL, want)
@@ -469,12 +487,35 @@ func TestNewProviderForConfig_DiscoveryMethodsDoNotPanic(t *testing.T) {
 		t.Errorf("GetEndSessionEndpoint() = %q, want empty", got)
 	}
 
-	tok, err := p.VerifyIDToken(context.Background(), "any.jwt.value")
+	// ExchangeAndVerify must refuse BEFORE performing the token exchange. A
+	// Provider with no verifier can still reach a token endpoint perfectly
+	// well, so "it returned an error" does not distinguish refusing from
+	// exchanging-then-failing; only the endpoint knows. Point the config at a
+	// counting server and require that it was never called — otherwise a
+	// working authorization code is burned on an exchange whose ID token can
+	// never be verified.
+	var tokenCalls int
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		tokenCalls++
+		writeTestJSON(w, map[string]any{"access_token": "a", "token_type": "Bearer"})
+	}))
+	defer tokenSrv.Close()
+
+	p2 := NewProviderForConfig(&oauth2.Config{
+		ClientID: "my-client",
+		Endpoint: oauth2.Endpoint{AuthURL: "https://issuer.example/auth", TokenURL: tokenSrv.URL},
+	})
+	tok, idToken, err := p2.ExchangeAndVerify(context.Background(), "auth-code",
+		CallbackSession{Nonce: "n", CodeVerifier: "v"})
 	if err == nil {
-		t.Error("VerifyIDToken() error = nil, want a descriptive error")
+		t.Error("ExchangeAndVerify() error = nil, want a descriptive error")
 	}
-	if tok != nil {
-		t.Errorf("VerifyIDToken() token = %v, want nil", tok)
+	if tok != nil || idToken != nil {
+		t.Errorf("ExchangeAndVerify() = (%v, %v), want (nil, nil)", tok, idToken)
+	}
+	if tokenCalls != 0 {
+		t.Errorf("token endpoint called %d time(s); ExchangeAndVerify must fail before "+
+			"the exchange when it has no verifier to check the result with", tokenCalls)
 	}
 }
 
@@ -494,15 +535,18 @@ func TestBeginAuth_IncludesNonceAndPKCE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginAuth: %v", err)
 	}
-	if ch.Nonce == "" {
+	if ch.Session.Nonce == "" {
 		t.Error("expected a non-empty nonce")
 	}
-	if ch.CodeVerifier == "" {
+	if ch.Session.CodeVerifier == "" {
 		t.Error("expected a non-empty PKCE code verifier")
+	}
+	if ch.Session.Payload != nil {
+		t.Errorf("BeginAuth stored a payload it was never given: %q", ch.Session.Payload)
 	}
 	for _, want := range []string{
 		"state=state-1",
-		"nonce=" + ch.Nonce,
+		"nonce=" + ch.Session.Nonce,
 		"code_challenge=",
 		"code_challenge_method=S256",
 	} {
@@ -516,10 +560,10 @@ func TestBeginAuth_IncludesNonceAndPKCE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginAuth (2): %v", err)
 	}
-	if ch.Nonce == ch2.Nonce {
+	if ch.Session.Nonce == ch2.Session.Nonce {
 		t.Error("nonce is not unique across BeginAuth calls")
 	}
-	if ch.CodeVerifier == ch2.CodeVerifier {
+	if ch.Session.CodeVerifier == ch2.Session.CodeVerifier {
 		t.Error("PKCE verifier is not unique across BeginAuth calls")
 	}
 }
@@ -542,31 +586,102 @@ func TestExchangeAndVerify_NonceAndPKCE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginAuth: %v", err)
 	}
-	idp.setNonce(ch.Nonce) // the IdP echoes this nonce in the minted ID token
+	idp.setNonce(ch.Session.Nonce) // the IdP echoes this nonce in the minted ID token
 
-	tok, err := p.ExchangeCode(context.Background(), "auth-code", WithPKCEVerifier(ch.CodeVerifier))
+	tok, idToken, err := p.ExchangeAndVerify(context.Background(), "auth-code", ch.Session)
 	if err != nil {
-		t.Fatalf("ExchangeCode: %v", err)
+		t.Fatalf("ExchangeAndVerify: %v", err)
 	}
-	if got := idp.codeVerifier(); got != ch.CodeVerifier {
-		t.Errorf("token endpoint received code_verifier %q, want %q", got, ch.CodeVerifier)
+	// The PKCE binding is applied by ExchangeAndVerify itself, with no option
+	// for the caller to omit — this assertion is what pins that.
+	if got := idp.codeVerifier(); got != ch.Session.CodeVerifier {
+		t.Errorf("token endpoint received code_verifier %q, want %q", got, ch.Session.CodeVerifier)
 	}
-
-	rawID, _ := tok.Extra("id_token").(string)
-	if rawID == "" {
+	if rawID, _ := tok.Extra("id_token").(string); rawID == "" {
 		t.Fatal("token response missing id_token")
 	}
-
-	idToken, err := p.VerifyIDToken(context.Background(), rawID, WithExpectedNonce(ch.Nonce))
-	if err != nil {
-		t.Fatalf("VerifyIDToken: %v", err)
-	}
-	if idToken.Nonce != ch.Nonce {
-		t.Errorf("idToken.Nonce = %q, want %q", idToken.Nonce, ch.Nonce)
+	if idToken.Nonce != ch.Session.Nonce {
+		t.Errorf("idToken.Nonce = %q, want %q", idToken.Nonce, ch.Session.Nonce)
 	}
 }
 
-func TestVerifyIDToken_NonceMismatch(t *testing.T) {
+// TestExchangeAndVerify_RejectsMissingBinding is the structural half of the
+// same guarantee: with ExchangeCode/WithPKCEVerifier deleted there is no
+// compiling way to omit a binding, and a caller that loses one anyway — a
+// dropped struct field, a state entry written by an older version, a
+// zero-value CallbackSession — is refused before any network call rather than
+// completing an unbound exchange.
+func TestExchangeAndVerify_RejectsMissingBinding(t *testing.T) {
+	idp := newMockIDP(t, "my-client")
+	p, err := NewProviderWithContext(context.Background(), Config{
+		IssuerURL:           idp.server.URL,
+		ClientID:            "my-client",
+		ClientSecret:        "my-secret",
+		AllowInsecureIssuer: true, // idp.server is a plain httptest.NewServer, not TLS
+	})
+	if err != nil {
+		t.Fatalf("NewProviderWithContext: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		session CallbackSession
+	}{
+		{"zero value", CallbackSession{}},
+		{"no code verifier", CallbackSession{Nonce: "n"}},
+		{"no nonce", CallbackSession{CodeVerifier: "v"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tok, idToken, err := p.ExchangeAndVerify(context.Background(), "auth-code", tc.session)
+			if err == nil {
+				t.Fatal("expected an error for an incomplete CallbackSession")
+			}
+			if tok != nil || idToken != nil {
+				t.Errorf("got (%v, %v), want (nil, nil)", tok, idToken)
+			}
+			if n := idp.tokenRequestCount(); n != 0 {
+				t.Errorf("the token endpoint was called %d time(s) despite the missing "+
+					"binding; ExchangeAndVerify must refuse before any network call, not "+
+					"send an unbound request and fail on what comes back", n)
+			}
+		})
+	}
+}
+
+// TestExchangeAndVerify_RejectsResponseWithoutIDToken pins that a successful
+// token exchange whose response carries no id_token is a failure, not a partial
+// success. Returning the *oauth2.Token alone here would hand the caller an
+// authenticated-looking result with nothing verified behind it.
+func TestExchangeAndVerify_RejectsResponseWithoutIDToken(t *testing.T) {
+	idp := newMockIDP(t, "my-client")
+	idp.setOmitIDToken()
+	p, err := NewProviderWithContext(context.Background(), Config{
+		IssuerURL:           idp.server.URL,
+		ClientID:            "my-client",
+		ClientSecret:        "my-secret",
+		AllowInsecureIssuer: true, // idp.server is a plain httptest.NewServer, not TLS
+	})
+	if err != nil {
+		t.Fatalf("NewProviderWithContext: %v", err)
+	}
+
+	tok, idToken, err := p.ExchangeAndVerify(context.Background(), "auth-code",
+		CallbackSession{Nonce: "n", CodeVerifier: "v"})
+	if err == nil {
+		t.Fatal("expected an error for a token response with no id_token")
+	}
+	// Without the explicit check the empty string is handed to the verifier,
+	// which also fails — but with a signature/parse error that tells an operator
+	// nothing about the actual fault. Pin the diagnosis, not just the refusal.
+	if !strings.Contains(err.Error(), "no id_token") {
+		t.Errorf("error = %v, want it to name the missing id_token", err)
+	}
+	if tok != nil || idToken != nil {
+		t.Errorf("got (%v, %v), want (nil, nil)", tok, idToken)
+	}
+}
+
+func TestExchangeAndVerify_NonceMismatch(t *testing.T) {
 	idp := newMockIDP(t, "my-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
 		IssuerURL:           idp.server.URL,
@@ -579,31 +694,25 @@ func TestVerifyIDToken_NonceMismatch(t *testing.T) {
 	}
 
 	idp.setNonce("server-nonce")
-	tok, err := p.ExchangeCode(context.Background(), "auth-code")
-	if err != nil {
-		t.Fatalf("ExchangeCode: %v", err)
-	}
-	rawID, _ := tok.Extra("id_token").(string)
 
-	// A mismatched nonce must fail verification.
-	if _, err := p.VerifyIDToken(context.Background(), rawID, WithExpectedNonce("different-nonce")); err == nil {
+	// A token minted for a DIFFERENT login must not be accepted for this one.
+	if _, _, err := p.ExchangeAndVerify(context.Background(), "auth-code",
+		CallbackSession{Nonce: "different-nonce", CodeVerifier: "v"}); err == nil {
 		t.Fatal("expected an error for a nonce mismatch")
-	}
-
-	// A token that carries a nonce claim must not be accepted without an
-	// expected nonce to check it against (issue #104): silently skipping the
-	// check here would drop the nonce binding for a login that requested one.
-	if _, err := p.VerifyIDToken(context.Background(), rawID); err == nil {
-		t.Fatal("expected an error verifying a nonce-bearing token without WithExpectedNonce")
 	}
 }
 
-func TestVerifyIDToken_NoNonceClaimSucceedsWithoutExpectation(t *testing.T) {
-	// The fully-legacy GetAuthURL flow never requests a nonce, so the resulting
-	// ID token carries no nonce claim at all. There is nothing to bind in that
-	// case, so verification without WithExpectedNonce must still succeed —
-	// only a token that DOES carry a nonce claim requires the caller to check
-	// it (see TestVerifyIDToken_NonceMismatch).
+// TestExchangeAndVerify_RejectsIDTokenWithoutNonce pins the consequence of
+// deleting the legacy no-nonce flow. GetAuthURL (which never requested a
+// nonce) and the optionless VerifyIDToken (which accepted a token that carried
+// none) were removed together in v0.25.0: every authorization request this
+// package can now build carries a nonce, so an ID token that comes back
+// WITHOUT one means the identity provider dropped the binding, and the only
+// safe reading of that is failure.
+//
+// Under the removed API this same shape was an explicit success case
+// (TestVerifyIDToken_NoNonceClaimSucceedsWithoutExpectation).
+func TestExchangeAndVerify_RejectsIDTokenWithoutNonce(t *testing.T) {
 	idp := newMockIDP(t, "my-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
 		IssuerURL:           idp.server.URL,
@@ -615,14 +724,10 @@ func TestVerifyIDToken_NoNonceClaimSucceedsWithoutExpectation(t *testing.T) {
 		t.Fatalf("NewProviderWithContext: %v", err)
 	}
 
-	tok, err := p.ExchangeCode(context.Background(), "auth-code")
-	if err != nil {
-		t.Fatalf("ExchangeCode: %v", err)
-	}
-	rawID, _ := tok.Extra("id_token").(string)
-
-	if _, err := p.VerifyIDToken(context.Background(), rawID); err != nil {
-		t.Errorf("VerifyIDToken for a no-nonce token without an expectation: %v", err)
+	// idp.setNonce is never called, so the minted ID token carries no nonce.
+	if _, _, err := p.ExchangeAndVerify(context.Background(), "auth-code",
+		CallbackSession{Nonce: "expected-nonce", CodeVerifier: "v"}); err == nil {
+		t.Fatal("expected an error for an ID token that carries no nonce claim")
 	}
 }
 
@@ -640,6 +745,8 @@ type mockIDP struct {
 	mu               sync.Mutex
 	lastCodeVerifier string
 	nonce            string
+	omitIDToken      bool
+	tokenRequests    int
 }
 
 func newMockIDP(t *testing.T, clientID string) *mockIDP {
@@ -681,15 +788,20 @@ func newMockIDP(t *testing.T, clientID string) *mockIDP {
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		idp.mu.Lock()
+		idp.tokenRequests++
 		idp.lastCodeVerifier = r.FormValue("code_verifier")
 		nonce := idp.nonce
+		omit := idp.omitIDToken
 		idp.mu.Unlock()
 
-		writeTestJSON(w, map[string]any{
+		body := map[string]any{
 			"access_token": "test-access-token",
 			"token_type":   "Bearer",
-			"id_token":     idp.mintIDToken(t, nonce),
-		})
+		}
+		if !omit {
+			body["id_token"] = idp.mintIDToken(t, nonce)
+		}
+		writeTestJSON(w, body)
 	})
 
 	return idp
@@ -699,6 +811,26 @@ func (idp *mockIDP) setNonce(n string) {
 	idp.mu.Lock()
 	defer idp.mu.Unlock()
 	idp.nonce = n
+}
+
+// setOmitIDToken makes the token endpoint answer with a valid OAuth2 token
+// response that carries no id_token — an OAuth2-only provider, or an OIDC one
+// misconfigured to drop the claim.
+func (idp *mockIDP) setOmitIDToken() {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	idp.omitIDToken = true
+}
+
+// tokenRequestCount reports how many times the token endpoint was called. It
+// is what distinguishes "refused before any network call" from "reached the
+// identity provider and failed afterwards" — the two are indistinguishable by
+// the returned error alone, and only the first is the guarantee
+// ExchangeAndVerify makes.
+func (idp *mockIDP) tokenRequestCount() int {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	return idp.tokenRequests
 }
 
 func (idp *mockIDP) codeVerifier() string {
@@ -780,9 +912,9 @@ func verifiedIDToken(t *testing.T, extra jwt.MapClaims) *oidcpkg.IDToken {
 		t.Fatalf("NewProviderWithContext: %v", err)
 	}
 	raw := idp.mintIDTokenWithClaims(t, extra)
-	idToken, err := p.VerifyIDToken(context.Background(), raw)
+	idToken, err := p.verifier.Verify(context.Background(), raw)
 	if err != nil {
-		t.Fatalf("VerifyIDToken: %v", err)
+		t.Fatalf("verify ID token: %v", err)
 	}
 	return idToken
 }

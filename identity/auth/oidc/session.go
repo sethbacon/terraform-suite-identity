@@ -17,8 +17,10 @@ import (
 //
 // There is nothing here the caller must remember to persist. The nonce and
 // PKCE verifier for this login are stored server-side against State and come
-// back from CompleteAuthSession — unlike BeginAuth, where forgetting to
-// persist them silently drops both bindings.
+// back from CompleteAuthSession — unlike BeginAuth, where the caller owns that
+// storage. (Since v0.25.0 a caller that loses them cannot silently complete an
+// unbound exchange either way: ExchangeAndVerify rejects an empty binding. What
+// this path removes is the storage responsibility, not just the failure mode.)
 type AuthSession struct {
 	// URL is the authorization endpoint URL to redirect the user agent to.
 	URL string
@@ -29,16 +31,26 @@ type AuthSession struct {
 	State string
 }
 
-// CallbackSession is the result of CompleteAuthSession — everything the
-// callback needs, all of it read from server-side storage rather than from the
-// callback request.
+// CallbackSession carries the two per-login bindings that ExchangeAndVerify
+// requires — the OIDC nonce and the PKCE code verifier — plus, on the
+// BeginAuthSession path, the caller's own opaque payload.
+//
+// It is produced by CompleteAuthSession (which reads it from server-side
+// storage) and by BeginAuth (as AuthChallenge.Session, for a caller that owns
+// its own store). Either way it is handed BACK to ExchangeAndVerify as a single
+// value: the bindings are not separately applicable, so there is no individual
+// one to forget. The JSON tags exist so a caller persisting it in its own state
+// store round-trips both fields together.
 type CallbackSession struct {
 	// Payload is the opaque payload handed to BeginAuthSession, byte for byte.
-	Payload []byte
-	// Nonce must be passed to VerifyIDToken via WithExpectedNonce.
-	Nonce string
-	// CodeVerifier must be passed to ExchangeCode via WithPKCEVerifier.
-	CodeVerifier string
+	// It is empty on the BeginAuth path, which stores nothing of the caller's.
+	Payload []byte `json:"payload,omitempty"`
+	// Nonce binds the ID token to this login. ExchangeAndVerify rejects an
+	// empty value.
+	Nonce string `json:"nonce"`
+	// CodeVerifier proves possession of the authorization request.
+	// ExchangeAndVerify rejects an empty value.
+	CodeVerifier string `json:"code_verifier"`
 }
 
 // sessionEnvelope is what this package stores in the opaque oauthstate
@@ -102,9 +114,9 @@ func (p *Provider) BeginAuthSession(ctx context.Context, states *oauthstate.Mana
 }
 
 // CompleteAuthSession verifies the state returned to the callback, consuming
-// it exactly once, and returns the payload plus the nonce and PKCE verifier
-// stored for this login. Pass those to ExchangeCode (WithPKCEVerifier) and
-// VerifyIDToken (WithExpectedNonce).
+// it exactly once, and returns the caller's payload together with the bindings
+// stored for this login. Pass the returned CallbackSession straight to
+// ExchangeAndVerify, which applies both bindings itself.
 //
 // purpose must be the same value BeginAuthSession was given, reconstructed
 // from the callback's own context — its route parameter, its configured

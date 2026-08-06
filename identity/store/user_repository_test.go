@@ -289,25 +289,6 @@ func TestListUsers_Empty(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// List (simple paginated list)
-// ---------------------------------------------------------------------------
-
-func TestList_Success(t *testing.T) {
-	repo, mock := newUserRepo(t)
-
-	mock.ExpectQuery("SELECT.*FROM users.*ORDER BY").
-		WillReturnRows(sampleUserRow())
-
-	users, err := repo.List(context.Background(), 20, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(users) != 1 {
-		t.Errorf("len(users) = %d, want 1", len(users))
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Count
 // ---------------------------------------------------------------------------
 
@@ -848,135 +829,28 @@ func TestGetUserWithOrgRoles_WithMemberships(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Create / Update / Delete delegate aliases
+// GetOrCreateUserFromOIDC — initial-lookup failure
 // ---------------------------------------------------------------------------
 
-func TestCreate_Delegate(t *testing.T) {
-	repo, mock := newUserRepo(t)
-	user := &models.User{ID: "user-1", Email: "a@b.com", Name: "Alice"}
-	mock.ExpectExec("INSERT INTO users").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	if err := repo.Create(context.Background(), user); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestUpdate_Delegate(t *testing.T) {
-	repo, mock := newUserRepo(t)
-	user := &models.User{ID: "user-1", Email: "a@b.com", Name: "Alice"}
-	mock.ExpectExec("UPDATE users SET").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	if err := repo.Update(context.Background(), user); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestDelete_Delegate(t *testing.T) {
-	repo, mock := newUserRepo(t)
-	mock.ExpectExec("DELETE FROM users WHERE id").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	if err := repo.Delete(context.Background(), "user-1"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// GetOrCreateUserByOIDC (alias for GetOrCreateUserFromOIDC)
-// ---------------------------------------------------------------------------
-
-func TestGetOrCreateUserByOIDC_ExistingUser(t *testing.T) {
-	repo, mock := newUserRepo(t)
-	// GetUserByOIDCSub returns existing user
-	mock.ExpectQuery("SELECT.*FROM users WHERE oidc_sub").
-		WithArgs("sub-123").
-		WillReturnRows(sampleUserRow())
-
-	u, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-123", "alice@example.com", "Alice", true)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if u == nil {
-		t.Fatal("expected user, got nil")
-	}
-}
-
-func TestGetOrCreateUserByOIDC_ExistingUserUpdateNeeded(t *testing.T) {
-	repo, mock := newUserRepo(t)
-	// Return user with different name
-	oidcSub := "sub-123"
-	mock.ExpectQuery("SELECT.*FROM users WHERE oidc_sub").
-		WithArgs("sub-123").
-		WillReturnRows(sqlmock.NewRows(userCols).
-			AddRow("user-1", "old@example.com", "OldName", &oidcSub, time.Now(), time.Now()))
-	// UpdateUser called because email/name differ
-	mock.ExpectExec("UPDATE users SET").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	u, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-123", "new@example.com", "NewName", true)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if u == nil {
-		t.Fatal("expected user, got nil")
-	}
-}
-
-func TestGetOrCreateUserByOIDC_NewUser(t *testing.T) {
-	repo, mock := newUserRepo(t)
-	// GetUserByOIDCSub returns no rows
-	mock.ExpectQuery("SELECT.*FROM users WHERE oidc_sub").
-		WillReturnRows(sqlmock.NewRows(userCols))
-	// Email lookup also finds no user (no pre-provisioned user)
-	mock.ExpectQuery("SELECT.*FROM users.*WHERE email").
-		WithArgs("new@example.com").
-		WillReturnRows(sqlmock.NewRows(userCols))
-	// CreateUser
-	mock.ExpectExec("INSERT INTO users").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	u, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-new", "new@example.com", "New User", true)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if u == nil {
-		t.Fatal("expected user, got nil")
-	}
-}
-
-func TestGetOrCreateUserByOIDC_OIDCLookupError(t *testing.T) {
+// TestGetOrCreateUserFromOIDC_OIDCLookupError pins that a DB error on the FIRST
+// lookup (by oidc_sub) propagates instead of being absorbed as "no such user"
+// and falling through to the link/create paths — a transient fault must not
+// take a returning user down the account-creation path.
+//
+// This case previously existed only against the removed GetOrCreateUserByOIDC
+// alias; it is re-pointed at the canonical name rather than deleted, since the
+// canonical method had no equivalent case of its own.
+func TestGetOrCreateUserFromOIDC_OIDCLookupError(t *testing.T) {
 	repo, mock := newUserRepo(t)
 	mock.ExpectQuery("SELECT.*FROM users WHERE oidc_sub").
 		WillReturnError(errDB)
 
-	_, err := repo.GetOrCreateUserByOIDC(context.Background(), "sub-123", "a@b.com", "Alice", true)
-	if err == nil {
-		t.Error("expected error")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ListUsersWithRoles (deprecated alias for ListUsers)
-// ---------------------------------------------------------------------------
-
-func TestListUsersWithRoles_Success(t *testing.T) {
-	repo, mock := newUserRepo(t)
-	mock.ExpectQuery("SELECT COUNT.*FROM users").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery("SELECT.*FROM users").
-		WillReturnRows(sampleUserRow())
-
-	users, total, err := repo.ListUsersWithRoles(context.Background(), 20, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if total != 1 {
-		t.Errorf("total = %d, want 1", total)
-	}
-	if len(users) != 1 {
-		t.Errorf("len = %d, want 1", len(users))
+	_, err := repo.GetOrCreateUserFromOIDC(context.Background(), "sub-123", "a@b.com", "Alice", true)
+	if !errors.Is(err, errDB) {
+		// "some error came back" is not the assertion: absorbing the fault here
+		// and falling through to the email lookup also produces an error — a
+		// DIFFERENT one, from a query this login should never have reached.
+		t.Errorf("err = %v, want the oidc_sub lookup's own failure (errDB)", err)
 	}
 }
 

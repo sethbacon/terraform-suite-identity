@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sethbacon/terraform-suite-identity/identity/auth"
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 )
 
@@ -204,8 +205,16 @@ func (r *OrganizationRepository) GetByID(ctx context.Context, id string) (*model
 	return org, nil
 }
 
-// CreateOrganization creates a new organization
-func (r *OrganizationRepository) CreateOrganization(ctx context.Context, org *models.Organization) error {
+// Create creates a new organization, filling org.ID/CreatedAt/UpdatedAt from
+// the row the database returns.
+//
+// This is the canonical name for the operation. Until v0.25.0 the same insert
+// was reachable as both Create and CreateOrganization; the short name survives
+// because every sibling organization-entity operation on this repository —
+// GetByID, GetByName, Update, Rename, Delete, List, Count, Search — is
+// short-named, so keeping CreateOrganization would have left the receiver with
+// one entity-suffixed outlier.
+func (r *OrganizationRepository) Create(ctx context.Context, org *models.Organization) error {
 	query := `
 		INSERT INTO organizations (name, display_name)
 		VALUES ($1, $2)
@@ -228,7 +237,17 @@ func (r *OrganizationRepository) CreateOrganization(ctx context.Context, org *mo
 
 // === Organization Membership Operations ===
 
-// AddMemberWithRoleTemplate adds a user to an organization with the specified role template
+// AddMemberWithRoleTemplate adds a user to an organization with the specified
+// role template, stamping created_at from the DATABASE clock (NOW()).
+//
+// This is the canonical add-member operation. A second exported name for it,
+// AddMember(*models.OrganizationMember), was removed in v0.25.0. The two were
+// NOT equivalent: AddMember inserted member.CreatedAt verbatim, so a caller that
+// built the struct without setting that field wrote a membership dated
+// 0001-01-01 — a silently wrong audit timestamp on a privilege grant, produced
+// by the zero value rather than by any explicit decision. Collapsing onto this
+// signature makes the server clock the only source of a membership's creation
+// time.
 func (r *OrganizationRepository) AddMemberWithRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string) error {
 	query := `
 		INSERT INTO organization_members (organization_id, user_id, role_template_id, created_at)
@@ -289,6 +308,10 @@ func (r *OrganizationRepository) RemoveMember(ctx context.Context, orgID, userID
 // Returns an error wrapping ErrNotFound when that user is not a member of that
 // organization. A privilege change reported as applied when it matched no row
 // is the same defect as a revocation that revokes nothing.
+//
+// This is the canonical name. UpdateMember(*models.OrganizationMember), which
+// delegated here, was removed in v0.25.0: it accepted a whole membership struct
+// but wrote only RoleTemplateID, so its name promised more than it did.
 func (r *OrganizationRepository) UpdateMemberRoleTemplate(ctx context.Context, orgID, userID string, roleTemplateID *string) error {
 	query := `
 		UPDATE organization_members
@@ -378,7 +401,12 @@ func (r *OrganizationRepository) ListMembers(ctx context.Context, orgID string) 
 	return members, rows.Err()
 }
 
-// GetUserOrganizations retrieves all organizations a user belongs to
+// GetUserOrganizations retrieves all organizations a user belongs to.
+//
+// This is the canonical name; the ListUserOrganizations alias was removed in
+// v0.25.0. "Get" matches this repository's other user-axis accessors
+// (GetUserMemberships, GetUserCombinedScopes, GetUserScopesForOrg), where
+// "List" is reserved for the organization-axis pagination (List, ListMembers).
 func (r *OrganizationRepository) GetUserOrganizations(ctx context.Context, userID string) ([]*models.Organization, error) {
 	query := `
 		SELECT o.id, o.name, o.display_name, o.idp_type, o.idp_name, o.created_at, o.updated_at
@@ -459,11 +487,6 @@ func (r *OrganizationRepository) GetMemberWithRole(ctx context.Context, orgID, u
 	}
 
 	return member, nil
-}
-
-// Create is an alias for CreateOrganization to match admin handlers
-func (r *OrganizationRepository) Create(ctx context.Context, org *models.Organization) error {
-	return r.CreateOrganization(ctx, org)
 }
 
 // Update updates an organization.
@@ -608,36 +631,6 @@ func (r *OrganizationRepository) Search(ctx context.Context, query string, limit
 	return orgs, rows.Err()
 }
 
-// ListUserOrganizations is an alias for GetUserOrganizations
-func (r *OrganizationRepository) ListUserOrganizations(ctx context.Context, userID string) ([]*models.Organization, error) {
-	return r.GetUserOrganizations(ctx, userID)
-}
-
-// AddMember with models.OrganizationMember parameter
-func (r *OrganizationRepository) AddMember(ctx context.Context, member *models.OrganizationMember) error {
-	query := `
-		INSERT INTO organization_members (organization_id, user_id, role_template_id, created_at)
-		VALUES ($1, $2, $3, $4)
-	`
-
-	_, err := r.db.ExecContext(ctx, query,
-		member.OrganizationID,
-		member.UserID,
-		member.RoleTemplateID,
-		member.CreatedAt,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to add member: %w", err)
-	}
-
-	return nil
-}
-
-// UpdateMember updates a member's information
-func (r *OrganizationRepository) UpdateMember(ctx context.Context, member *models.OrganizationMember) error {
-	return r.UpdateMemberRoleTemplate(ctx, member.OrganizationID, member.UserID, member.RoleTemplateID)
-}
-
 // ListMembersWithUsers retrieves all members of an organization with user details and role template info
 func (r *OrganizationRepository) ListMembersWithUsers(ctx context.Context, orgID string) ([]*models.OrganizationMemberWithUser, error) {
 	// See membership.go for the shared query constant and scan helper.
@@ -708,10 +701,15 @@ func (r *OrganizationRepository) GetUserMemberships(ctx context.Context, userID 
 // applies across every organization); it must never stand in for a per-org
 // authorization check.
 //
-// Deprecated: prefer GetUserScopesForOrg for any per-organization authorization
-// decision; see the warning above for the narrow legitimate use this is
-// retained for.
-func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, userID string) ([]string, error) {
+// The return type is auth.GlobalScopes rather than []string, which is what
+// enforces the paragraph above rather than merely stating it:
+// auth.TokenManager.GenerateForOrg takes auth.OrgScopes, so this cross-org union
+// cannot reach an org-BOUND token — the token shape HasScopeInOrg trusts — without
+// an explicit auth.OrgScopes(...) conversion that is greppable and reviewable.
+// This accessor is NOT marked deprecated: it is the only accessor for the
+// suite-wide union, both consumers use it deliberately, and a deprecation
+// marker on a method with no replacement is a warning rather than a remedy.
+func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, userID string) (auth.GlobalScopes, error) {
 	memberships, err := r.GetUserMemberships(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -726,7 +724,7 @@ func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, user
 	}
 
 	// Convert map to slice
-	scopes := make([]string, 0, len(scopeMap))
+	scopes := make(auth.GlobalScopes, 0, len(scopeMap))
 	for scope := range scopeMap {
 		scopes = append(scopes, scope)
 	}
@@ -755,10 +753,14 @@ func (r *OrganizationRepository) GetUserCombinedScopes(ctx context.Context, user
 // auth.HasAnyScopeInOrg / auth.HasAllScopesInOrg to check it, so the org binding
 // is enforceable from the token itself. See the doc on GetUserCombinedScopes for
 // why that global accessor must not be used for this purpose.
-func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID, orgID string) ([]string, error) {
+//
+// The return type is auth.OrgScopes, the type auth.TokenManager.GenerateForOrg
+// accepts, so the org-scoped path type-checks end to end while the
+// cross-organization union (auth.GlobalScopes) does not.
+func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID, orgID string) (auth.OrgScopes, error) {
 	member, err := r.GetMemberWithRole(ctx, orgID, userID)
 	if errors.Is(err, ErrNotFound) {
-		return []string{}, nil
+		return auth.OrgScopes{}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -771,7 +773,7 @@ func (r *OrganizationRepository) GetUserScopesForOrg(ctx context.Context, userID
 		scopeMap[scope] = true
 	}
 
-	scopes := make([]string, 0, len(scopeMap))
+	scopes := make(auth.OrgScopes, 0, len(scopeMap))
 	for scope := range scopeMap {
 		scopes = append(scopes, scope)
 	}

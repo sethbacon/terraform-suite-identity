@@ -8,7 +8,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 )
@@ -26,7 +25,7 @@ func newRoleTemplateRepo(t *testing.T) (*RoleTemplateRepository, sqlmock.Sqlmock
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return NewRoleTemplateRepository(sqlx.NewDb(db, "sqlmock")), mock
+	return NewRoleTemplateRepository(db), mock
 }
 
 func sampleRoleTemplateRow() *sqlmock.Rows {

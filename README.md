@@ -80,14 +80,20 @@ scope *contents*, and each app seeds its own scopes onto `role_templates` at set
   already says "nothing matched" in band — both still propagate a real failure, so a
   database fault can never read as "not a member".
 - **Multi-org by default** — `UserWithOrgRoles` aggregates scopes across all memberships.
-  **`GetAllowedScopes`/`GetUserCombinedScopes` (both marked `Deprecated:` in code) union
-  those scopes into one flat, GLOBAL set
+  **`GetAllowedScopes`/`GetUserCombinedScopes` union those scopes into one flat, GLOBAL set
   with no per-organization qualifier — do not feed that set into a JWT (or any other
   authorization decision) as "what the user can do" for a specific organization**, since a
   role in one organization would silently authorize an action in another. Use
   `GetScopesForOrg`/`GetUserScopesForOrg` plus `auth.TokenManager.GenerateForOrg` and
   `auth.HasScopeInOrg` instead whenever the decision is scoped to a single organization —
   see the [Auth](#auth) section below.
+  Since v0.25.0 the two sets are **distinct types** rather than two `[]string`s carrying a
+  warning: the global accessors return `auth.GlobalScopes`, the per-org accessors return
+  `auth.OrgScopes`, and `GenerateForOrg` takes only the latter. Minting an org-bound token
+  from a cross-org union therefore does not compile without an explicit
+  `auth.OrgScopes(...)` conversion. (A plain `[]string` literal still satisfies either
+  parameter; the barrier is between the two library-produced sets, which is where the
+  mistake arises.)
 
 ## Installation
 
@@ -157,16 +163,18 @@ apiKeyRepo := store.NewAPIKeyRepository(db)
 tokenRepo  := store.NewTokenRepository(db) // revoked_tokens
 ```
 
-Most repositories take a `*sql.DB`, but `RoleTemplateRepository` and
-`OIDCConfigRepository` take a `*sqlx.DB`. Wrap the same connection with
-`sqlx.NewDb(db, "postgres")` for those two:
+Every repository takes the same `*sql.DB` — including `RoleTemplateRepository` and
+`OIDCConfigRepository`, which used `sqlx` internally and demanded a `*sqlx.DB` from the
+caller until v0.25.0:
 
 ```go
-sqlxDB := sqlx.NewDb(db, "postgres") // db is the *sql.DB from above
-
-roleRepo := store.NewRoleTemplateRepository(sqlxDB)
-oidcRepo := store.NewOIDCConfigRepository(sqlxDB)
+roleRepo := store.NewRoleTemplateRepository(db)
+oidcRepo := store.NewOIDCConfigRepository(db)
 ```
+
+Those two still scan through `sqlx`'s db-tagged structs; they now wrap the pool you hand
+them (`sqlx.NewDb` adorns an existing `*sql.DB`, it does not open a second one) instead of
+making every consumer construct and thread two handle types for one identity layer.
 
 ### Auth
 
@@ -183,11 +191,13 @@ ok := auth.HasScope(userScopes, auth.ScopeUsersRead,
 // Note both parameters are strings here; NewCoupledTokenManager below takes []byte.
 tm := auth.NewTokenManager(secret, "terraform-registry")
 
-// GLOBAL (org-less) token: `scopes` here is typically a flat union across every
-// organization the user belongs to (e.g. GetUserCombinedScopes/GetAllowedScopes).
-// Only appropriate for a deliberately suite-wide, org-independent decision —
-// see the warning on Generate and the "Multi-org by default" note above.
-token, _ := tm.Generate(userID, email, scopes, 24*time.Hour)
+// GLOBAL (org-less) token: `scopes` is auth.GlobalScopes, the flat union across
+// every organization the user belongs to (GetUserCombinedScopes/GetAllowedScopes
+// return exactly that type). Only appropriate for a deliberately suite-wide,
+// org-independent decision — see the warning on Generate and the "Multi-org by
+// default" note above.
+globalScopes, _ := orgRepo.GetUserCombinedScopes(ctx, userID) // auth.GlobalScopes
+token, _ := tm.Generate(userID, email, globalScopes, 24*time.Hour)
 claims, _ := tm.Validate(token) // tries current then previous secret (rotation)
 
 // Org-scoped token (preferred for any multi-tenant, per-resource authorization):
@@ -288,9 +298,9 @@ redirectUser(sess.URL)
 // Callback: the state is verified and consumed once, and hands back everything the
 // callback needs — none of it read from the request.
 cb, err := prov.CompleteAuthSession(ctx, states, "oidc-login", r.FormValue("state"))
-token, _ := prov.ExchangeCode(ctx, code, identityoidc.WithPKCEVerifier(cb.CodeVerifier))
-rawIDToken := token.Extra("id_token").(string)
-idToken, err := prov.VerifyIDToken(ctx, rawIDToken, identityoidc.WithExpectedNonce(cb.Nonce))
+// One call exchanges the code AND verifies the ID token, applying this login's
+// PKCE verifier and nonce itself. There is no option to pass and none to forget.
+token, idToken, err := prov.ExchangeAndVerify(ctx, code, cb)
 // cb.Payload is your bytes, byte for byte.
 ```
 
@@ -303,10 +313,22 @@ before writing and open after reading; the key stays yours.
 
 **Use `BeginAuthSession`/`CompleteAuthSession` for new integrations.** `BeginAuth` is
 still correct and supported — it is the right entry point for an app that already owns a
-store-and-consume state — but the caller then owns the state's entropy, storage and
-single use, plus persisting the nonce and PKCE verifier. The legacy pair,
-`GetAuthURL`/`VerifyIDToken` called with no options, provides **no nonce or PKCE
-protection** and exists only for backward compatibility.
+store-and-consume state, which both suite consumers do, since their state stores also
+carry SAML and SCM flows this package never sees. What `BeginAuth` costs you is ownership
+of the state's entropy, storage and single use, plus persisting
+`AuthChallenge.Session`; what it does NOT cost you is either binding, because both begin
+paths hand back the same `CallbackSession` and `ExchangeAndVerify` is the only way to
+redeem it.
+
+**There is exactly one way to complete an exchange.** v0.25.0 deleted `GetAuthURL` (a bare
+authorization URL with no nonce and no PKCE challenge), and deleted `ExchangeCode`,
+`VerifyIDToken` and the `WithPKCEVerifier`/`WithExpectedNonce` options they took. Under
+that API, omitting `WithPKCEVerifier` compiled cleanly and sent a token request with no
+`code_verifier` at all, leaving the outcome to the identity provider's strictness. Adding
+`ExchangeAndVerify` beside it would have left the omittable path in place for whoever
+reached for it first, so the omittable path was removed instead: `ExchangeAndVerify` takes
+the whole `CallbackSession` and rejects one with an empty nonce or code verifier before it
+makes any network call.
 
 ### OAuth state
 

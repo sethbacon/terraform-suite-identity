@@ -273,21 +273,6 @@ func TestGetMember_NotFound(t *testing.T) {
 	}
 }
 
-func TestAddMember_Success(t *testing.T) {
-	repo, mock := newOrgRepo(t)
-	mock.ExpectExec("INSERT INTO organization_members").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	member := &models.OrganizationMember{
-		OrganizationID: "org-1",
-		UserID:         "user-2",
-		CreatedAt:      time.Now(),
-	}
-	if err := repo.AddMember(context.Background(), member); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestRemoveMember_Success(t *testing.T) {
 	repo, mock := newOrgRepo(t)
 	mock.ExpectExec("DELETE FROM organization_members").
@@ -338,7 +323,7 @@ func TestListMembersWithUsers_WithMember(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// GetUserOrganizations / ListUserOrganizations
+// GetUserOrganizations
 // ---------------------------------------------------------------------------
 
 func TestGetUserOrganizations_Success(t *testing.T) {
@@ -356,19 +341,19 @@ func TestGetUserOrganizations_Success(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// UpdateMember
+// UpdateMemberRoleTemplate
 // ---------------------------------------------------------------------------
 
-func TestUpdateMember_Success(t *testing.T) {
+// Re-pointed from the removed UpdateMember(*models.OrganizationMember) alias,
+// which delegated here. The struct-taking name promised a whole-member update
+// and delivered a role-template-only one, so the explicit signature is the one
+// that survives.
+func TestUpdateMemberRoleTemplate_Success(t *testing.T) {
 	repo, mock := newOrgRepo(t)
 	mock.ExpectExec("UPDATE organization_members").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	member := &models.OrganizationMember{
-		OrganizationID: "org-1",
-		UserID:         "user-1",
-	}
-	if err := repo.UpdateMember(context.Background(), member); err != nil {
+	if err := repo.UpdateMemberRoleTemplate(context.Background(), "org-1", "user-1", nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -600,31 +585,18 @@ func TestCheckMembership_IsMember(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ListUserOrganizations (alias for GetUserOrganizations)
+// GetUserOrganizations — failure path
 // ---------------------------------------------------------------------------
 
-var userOrgCols = []string{"id", "name", "display_name", "idp_type", "idp_name", "created_at", "updated_at"}
-
-func TestListUserOrganizations_Success(t *testing.T) {
-	repo, mock := newOrgRepo(t)
-	mock.ExpectQuery("SELECT.*FROM organizations.*organization_members").
-		WillReturnRows(sqlmock.NewRows(userOrgCols).AddRow("org-1", "default", "Default Org", nil, nil, time.Now(), time.Now()))
-
-	orgs, err := repo.ListUserOrganizations(context.Background(), "user-1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(orgs) != 1 {
-		t.Errorf("len = %d, want 1", len(orgs))
-	}
-}
-
-func TestListUserOrganizations_DBError(t *testing.T) {
+// Re-pointed from the removed ListUserOrganizations alias, whose test set was
+// the only one covering this accessor's query-error path; the canonical name
+// had a success case only.
+func TestGetUserOrganizations_DBError(t *testing.T) {
 	repo, mock := newOrgRepo(t)
 	mock.ExpectQuery("SELECT.*FROM organizations.*organization_members").
 		WillReturnError(errDB)
 
-	_, err := repo.ListUserOrganizations(context.Background(), "user-1")
+	_, err := repo.GetUserOrganizations(context.Background(), "user-1")
 	if err == nil {
 		t.Error("expected error")
 	}

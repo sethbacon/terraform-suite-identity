@@ -25,9 +25,13 @@ type OIDCConfigRepository struct {
 	db *sqlx.DB
 }
 
-// NewOIDCConfigRepository creates a new OIDC configuration repository.
-func NewOIDCConfigRepository(db *sqlx.DB) *OIDCConfigRepository {
-	return &OIDCConfigRepository{db: db}
+// NewOIDCConfigRepository creates a new OIDC configuration repository over the
+// same *sql.DB every other repository in this package takes. sqlx's struct
+// scanning is used internally (see GetContext/SelectContext below) but is no
+// longer part of the constructor's contract — see sqlxdb.go for why that
+// changed in v0.25.0.
+func NewOIDCConfigRepository(db *sql.DB) *OIDCConfigRepository {
+	return &OIDCConfigRepository{db: newSqlxDB(db)}
 }
 
 // createOIDCConfigInsertQuery is the shared INSERT statement used by both the
