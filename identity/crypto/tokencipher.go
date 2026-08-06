@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -28,7 +29,28 @@ var (
 	ErrDecryptionFailed = errors.New("crypto: decryption operation failed")
 	// ErrSaltTooShort is returned when the provided salt is fewer than 16 bytes, which would weaken PBKDF2 key derivation.
 	ErrSaltTooShort = errors.New("crypto: salt must be at least 16 bytes")
+	// ErrIterationsTooLow is returned when a caller asks DeriveTokenCipher for
+	// fewer than MinPBKDF2Iterations rounds. It is an ERROR rather than a silent
+	// upgrade: a caller that named a weak work factor has a belief about the
+	// cost of its own key derivation, and quietly deriving with a different one
+	// leaves that belief in place.
+	ErrIterationsTooLow = errors.New("crypto: PBKDF2 iterations below the minimum work factor")
 )
+
+// MinPBKDF2Iterations is the lowest PBKDF2-HMAC-SHA256 work factor
+// DeriveTokenCipher will accept, matching current OWASP guidance (600,000).
+//
+// The previous guard read `if iterations < 10000 { iterations = 100000 }`,
+// which was effectively inverted: a caller passing 1 was silently upgraded to a
+// reasonable 100,000, while a caller passing exactly 10,000 was honoured as-is.
+// The weakest value the API actually accepted was therefore an order of
+// magnitude below guidance, and it was reachable ONLY by a caller who had
+// thought about the number — the opposite of the intended failure mode.
+const MinPBKDF2Iterations = 600000
+
+// DefaultPBKDF2Iterations is the work factor DeriveTokenCipher uses when the
+// caller expresses no preference (iterations <= 0).
+const DefaultPBKDF2Iterations = 600000
 
 // TokenCipher encrypts and decrypts sensitive token data.
 // It supports dual-key decryption for zero-downtime key rotation:
@@ -72,13 +94,21 @@ func NewTokenCipherWithPrevious(currentKey, previousKey []byte) (*TokenCipher, e
 	return tc, nil
 }
 
-// DeriveTokenCipher creates a cipher by deriving a key from a passphrase
+// DeriveTokenCipher creates a cipher by deriving a key from a passphrase.
+//
+// iterations <= 0 means "no preference" and uses DefaultPBKDF2Iterations. Any
+// other value below MinPBKDF2Iterations is REJECTED with ErrIterationsTooLow
+// rather than silently rewritten — see MinPBKDF2Iterations for why the previous
+// silent-upgrade guard let the weakest accepted value through.
 func DeriveTokenCipher(passphrase string, salt []byte, iterations int) (*TokenCipher, error) {
 	if len(salt) < 16 {
 		return nil, ErrSaltTooShort
 	}
-	if iterations < 10000 {
-		iterations = 100000 // Secure default
+	if iterations <= 0 {
+		iterations = DefaultPBKDF2Iterations
+	}
+	if iterations < MinPBKDF2Iterations {
+		return nil, fmt.Errorf("%w: got %d, minimum is %d", ErrIterationsTooLow, iterations, MinPBKDF2Iterations)
 	}
 	derivedKey := pbkdf2.Key([]byte(passphrase), salt, iterations, 32, sha256.New)
 	return NewTokenCipher(derivedKey)

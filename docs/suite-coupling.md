@@ -57,7 +57,7 @@ type Manifest struct {
     App           string            `json:"app"`           // "terraform-registry"
     Version       string            `json:"version"`       // semver of the running build
     BuildDate     string            `json:"buildDate,omitempty"`
-    PublicURL     string            `json:"publicUrl,omitempty"`
+    PublicURL     UntrustedURL      `json:"publicUrl,omitempty"` // sibling-asserted; see "Trust" below
     Identity      IdentityInfo      `json:"identity"`
     Capabilities  []Capability      `json:"capabilities,omitempty"`
     Links         map[string]string `json:"links,omitempty"`
@@ -87,6 +87,62 @@ A registry manifest looks like:
   "links": { "moduleDetail": "/modules/{namespace}/{name}/{system}" }
 }
 ```
+
+### Trust: every field of a *received* manifest is untrusted input
+
+A `Manifest` plays two roles with opposite trust properties.
+
+As the value your app hands to `NewDiscoveryClient` to describe **itself**, every
+field comes from your own configuration and is trusted.
+
+As the value `DiscoveryClient.Snapshot()` returns — the **sibling's** parsed
+response — every field is asserted by the sibling. It is **not** the
+operator-pinned `siblingURL` you configured, and this library does not verify
+it: `NegotiateCompat` checks only `app` and the schema MAJOR, both of which
+anyone who knows the target app id can satisfy. A sibling that is compromised,
+that is itself tricked into echoing an attacker-chosen value, or that is simply
+misconfigured with an internal address decides what these fields say.
+
+`publicUrl` is the field consumers reuse to build **further outbound requests**,
+so it carries the boundary in its Go type:
+
+```go
+type UntrustedURL string
+
+func (u UntrustedURL) Resolve(ctx context.Context, g *httpsafe.Guard) (string, error)
+func (u UntrustedURL) Display() string
+```
+
+`Resolve` validates against the deployment's egress policy and is the only way
+to obtain a URL to fetch. `Display` does not validate and is for rendering and
+logging only. The type will not concatenate with a string, so the check cannot
+be skipped by accident.
+
+The whole correct sequence — snapshot, notice the value is sibling-asserted,
+validate it, and dial it with a client bound to the same policy — is available
+as two calls on the client, and you should prefer them:
+
+```go
+base, err := dc.SiblingPublicURL(ctx)   // validated against this client's guard
+if err != nil {
+    return // sibling inactive, advertises nothing, or names a denied address
+}
+client := dc.GuardedClient(2 * time.Second) // same policy, resolve-and-pin dialing
+```
+
+Building the request with a bare `&http.Client{}` instead means Go's default
+policy: no destination checks and up to ten cross-host redirects followed. That
+turns "any authenticated user opens a panel" into "this backend issues a GET to
+whatever address the sibling named, from inside the deployment network" —
+including link-local metadata addresses. This is not hypothetical; it is the
+defect issue #144 records, in a shipped consumer, against a sibling app that got
+the identical field right.
+
+`links` values are sibling-asserted too. The documented contract makes them path
+*templates* (`/modules/{namespace}/{name}/{system}`), not absolute URLs, so they
+stay plain strings — but a consumer that renders one into a link, or that ever
+accepts an absolute URL there, owes it the same treatment. Never grant trust on
+`identity.sharedStore` or `identity.issuer` alone.
 
 `IdentityInfo.sharedStore` is the signal a sibling (and the UI) uses to decide
 whether single sign-on is actually in effect — it is `true` **only** when both

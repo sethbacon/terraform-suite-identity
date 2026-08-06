@@ -84,16 +84,35 @@ func ValidateAPIKey(providedKey, storedHash string) bool {
 
 // ExtractAPIKeyFromHeader extracts the API key from an Authorization header.
 // Expected format: "Bearer <key>".
+//
+// The auth-scheme is matched case-INSENSITIVELY, per RFC 7235 §2.1 ("the
+// auth-scheme is a case-insensitive token") and RFC 6750 §2.1, which repeats
+// that rule for Bearer specifically. The separator may be any run of RFC 7230
+// whitespace (SP or HTAB), not only a single space. A previous
+// strings.HasPrefix(header, "Bearer ") accepted exactly one capitalisation and
+// exactly one separator, so a conformant client sending "bearer <key>" or
+// "Bearer\t<key>" was rejected with the confusing message "must start with
+// 'Bearer '" — while in fact sending Bearer.
+//
+// The CREDENTIAL is not case-folded: only the scheme token is. Both suite
+// backends route every API-key request through this one parser, so the
+// deviation was uniform across the suite; it failed CLOSED (a conformant caller
+// was denied, never wrongly admitted), which is why this is an
+// interoperability fix and not an authentication fix.
 func ExtractAPIKeyFromHeader(header string) (string, error) {
 	if header == "" {
 		return "", errors.New("authorization header is empty")
 	}
 
-	if !strings.HasPrefix(header, "Bearer ") {
+	// Split on the FIRST run of RFC 7230 whitespace: everything before it is the
+	// auth-scheme, everything after is the credential.
+	trimmed := strings.TrimLeft(header, " \t")
+	sep := strings.IndexAny(trimmed, " \t")
+	if sep < 0 || !strings.EqualFold(trimmed[:sep], "Bearer") {
 		return "", errors.New("authorization header must start with 'Bearer '")
 	}
 
-	key := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+	key := strings.TrimSpace(trimmed[sep+1:])
 	if key == "" {
 		return "", errors.New("API key is empty after Bearer prefix")
 	}

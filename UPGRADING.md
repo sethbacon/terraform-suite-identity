@@ -30,6 +30,146 @@ called out under "Behaviour that changed with the deletion" below — read those
 **Section 6 is different, and is the one to read first.** It changes what a
 `DELETE` on `organizations` or `users` does to rows your application is already
 storing, and most of it will **not** produce a compile error.
+## v0.25.0 — the egress guard is no longer optional
+
+> **READ THIS BEFORE DEPLOYING.** This is the one change in v0.25.0 that a clean
+> build does **not** cover. Every other v0.25.0 change is a compile error you
+> cannot miss. This one compiles, and then **an identity provider or a sibling
+> app on an internal address stops being reachable** unless you add allow-list
+> configuration. Plan it with the deploy, not after it.
+
+### What changed
+
+The module has shipped `identity/httpsafe` — a resolve-and-pin SSRF guard — for
+several releases, and used it for notification webhooks. It did not use it for
+OIDC. The relying party built a bare `&http.Client{Timeout: ...}` with Go's
+default cross-host redirect policy, and used it to fetch the discovery document,
+the JWKS signing keys that decide which ID tokens are valid, and the token
+exchange that carries the `client_secret` and the authorization code. Worse,
+only the caller-supplied `IssuerURL` and `RedirectURL` were checked at all: the
+`token_endpoint` and `jwks_uri` come **out of the discovery document**, so the
+issuer chooses them, and they were used verbatim.
+
+A guard the module owns and does not apply to its own most attacker-adjacent
+surface is not a control. As of v0.25.0:
+
+- Every outbound request this module makes goes through `httpsafe`. There is now
+  exactly one place in the module that constructs an HTTP transport, and a
+  structural test fails the build if a second one appears.
+- The discovered `token_endpoint` and `jwks_uri` are validated — scheme **and**
+  destination — before any credential-bearing request is built.
+- `Manifest.PublicURL` is a distinct type (`suite.UntrustedURL`) that will not
+  concatenate with a string, so a consumer cannot reuse a sibling-asserted URL
+  unguarded by accident.
+
+### The deployment-configuration change
+
+`httpsafe`'s default policy **denies loopback, RFC 1918, link-local (including
+the cloud metadata address), CGNAT and IPv6 ULA**. Both consuming apps default
+`security.egress.allowlist` to empty. So a deployment whose IdP or sibling lives
+on an internal address must now say so explicitly.
+
+**You need this if any of the following is true:**
+
+| Situation | Symptom if you skip it |
+| --- | --- |
+| Self-hosted / internal IdP (Keycloak, ADFS, Okta on-prem, anything on RFC 1918) | OIDC provider construction fails at startup, naming the denied endpoint |
+| Sibling app reachable on a cluster-internal address | Sibling goes `unreachable`; the cross-app panels empty out |
+| Any local dev stack (both apps' compose files) | Login and suite discovery both stop working |
+| Public IdP (Entra, Okta cloud, Google, Auth0) | Nothing — already permitted |
+
+The value is a **comma-separated** list of hostnames, IPs or CIDRs. Set it on
+the environment variable or in the YAML; the two are the same key.
+
+**terraform-registry-backend** — `TFR_SECURITY_EGRESS_ALLOWLIST`
+(`security.egress.allowlist`). The list **widens** the deny-list; empty means
+deny every internal target.
+
+```yaml
+security:
+  egress:
+    allowlist:
+      - keycloak                 # the dev-stack IdP hostname
+      - registry.corp.internal   # an internal sibling or IdP
+      - 10.42.0.0/16             # or the pod/service CIDR
+```
+
+**terraform-state-manager-backend** — `TSM_SECURITY_EGRESS_ALLOWLIST`
+(`security.egress.allowlist`). **Careful: this one REPLACES a built-in default**
+of `10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7` rather than adding to
+it, and it is applied only when non-empty. If you set it, re-state the ranges
+you still need:
+
+```yaml
+security:
+  egress:
+    allowlist: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, "fc00::/7", keycloak]
+```
+
+**Dev stacks specifically.** Both stacks run their IdP as a container reachable
+by service name, which resolves to a bridge-network RFC 1918 address, so both
+need an entry. Add to the backend service's environment:
+
+| Stack | Add |
+| --- | --- |
+| `terraform-state-manager-frontend/deployments/docker-compose.yml` (IdP `http://keycloak:8180`) | `TSM_SECURITY_EGRESS_ALLOWLIST=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7,keycloak,127.0.0.1` |
+| `security-orchestration/seam-harness/docker-compose.yml`, registry side (IdP `https://keycloak:8443`) | `TFR_SECURITY_EGRESS_ALLOWLIST=keycloak,tsm-backend,registry-backend` |
+| `security-orchestration/seam-harness/docker-compose.yml`, TSM side | `TSM_SECURITY_EGRESS_ALLOWLIST=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7,keycloak,registry-backend` |
+
+Allow-listing the **hostname** (`keycloak`) is preferred over the CIDR: it is
+narrower, and it survives the container getting a different bridge address.
+
+`AllowInsecureIssuer` / `DEV_MODE` does **not** cover this. The scheme rule and
+the destination rule are deliberately separate — opting out of HTTPS does not
+also opt out of knowing where your traffic goes.
+
+### Compile errors you will see
+
+| Call | Change |
+| --- | --- |
+| `guard.ValidateURL(rawURL)` | `guard.ValidateURL(ctx, rawURL)` — pass the request context so a client disconnect cancels the DNS lookup instead of always waiting 5s |
+| `suite.NewDiscoveryClient(url, self, interval)` | `suite.NewDiscoveryClient(url, self, interval, guard)` |
+| `suite.NewInsecureDiscoveryClient(url, self, interval)` | same, plus `guard` |
+| `siblingURL := m.PublicURL` | `siblingURL, err := dc.SiblingPublicURL(ctx)` — or `m.PublicURL.Resolve(ctx, guard)`; to render it, `m.PublicURL.Display()` |
+| `PublicURL: cfg.Server.PublicURL` in your own manifest | `PublicURL: suite.UntrustedURL(cfg.Server.PublicURL)` |
+| `oidc.ClientContext(ctx, myClient)` before `NewProviderWithContext` | Move TLS material to `Config.TLSClientConfig`; a client on the context is now refused (adopting it would displace the guard, ignoring it would silently drop your private CA) |
+
+`terraform-state-manager-backend`'s `ListStateModuleFreshness` /
+`latestRegistryVersion` is the specific consumer that reused `PublicURL` with a
+bare client (issue #144). The type change makes it a compile error; fix it with
+`dc.SiblingPublicURL(ctx)` and `dc.GuardedClient(freshnessTimeout)`.
+
+### Behaviour changes that are NOT compile errors
+
+- **`ExtractAPIKeyFromHeader` now matches the `Bearer` scheme
+  case-insensitively** and accepts SP or HTAB as the separator, per RFC 7235
+  §2.1 / RFC 6750 §2.1. This only ever *accepts more*: it previously rejected
+  conformant clients sending `bearer <key>`. The credential itself is still
+  case-sensitive. No action required.
+- **`DeriveTokenCipher` rejects a weak iteration count instead of silently
+  raising it.** The old guard was effectively inverted — it upgraded `1` to
+  100,000 while honouring `10000` as given — so the weakest value it accepted
+  was reachable only by a caller who had thought about the number. The floor is
+  now `MinPBKDF2Iterations` (600,000, current OWASP guidance) and anything below
+  it returns `ErrIterationsTooLow`. Pass `0` for "no preference" to get
+  `DefaultPBKDF2Iterations`. **Neither consumer calls this** (both use
+  `NewTokenCipher` with a supplied key), so there is no re-encryption and no
+  migration; if you call it with a literal like `100000`, change it.
+- **A discovery document advertising a non-HTTPS `token_endpoint`, `jwks_uri`,
+  `authorization_endpoint` or `end_session_endpoint` now fails provider
+  construction**, gated on the same `AllowInsecureIssuer` opt-out as the issuer
+  URL. `userinfo_endpoint` is not checked because this module never fetches it.
+
+---
+
+## v0.25.0 — one canonical name per operation; the deprecated surface is gone
+
+**BREAKING. No migration.** Unlike v0.24.0, **every** change in *this section* is
+a compile error at the call site. Nothing in this section changes behaviour
+except the deletions themselves; if it builds, it does what it did before. Two
+exceptions are called out under "Behaviour that changed with the deletion" below
+— read those. (The egress-guard section above is the part of v0.25.0 that does
+change behaviour without a compile error; read it too.)
 
 ### Why the deprecated methods were deleted rather than re-marked
 

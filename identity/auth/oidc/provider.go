@@ -7,8 +7,10 @@ package oidc
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,6 +20,8 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+
+	"github.com/sethbacon/terraform-suite-identity/identity/httpsafe"
 )
 
 // oidcHTTPTimeout bounds every HTTP round trip this package makes to an
@@ -26,7 +30,7 @@ import (
 // verification (go-oidc reuses the *http.Client supplied via the discovery
 // context for the lifetime of the resulting *oidc.Provider — see
 // github.com/coreos/go-oidc/v3/oidc's Provider.client / remoteKeySet), and the
-// authorization-code token-exchange call made by ExchangeCode. Without an
+// authorization-code token-exchange call made by ExchangeAndVerify. Without an
 // explicit client, these fall back to http.DefaultClient, which has no
 // Timeout and can hang indefinitely against a slow or unresponsive issuer. 15
 // seconds comfortably covers discovery + JWKS fetches + token exchange against
@@ -35,40 +39,32 @@ import (
 // goroutine.
 const oidcHTTPTimeout = 15 * time.Second
 
-// boundHTTPClient returns an *http.Client whose Timeout is capped at
-// oidcHTTPTimeout. If existing is non-nil, its Transport, Jar and
-// CheckRedirect are preserved — only the Timeout is adjusted — so a client a
-// caller already installed (e.g. one whose Transport carries a private-CA
-// root pool, mTLS client certificates, or a corporate proxy) is never
-// silently replaced by a plain client with the default Transport. If
-// existing already has a Timeout no looser than oidcHTTPTimeout, it is
-// returned unchanged so a caller's stricter deadline is respected. A nil
-// existing yields a fresh client with the default Transport.
-func boundHTTPClient(existing *http.Client) *http.Client {
-	if existing == nil {
-		return &http.Client{Timeout: oidcHTTPTimeout}
-	}
-	if existing.Timeout > 0 && existing.Timeout <= oidcHTTPTimeout {
-		return existing
-	}
-	bounded := *existing
-	bounded.Timeout = oidcHTTPTimeout
-	return &bounded
+// newGuardedClient builds THE client this package uses for every outbound
+// request, from the deployment's egress guard and the caller's TLS material.
+//
+// There is exactly one of these per Provider and no way to supply a different
+// one. Before v0.25.0 a caller could install an arbitrary *http.Client on the
+// context (the oidc.ClientContext / oauth2.HTTPClient convention) and this
+// package would adopt it, capping only its Timeout — which meant the egress
+// guard was, for the single most attacker-adjacent surface in the module,
+// opt-out by accident. The legitimate reason to do that was always TLS
+// material this package cannot know about (a private-CA root pool, mTLS client
+// certificates for an internal IdP); that reason is now served by
+// Config.TLSClientConfig, which reaches the transport WITHOUT displacing the
+// dialer. A client found on the context is now an error, not an override.
+func newGuardedClient(cfg Config) *http.Client {
+	return httpsafe.NewClientWithTLS(oidcHTTPTimeout, cfg.EgressGuard, cfg.TLSClientConfig)
 }
 
-// contextWithBoundedClient returns ctx with an *http.Client bounded by
-// oidcHTTPTimeout attached via oidc.ClientContext. Both go-oidc's
-// discovery/JWKS calls and oauth2.Config's token-exchange call read the
-// client from the same underlying context key (oauth2.HTTPClient), so this
-// single helper is used to bound all three call sites. If ctx already
-// carries a client — installed by a caller via the same convention before
-// calling into this package — it is reused (via boundHTTPClient) rather than
-// discarded, so this package never silently drops a caller's custom TLS
-// configuration or proxy.
-func contextWithBoundedClient(ctx context.Context) context.Context {
-	existing, _ := ctx.Value(oauth2.HTTPClient).(*http.Client)
-	return oidc.ClientContext(ctx, boundHTTPClient(existing))
-}
+// errCallerClientOnContext is returned when the caller installed its own
+// *http.Client on the context. Silently ignoring it would drop TLS material the
+// caller believes is in effect; silently honouring it would drop the egress
+// guard. Neither is acceptable, so this fails closed and names the replacement.
+var errCallerClientOnContext = errors.New(
+	"oidc: the context carries a caller-supplied *http.Client (oidc.ClientContext/oauth2.HTTPClient), " +
+		"which this package no longer adopts: an arbitrary client displaces the egress guard that " +
+		"protects the discovered token_endpoint and jwks_uri. Put TLS material (private-CA roots, mTLS " +
+		"certificates) in Config.TLSClientConfig instead, and the deployment's allow-list in Config.EgressGuard")
 
 // Config holds the resolved OIDC settings required to construct a Provider.
 // Apps resolve these values from their own configuration (env, file or DB)
@@ -81,12 +77,47 @@ type Config struct {
 	Scopes       []string
 
 	// AllowInsecureIssuer opts out of the default HTTPS requirement for the
-	// issuer and redirect URLs. An HTTP issuer means discovery and JWKS key
+	// issuer and redirect URLs, AND for the endpoints read out of the discovery
+	// document (authorization_endpoint, token_endpoint, jwks_uri,
+	// end_session_endpoint). An HTTP issuer means discovery and JWKS key
 	// material are fetched over plaintext, allowing a MITM to substitute
 	// signing keys and forge ID tokens accepted by the verifier — so HTTPS is
 	// required unless this is explicitly set. Set it true only for local/dev
 	// stacks that use an http issuer; production callers must leave it false.
+	//
+	// It does NOT opt out of EgressGuard: the scheme rule and the destination
+	// rule are separate, and a dev stack that needs a loopback or RFC 1918 IdP
+	// must say so in the deployment's allow-list rather than getting it for
+	// free with the plaintext opt-out.
 	AllowInsecureIssuer bool
+
+	// EgressGuard applies the deployment's egress policy (security.egress.allowlist)
+	// to every outbound request this package makes: discovery, the JWKS
+	// key-set fetches, and the authorization-code token exchange.
+	//
+	// A nil guard is the STRICT default policy — loopback, RFC 1918, link-local
+	// (including the cloud metadata address), CGNAT and IPv6 ULA are all denied.
+	// A deployment whose identity provider lives on an internal address (the
+	// common case for a self-hosted IdP, and for every local dev stack) MUST
+	// pass a guard built from its allow-list, or provider construction will
+	// fail naming the denied destination. This is a deployment-configuration
+	// requirement introduced in v0.25.0; see UPGRADING.md.
+	//
+	// The guard is applied at BOTH ends: the discovered token_endpoint and
+	// jwks_uri are pre-flighted against it at construction (so a hostile
+	// discovery document is refused before any credential-bearing request is
+	// built), and the client's dialer re-checks every resolved IP at connect
+	// time (so a name that changes its answer later still cannot reach a denied
+	// address).
+	EgressGuard *httpsafe.Guard
+
+	// TLSClientConfig supplies TLS material this package cannot know about —
+	// a private-CA root pool, or mTLS client certificates an internal IdP
+	// requires. It is installed on the guarded transport, so it does NOT
+	// displace the egress guard the way a caller-substituted *http.Client did
+	// before v0.25.0. It is cloned, so the caller may keep and mutate its own
+	// *tls.Config afterwards. Nil means the platform defaults.
+	TLSClientConfig *tls.Config
 }
 
 // Provider wraps the generic OIDC provider, verifier and OAuth2 config.
@@ -94,6 +125,17 @@ type Provider struct {
 	verifier *oidc.IDTokenVerifier
 	config   *oauth2.Config
 	provider *oidc.Provider
+
+	// httpClient is the guarded client built at construction. Every outbound
+	// request this Provider makes for the rest of its life uses it: go-oidc
+	// captured it for the JWKS key set, and ExchangeAndVerify installs it on
+	// the exchange context so a per-request context cannot substitute another.
+	httpClient *http.Client
+
+	// endSessionEndpoint is the discovery document's end_session_endpoint,
+	// already scheme-validated at construction. Stored rather than re-read so
+	// GetEndSessionEndpoint cannot hand back a value that skipped the check.
+	endSessionEndpoint string
 }
 
 // NewProvider initializes a new OIDC provider using a background context. The
@@ -134,11 +176,21 @@ func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) 
 		return nil, fmt.Errorf("OIDC redirect URL must use HTTPS, got: %q (set AllowInsecureIssuer to allow an http redirect URL for local/dev)", cfg.RedirectURL)
 	}
 
-	ctx = contextWithBoundedClient(ctx)
+	if _, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok {
+		return nil, errCallerClientOnContext
+	}
 
-	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
+	httpClient := newGuardedClient(cfg)
+	discoveryCtx := oidc.ClientContext(ctx, httpClient)
+
+	provider, err := oidc.NewProvider(discoveryCtx, cfg.IssuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OIDC provider: %w", err)
+	}
+
+	endSession, err := validateDiscoveredEndpoints(ctx, cfg, provider)
+	if err != nil {
+		return nil, err
 	}
 
 	verifier := provider.Verifier(&oidc.Config{
@@ -159,10 +211,102 @@ func NewProviderWithContext(ctx context.Context, cfg Config) (*Provider, error) 
 	}
 
 	return &Provider{
-		verifier: verifier,
-		config:   oauth2Config,
-		provider: provider,
+		verifier:           verifier,
+		config:             oauth2Config,
+		provider:           provider,
+		httpClient:         httpClient,
+		endSessionEndpoint: endSession,
 	}, nil
+}
+
+// discoveryDocument is the subset of the OIDC discovery document this package
+// acts on. Every field here is ATTACKER-INFLUENCEABLE: it is asserted by the
+// issuer, not configured by the operator, so a hostile or compromised issuer —
+// or one whose reverse proxy terminates TLS incorrectly — chooses these values.
+// Only IssuerURL and RedirectURL come from the caller.
+type discoveryDocument struct {
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
+	JWKSURI               string `json:"jwks_uri"`
+	EndSessionEndpoint    string `json:"end_session_endpoint"`
+}
+
+// validateDiscoveredEndpoints applies the module's two egress rules to the
+// endpoints the issuer advertised, and returns the validated
+// end_session_endpoint (empty if the issuer advertises none).
+//
+// The endpoints split by what this process does with them:
+//
+//   - token_endpoint and jwks_uri are DIALED BY THIS PACKAGE. They get both
+//     rules: the scheme rule (an http token endpoint puts the client_secret and
+//     the authorization code on the wire in cleartext; an http jwks_uri fetches
+//     signing keys a MITM can substitute, yielding forged ID tokens that pass
+//     the verifier) and the egress rule (the destination must be reachable
+//     under the deployment's allow-list). Both are also required to be present:
+//     OIDC Discovery makes jwks_uri mandatory, and an authorization-code flow
+//     cannot complete without a token endpoint, so an absent one is a
+//     misconfiguration that would otherwise surface much later as a confusing
+//     exchange failure.
+//
+//   - authorization_endpoint and end_session_endpoint are BROWSER REDIRECT
+//     TARGETS — this process never dials them, the user agent does. The egress
+//     rule is therefore not ours to apply (the browser resolves the name from
+//     its own network position, which is not this one), but the scheme rule
+//     still is: a plaintext authorization endpoint exposes the authorization
+//     request, and a plaintext end_session_endpoint exposes the id_token_hint.
+//
+// userinfo_endpoint is deliberately absent: this package never fetches it
+// (ExtractUserInfo reads the ID token's own claims), and validating an endpoint
+// nothing uses would fail deployments over a field that cannot hurt them.
+func validateDiscoveredEndpoints(ctx context.Context, cfg Config, provider *oidc.Provider) (string, error) {
+	var doc discoveryDocument
+	if err := provider.Claims(&doc); err != nil {
+		return "", fmt.Errorf("failed to read the OIDC discovery document: %w", err)
+	}
+
+	dialed := []struct{ name, raw string }{
+		{"token_endpoint", doc.TokenEndpoint},
+		{"jwks_uri", doc.JWKSURI},
+	}
+	for _, ep := range dialed {
+		if ep.raw == "" {
+			return "", fmt.Errorf("OIDC discovery document from issuer %q advertises no %s", cfg.IssuerURL, ep.name)
+		}
+		if err := checkDiscoveredScheme(cfg, ep.name, ep.raw); err != nil {
+			return "", err
+		}
+		if err := cfg.EgressGuard.ValidateURL(ctx, ep.raw); err != nil {
+			return "", fmt.Errorf("OIDC discovery document from issuer %q advertises a %s this deployment refuses to reach (%s): %w",
+				cfg.IssuerURL, ep.name, ep.raw, err)
+		}
+	}
+
+	redirectTargets := []struct{ name, raw string }{
+		{"authorization_endpoint", doc.AuthorizationEndpoint},
+		{"end_session_endpoint", doc.EndSessionEndpoint},
+	}
+	for _, ep := range redirectTargets {
+		if ep.raw == "" {
+			continue
+		}
+		if err := checkDiscoveredScheme(cfg, ep.name, ep.raw); err != nil {
+			return "", err
+		}
+	}
+
+	return doc.EndSessionEndpoint, nil
+}
+
+// checkDiscoveredScheme applies the same HTTPS rule to a discovered endpoint
+// that NewProviderWithContext already applies to the caller-supplied IssuerURL,
+// gated on the same AllowInsecureIssuer escape hatch.
+func checkDiscoveredScheme(cfg Config, name, raw string) error {
+	if cfg.AllowInsecureIssuer || isHTTPSURL(raw) {
+		return nil
+	}
+	return fmt.Errorf("OIDC discovery document from issuer %q advertises a non-HTTPS %s: %q "+
+		"(set AllowInsecureIssuer to allow plaintext discovered endpoints for local/dev)",
+		cfg.IssuerURL, name, raw)
 }
 
 // isHTTPSURL reports whether rawURL parses as an absolute URL with an https
@@ -273,20 +417,16 @@ func randomNonce() (string, error) {
 }
 
 // GetEndSessionEndpoint returns the OIDC end_session_endpoint from the discovery
-// document, or an empty string if the provider does not advertise one.
+// document, or an empty string if the provider does not advertise one (or was
+// built via NewProviderForConfig, which performs no discovery).
+//
+// The value was scheme-validated at construction — a non-HTTPS
+// end_session_endpoint fails NewProviderWithContext outright — so this accessor
+// cannot hand back a plaintext logout URL that would carry the id_token_hint in
+// the clear. It is returned from the stored field rather than re-read from the
+// document precisely so the checked and the returned value cannot diverge.
 func (p *Provider) GetEndSessionEndpoint() string {
-	// A Provider built via NewProviderForConfig has no discovery document.
-	// Return empty rather than dereferencing a nil provider.
-	if p.provider == nil {
-		return ""
-	}
-	var claims struct {
-		EndSessionEndpoint string `json:"end_session_endpoint"`
-	}
-	if err := p.provider.Claims(&claims); err != nil {
-		return ""
-	}
-	return claims.EndSessionEndpoint
+	return p.endSessionEndpoint
 }
 
 // ExchangeAndVerify completes an OIDC login: it exchanges the authorization
@@ -346,7 +486,13 @@ func (p *Provider) ExchangeAndVerify(ctx context.Context, code string, session C
 		return nil, nil, fmt.Errorf("oidc: ExchangeAndVerify requires the nonce for this login; CallbackSession.Nonce is empty")
 	}
 
-	exchangeCtx := contextWithBoundedClient(ctx)
+	// Install THIS Provider's guarded client on the exchange context. This is
+	// an override, not a merge: a client already on ctx (however it got there —
+	// a framework, a middleware, a caller reaching for the oauth2 convention)
+	// loses, because the token exchange carries the client_secret and the
+	// authorization code to an endpoint the ISSUER named, and the guard that
+	// vetted that endpoint at construction must be the one that dials it.
+	exchangeCtx := oidc.ClientContext(ctx, p.httpClient)
 	token, err := p.config.Exchange(exchangeCtx, code, oauth2.VerifierOption(session.CodeVerifier))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to exchange code for token: %w", err)
