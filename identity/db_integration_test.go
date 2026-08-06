@@ -12,22 +12,47 @@ import (
 	"github.com/lib/pq"
 )
 
-// expectedLatestMigrationVersion is the version number of the highest-numbered
-// migration under identity/migrations. Update this alongside adding a new
-// migration file so TestIntegrationRunMigrations keeps asserting against the
-// real latest version instead of silently passing on a stale one.
-const expectedLatestMigrationVersion uint = 3
+// Migration versions this test pins deliberately, because it asserts on the
+// specific DDL those migrations perform. These are NOT "the latest version" --
+// the latest is derived from the embedded FS via
+// latestEmbeddedMigrationVersion (see db_test.go), so adding a migration can
+// never silently leave this test asserting a stale version, which is exactly
+// how migrations 000004 and 000005 went unexercised (issue #140).
+const (
+	// preRegistryReconciliationVersion is the last version at which
+	// role_templates.scopes / api_keys.scopes are still TEXT[] and
+	// oidc_config.scopes is still TEXT.
+	preRegistryReconciliationVersion uint = 2
+	// jsonbScopesVersion is migration 000003, the in-place TEXT[]/TEXT ->
+	// JSONB scope-column conversion.
+	jsonbScopesVersion uint = 3
+	// dropVestigialIsActiveVersion is migration 000004, which drops the
+	// vestigial is_active columns from organizations, users, and api_keys.
+	dropVestigialIsActiveVersion uint = 4
+	// singleActiveOIDCConfigVersion is migration 000005, which deactivates all
+	// but the most recently updated active oidc_config row and then enforces
+	// the single-active invariant with a partial unique index.
+	singleActiveOIDCConfigVersion uint = 5
+)
+
+// isActiveDroppedTables are the tables whose vestigial is_active column
+// migration 000004 drops.
+var isActiveDroppedTables = []string{"organizations", "users", "api_keys"}
 
 // TestIntegrationRunMigrations exercises RunMigrations and GetMigrationVersion
-// against a real PostgreSQL database. It covers two things:
+// against a real PostgreSQL database. It covers:
 //
 //  1. The migration-000003 in-place column-type conversions
 //     (role_templates.scopes, api_keys.scopes, oidc_config.scopes: TEXT[]/TEXT
 //     -> JSONB, and back on the way down) actually convert seeded, non-trivial
 //     data correctly in both directions, not just against empty tables.
-//  2. The full up/down lifecycle of RunMigrations and GetMigrationVersion,
-//     including issue #64's fix to the identity schema's down-migration (which
-//     used to end with a "DROP SCHEMA" that always failed because
+//  2. Migration 000004's DROP COLUMN and migration 000005's data-cleanup
+//     UPDATE plus partial unique index, in both directions, against seeded
+//     data — the DDL that both consuming applications apply at startup.
+//  3. The full up/down lifecycle of RunMigrations and GetMigrationVersion,
+//     up to the version derived from the embedded migrations FS and back down
+//     to 0, including issue #64's fix to the identity schema's down-migration
+//     (which used to end with a "DROP SCHEMA" that always failed because
 //     golang-migrate's own version-tracking table still lived inside that
 //     schema, permanently "dirty"-ing migration state with no in-library way
 //     to recover).
@@ -41,15 +66,6 @@ const expectedLatestMigrationVersion uint = 3
 // ./...` and `go vet ./...` invocations entirely; run it explicitly with:
 //
 //	go test -tags=integration ./... -run TestIntegrationRunMigrations
-//
-// NOTE: as of this writing, issue #64's down-migration fix
-// (fix/64-migration-down-schema-drop, PR #101) has not yet merged to main.
-// The final full RunMigrations(db, "down") assertion at the bottom of this
-// test therefore fails deterministically today -- that is expected, and is
-// exactly the regression this test exists to catch; the CI job that runs it
-// is marked continue-on-error until #101 merges. Everything above that final
-// assertion (including the JSONB round-trip coverage) does not depend on
-// #64 and passes today.
 func TestIntegrationRunMigrations(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -73,12 +89,22 @@ func TestIntegrationRunMigrations(t *testing.T) {
 		t.Fatalf("failed to reset identity schema before test: %v", err)
 	}
 
+	// expectedLatestMigrationVersion is derived from the embedded migrations
+	// FS rather than restated as a literal, so it tracks identity/migrations
+	// automatically instead of going stale when a migration is added.
+	expectedLatestMigrationVersion := latestEmbeddedMigrationVersion(t)
+
 	testJSONBScopeConversion(t, db)
 
-	// Reset again: the sub-test above leaves the schema at version 2 (it
-	// deliberately never runs a full down-unwind, since that's the part of
-	// the lifecycle covered separately below and gated on issue #64). Start
-	// the up/down lifecycle test from a known-empty schema.
+	// Reset again: the sub-test above leaves the schema part-migrated (it
+	// deliberately stops short of a full down-unwind, which is covered by the
+	// lifecycle test below). Start each sub-test from a known-empty schema.
+	if _, err := db.Exec(`DROP SCHEMA IF EXISTS identity CASCADE`); err != nil {
+		t.Fatalf("failed to reset identity schema before is_active/single-active test: %v", err)
+	}
+
+	testIsActiveDropAndSingleActiveOIDCConfig(t, db)
+
 	if _, err := db.Exec(`DROP SCHEMA IF EXISTS identity CASCADE`); err != nil {
 		t.Fatalf("failed to reset identity schema before lifecycle test: %v", err)
 	}
@@ -118,11 +144,10 @@ func TestIntegrationRunMigrations(t *testing.T) {
 	// --- down: fully unwind. Before issue #64's fix this failed with
 	// "schema not empty" because migration 000001's down step tried to DROP
 	// SCHEMA identity while golang-migrate's own bookkeeping table was still
-	// in it, leaving migration state permanently dirty. See the package doc
-	// comment above: this is expected to fail until PR #101 merges. ---
+	// in it, leaving migration state permanently dirty. This is the assertion
+	// that guards against that regression returning. ---
 	if err := RunMigrations(db, "down"); err != nil {
-		t.Fatalf("RunMigrations(down) failed (regression of issue #64, tracked by PR #101 -- "+
-			"see this test's doc comment): %v", err)
+		t.Fatalf("RunMigrations(down) failed (regression of issue #64): %v", err)
 	}
 
 	version, dirty, err = GetMigrationVersion(db)
@@ -146,9 +171,12 @@ func TestIntegrationRunMigrations(t *testing.T) {
 // data correctly, rather than only ever running against empty tables.
 //
 // It requires db to already have the identity schema absent (a fresh
-// "DROP SCHEMA ... CASCADE" state) and deliberately stops at version 2 --
-// it never drives a full down-unwind, so it does not depend on issue #64's
-// fix (unlike the full lifecycle test in TestIntegrationRunMigrations).
+// "DROP SCHEMA ... CASCADE" state). It drives migration versions explicitly
+// (never "up to latest"), because it asserts on the schema shape at exactly
+// versions 2 and 3; the full-lifecycle-to-latest coverage lives in
+// TestIntegrationRunMigrations. Using RunMigrations(db, "up") here instead
+// would silently migrate past 000003 to the newest migration and assert
+// against the wrong schema — the defect behind issue #140.
 func testJSONBScopeConversion(t *testing.T, db *sql.DB) {
 	t.Helper()
 
@@ -166,15 +194,11 @@ func testJSONBScopeConversion(t *testing.T, db *sql.DB) {
 	// --- migrate to version 2 only (pre-registry-reconciliation shape,
 	// where role_templates/api_keys.scopes are still TEXT[] and
 	// oidc_config.scopes is still TEXT) ---
-	if err := m.Migrate(2); err != nil && err != migrate.ErrNoChange {
-		t.Fatalf("failed to migrate to version 2: %v", err)
+	if err := m.Migrate(preRegistryReconciliationVersion); err != nil && err != migrate.ErrNoChange {
+		t.Fatalf("failed to migrate to version %d: %v", preRegistryReconciliationVersion, err)
 	}
 
-	if version, dirty, err := GetMigrationVersion(db); err != nil {
-		t.Fatalf("GetMigrationVersion after migrating to version 2 failed: %v", err)
-	} else if dirty || version != 2 {
-		t.Fatalf("expected clean state at version 2, got version=%d dirty=%v", version, dirty)
-	}
+	assertCleanAtVersion(t, db, preRegistryReconciliationVersion)
 
 	// --- seed representative rows exercising the conversions in 000003 ---
 
@@ -215,16 +239,12 @@ func testJSONBScopeConversion(t *testing.T, db *sql.DB) {
 		t.Fatalf("failed to seed oidc_config rows: %v", err)
 	}
 
-	// --- migrate up to version 3, applying the JSONB conversion ---
-	if err := RunMigrations(db, "up"); err != nil {
-		t.Fatalf("RunMigrations(up) from version 2 to 3 failed: %v", err)
+	// --- migrate up to exactly version 3, applying the JSONB conversion ---
+	if err := m.Migrate(jsonbScopesVersion); err != nil && err != migrate.ErrNoChange {
+		t.Fatalf("failed to migrate from version %d to %d: %v",
+			preRegistryReconciliationVersion, jsonbScopesVersion, err)
 	}
-	if version, dirty, err := GetMigrationVersion(db); err != nil {
-		t.Fatalf("GetMigrationVersion after migrating to version 3 failed: %v", err)
-	} else if dirty || version != expectedLatestMigrationVersion {
-		t.Fatalf("expected clean state at version %d, got version=%d dirty=%v",
-			expectedLatestMigrationVersion, version, dirty)
-	}
+	assertCleanAtVersion(t, db, jsonbScopesVersion)
 
 	// --- assert the post-migration JSONB values ---
 	assertJSONBScopes(t, db, `SELECT scopes FROM identity.role_templates WHERE name = 'admin'`,
@@ -244,16 +264,12 @@ func testJSONBScopeConversion(t *testing.T, db *sql.DB) {
 	// explicitly rather than assuming array semantics apply.
 	assertNullJSONBScopes(t, db, `SELECT scopes FROM identity.oidc_config WHERE client_id = 'client-null'`)
 
-	// --- migrate back down to version 2, reversing only migration 000003
-	// (not the full down-unwind that hits issue #64's DROP SCHEMA bug) ---
+	// --- migrate back down to version 2, reversing only migration 000003 ---
 	if err := m.Steps(-1); err != nil && err != migrate.ErrNoChange {
-		t.Fatalf("failed to step down from version 3 to 2: %v", err)
+		t.Fatalf("failed to step down from version %d to %d: %v",
+			jsonbScopesVersion, preRegistryReconciliationVersion, err)
 	}
-	if version, dirty, err := GetMigrationVersion(db); err != nil {
-		t.Fatalf("GetMigrationVersion after stepping down to version 2 failed: %v", err)
-	} else if dirty || version != 2 {
-		t.Fatalf("expected clean state at version 2 after stepping down, got version=%d dirty=%v", version, dirty)
-	}
+	assertCleanAtVersion(t, db, preRegistryReconciliationVersion)
 
 	// --- assert the down-migration's reverse conversion restored the
 	// original TEXT[]/TEXT values ---
@@ -278,6 +294,194 @@ func testJSONBScopeConversion(t *testing.T, db *sql.DB) {
 	// asserted behavior instead of silently drifting.
 	assertTextScopes(t, db, `SELECT scopes FROM identity.oidc_config WHERE client_id = 'client-null'`,
 		"")
+}
+
+// testIsActiveDropAndSingleActiveOIDCConfig exercises migrations 000004 and
+// 000005 against seeded data, in both directions.
+//
+// Neither migration had ever been applied end to end against a real PostgreSQL
+// before issue #140: the integration job asserted a stale "latest version" of 3
+// and was additionally marked continue-on-error, so its failure never surfaced.
+// Both consuming applications call RunMigrations at startup, so an untested
+// defect in either one surfaces first as a failed deploy against a live
+// database — and identity/db.go exposes no Force entry point to clear the dirty
+// state a partially applied migration leaves behind.
+//
+// It asserts:
+//   - 000004 drops the vestigial is_active columns from organizations, users
+//     and api_keys, and its down step restores them.
+//   - 000005's data-safety cleanup UPDATE collapses pre-existing multi-active
+//     oidc_config rows down to the single most recently updated one, rather
+//     than failing to build its unique index.
+//   - 000005's partial unique index is actually enforced by PostgreSQL (a
+//     second is_active=true row is rejected), and its down step removes that
+//     enforcement.
+//
+// It requires db to have the identity schema absent on entry.
+func testIsActiveDropAndSingleActiveOIDCConfig(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	// See testJSONBScopeConversion: the migrator takes ownership of db on
+	// Close, so (like RunMigrations itself) we deliberately never Close it.
+	m, err := newMigrator(db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	// --- version 3: the vestigial is_active columns still exist ---
+	if err := m.Migrate(jsonbScopesVersion); err != nil && err != migrate.ErrNoChange {
+		t.Fatalf("failed to migrate to version %d: %v", jsonbScopesVersion, err)
+	}
+	assertCleanAtVersion(t, db, jsonbScopesVersion)
+	for _, table := range isActiveDroppedTables {
+		if !columnExists(t, db, table, "is_active") {
+			t.Fatalf("precondition failed: identity.%s.is_active should exist at version %d",
+				table, jsonbScopesVersion)
+		}
+	}
+
+	// --- 000004 up: the columns are dropped ---
+	if err := m.Migrate(dropVestigialIsActiveVersion); err != nil && err != migrate.ErrNoChange {
+		t.Fatalf("failed to migrate to version %d: %v", dropVestigialIsActiveVersion, err)
+	}
+	assertCleanAtVersion(t, db, dropVestigialIsActiveVersion)
+	for _, table := range isActiveDroppedTables {
+		if columnExists(t, db, table, "is_active") {
+			t.Errorf("migration %d should have dropped identity.%s.is_active, but it still exists",
+				dropVestigialIsActiveVersion, table)
+		}
+	}
+	// oidc_config.is_active is explicitly out of 000004's scope: it is read and
+	// written via Activate/Deactivate. Assert it survived, so a future edit that
+	// over-broadens the DROP COLUMN list is caught here.
+	if !columnExists(t, db, "oidc_config", "is_active") {
+		t.Errorf("migration %d must not drop identity.oidc_config.is_active (it is actively used)",
+			dropVestigialIsActiveVersion)
+	}
+
+	// --- seed the multi-active state that 000005's cleanup UPDATE must fix ---
+	// Three active rows with distinct updated_at values: only the newest may
+	// survive as active. Without the cleanup, CREATE UNIQUE INDEX would fail.
+	if _, err := db.Exec(
+		`INSERT INTO identity.oidc_config
+		     (issuer_url, client_id, client_secret_encrypted, redirect_url, is_active, updated_at)
+		 VALUES
+		     ('https://issuer.example/oldest', 'client-oldest', 'secret', 'https://app.example/cb',
+		      true, NOW() - INTERVAL '2 hours'),
+		     ('https://issuer.example/middle', 'client-middle', 'secret', 'https://app.example/cb',
+		      true, NOW() - INTERVAL '1 hour'),
+		     ('https://issuer.example/newest', 'client-newest', 'secret', 'https://app.example/cb',
+		      true, NOW())`,
+	); err != nil {
+		t.Fatalf("failed to seed multi-active oidc_config rows: %v", err)
+	}
+
+	// --- 000005 up: cleanup UPDATE + partial unique index ---
+	if err := m.Migrate(singleActiveOIDCConfigVersion); err != nil && err != migrate.ErrNoChange {
+		t.Fatalf("migration to version %d failed — its data-safety cleanup UPDATE must "+
+			"collapse pre-existing multi-active rows before the unique index is built: %v",
+			singleActiveOIDCConfigVersion, err)
+	}
+	assertCleanAtVersion(t, db, singleActiveOIDCConfigVersion)
+
+	var activeCount int
+	var activeClientID string
+	if err := db.QueryRow(
+		`SELECT count(*), coalesce(max(client_id), '') FROM identity.oidc_config WHERE is_active`,
+	).Scan(&activeCount, &activeClientID); err != nil {
+		t.Fatalf("failed to count active oidc_config rows: %v", err)
+	}
+	if activeCount != 1 {
+		t.Errorf("migration %d's cleanup should leave exactly 1 active oidc_config row, got %d",
+			singleActiveOIDCConfigVersion, activeCount)
+	}
+	if activeClientID != "client-newest" {
+		t.Errorf("migration %d's cleanup should keep the most recently updated row active, "+
+			"got %q active", singleActiveOIDCConfigVersion, activeClientID)
+	}
+
+	// The invariant must be enforced by PostgreSQL, not just by application
+	// convention: a second active row has to be rejected outright.
+	if _, err := db.Exec(
+		`INSERT INTO identity.oidc_config
+		     (issuer_url, client_id, client_secret_encrypted, redirect_url, is_active)
+		 VALUES ('https://issuer.example/second', 'client-second', 'secret',
+		         'https://app.example/cb', true)`,
+	); err == nil {
+		t.Errorf("migration %d's partial unique index should reject a second active "+
+			"oidc_config row, but the insert succeeded", singleActiveOIDCConfigVersion)
+	}
+	// An inactive row is unaffected by a *partial* index — assert that, so a
+	// future edit that drops the WHERE clause (making the index total, and
+	// permitting only one inactive row overall) is caught.
+	if _, err := db.Exec(
+		`INSERT INTO identity.oidc_config
+		     (issuer_url, client_id, client_secret_encrypted, redirect_url, is_active)
+		 VALUES ('https://issuer.example/inactive-a', 'client-inactive-a', 'secret',
+		         'https://app.example/cb', false),
+		        ('https://issuer.example/inactive-b', 'client-inactive-b', 'secret',
+		         'https://app.example/cb', false)`,
+	); err != nil {
+		t.Errorf("migration %d's index must be partial (WHERE is_active): multiple inactive "+
+			"rows should still be allowed, got: %v", singleActiveOIDCConfigVersion, err)
+	}
+
+	// --- 000005 down: enforcement is removed ---
+	if err := m.Steps(-1); err != nil && err != migrate.ErrNoChange {
+		t.Fatalf("failed to step down from version %d: %v", singleActiveOIDCConfigVersion, err)
+	}
+	assertCleanAtVersion(t, db, dropVestigialIsActiveVersion)
+	if _, err := db.Exec(
+		`INSERT INTO identity.oidc_config
+		     (issuer_url, client_id, client_secret_encrypted, redirect_url, is_active)
+		 VALUES ('https://issuer.example/second', 'client-second', 'secret',
+		         'https://app.example/cb', true)`,
+	); err != nil {
+		t.Errorf("migration %d's down step should drop the partial unique index, but a second "+
+			"active row was still rejected: %v", singleActiveOIDCConfigVersion, err)
+	}
+
+	// --- 000004 down: the vestigial columns are restored ---
+	if err := m.Steps(-1); err != nil && err != migrate.ErrNoChange {
+		t.Fatalf("failed to step down from version %d: %v", dropVestigialIsActiveVersion, err)
+	}
+	assertCleanAtVersion(t, db, jsonbScopesVersion)
+	for _, table := range isActiveDroppedTables {
+		if !columnExists(t, db, table, "is_active") {
+			t.Errorf("migration %d's down step should restore identity.%s.is_active",
+				dropVestigialIsActiveVersion, table)
+		}
+	}
+}
+
+// assertCleanAtVersion asserts the migration state is exactly want and not dirty.
+func assertCleanAtVersion(t *testing.T, db *sql.DB, want uint) {
+	t.Helper()
+
+	version, dirty, err := GetMigrationVersion(db)
+	if err != nil {
+		t.Fatalf("GetMigrationVersion failed (expected clean version %d): %v", want, err)
+	}
+	if dirty || version != want {
+		t.Fatalf("expected clean migration state at version %d, got version=%d dirty=%v",
+			want, version, dirty)
+	}
+}
+
+// columnExists reports whether identity.<table>.<column> is present.
+func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+
+	var exists bool
+	if err := db.QueryRow(
+		`SELECT EXISTS (
+		     SELECT 1 FROM information_schema.columns
+		     WHERE table_schema = 'identity' AND table_name = $1 AND column_name = $2
+		 )`, table, column,
+	).Scan(&exists); err != nil {
+		t.Fatalf("failed to check identity.%s.%s existence: %v", table, column, err)
+	}
+	return exists
 }
 
 func assertJSONBScopes(t *testing.T, db *sql.DB, query string, want []string) {
