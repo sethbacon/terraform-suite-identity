@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -43,6 +44,13 @@ type auditReadAxis struct {
 	// zeroScopeSQL is the statement pattern expected under the fail-closed zero
 	// scope, or "" when the axis must not touch the database at all.
 	zeroScopeSQL string
+	// zeroScopeErr is the sentinel the axis must report under the fail-closed
+	// zero scope, or nil when the axis reports emptiness in band (an empty
+	// result set / an empty row stream). A by-id read has no empty value to
+	// return, so since v0.24.0 it reports ErrNotFound — the SAME error a
+	// genuinely absent entry produces, which is what keeps the by-id axis from
+	// becoming a cross-tenant existence oracle.
+	zeroScopeErr error
 	call         func(repo *AuditRepository, scope AuditScope) error
 }
 
@@ -71,6 +79,7 @@ func auditReadAxes() []auditReadAxis {
 					WillReturnRows(sampleAuditGetRow())
 			},
 			zeroScopeSQL: "",
+			zeroScopeErr: ErrNotFound,
 			call: func(repo *AuditRepository, scope AuditScope) error {
 				_, err := repo.GetAuditLog(context.Background(), "log-1", scope)
 				return err
@@ -130,7 +139,14 @@ func TestAuditReadAxes_ZeroScopeFailsClosed(t *testing.T) {
 			}
 			// Nothing else is primed. An unconstrained statement is therefore an
 			// unexpected query and surfaces as an error.
-			if err := axis.call(repo, AuditScope{}); err != nil {
+			err := axis.call(repo, AuditScope{})
+			if axis.zeroScopeErr != nil {
+				if !errors.Is(err, axis.zeroScopeErr) {
+					t.Fatalf("%s: zero-value scope returned %v, want %v — a fail-closed "+
+						"read must be reported, not indistinguishable from a hit",
+						axis.name, err, axis.zeroScopeErr)
+				}
+			} else if err != nil {
 				t.Fatalf("%s: zero-value scope issued an unconstrained statement "+
 					"(guard %q removed?): %v", axis.name, axis.guard, err)
 			}

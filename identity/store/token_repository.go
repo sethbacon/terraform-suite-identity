@@ -93,6 +93,11 @@ func NewTokenRepository(db *sql.DB) *TokenRepository {
 // it would otherwise insert can never be matched by a lookup, so accepting it
 // would report a successful revocation that revokes nothing.
 //
+// The INSERT is ON CONFLICT DO NOTHING, so zero rows affected means the token
+// was ALREADY revoked — an idempotent success. That is why this mutator does not
+// report ErrNotFound the way the by-identifier mutators in this package do:
+// there is no "matched nothing" outcome to distinguish.
+//
 // # Why this also prunes
 //
 // revoked_tokens is append-only and this INSERT is the ONLY statement in the
@@ -241,11 +246,15 @@ func (r *TokenRepository) IsTokenRevoked(ctx context.Context, jti string) (bool,
 //
 // Unlike the self-prune it applies no retention grace, so a host calling it
 // directly also drops rows for tokens that expired a moment ago.
-func (r *TokenRepository) CleanupExpiredRevocations(ctx context.Context) error {
+//
+// It returns how many rows it removed. Bulk, so zero is not an error — an
+// already-drained denylist is the healthy steady state — but a host running this
+// on a schedule needs the count to tell "nothing to do" from "did not run".
+func (r *TokenRepository) CleanupExpiredRevocations(ctx context.Context) (int64, error) {
 	query := `DELETE FROM revoked_tokens WHERE expires_at < NOW()`
-	_, err := r.db.ExecContext(ctx, query)
+	res, err := r.db.ExecContext(ctx, query)
 	if err != nil {
-		return fmt.Errorf("failed to cleanup expired token revocations: %w", err)
+		return 0, fmt.Errorf("failed to cleanup expired token revocations: %w", err)
 	}
-	return nil
+	return affectedRows(res, "expired token revocations")
 }

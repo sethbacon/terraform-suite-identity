@@ -11,7 +11,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
+
+	"github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
 const channelColumns = `id, name, type, encrypted_target, events, enabled,
@@ -96,12 +100,17 @@ func (r *ChannelRepository) List(ctx context.Context) ([]NotificationChannel, er
 }
 
 // GetByID returns a channel including its encrypted target (for decryption by
-// the notifier / test endpoint). Returns (nil, nil) when not found.
+// the notifier / test endpoint).
+//
+// Returns an error wrapping store.ErrNotFound when no channel has that ID. This
+// DAO reports not-found with the identity store's sentinel rather than one of
+// its own: a consuming app wires both packages and must not have to remember
+// which of two spellings of "not found" a given repository speaks.
 func (r *ChannelRepository) GetByID(ctx context.Context, id string) (*NotificationChannel, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+channelColumns+` FROM notification_channels WHERE id = $1`, id)
 	ch, err := scanChannel(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("notification channel by id: %w", store.ErrNotFound)
 	}
 	if err != nil {
 		return nil, err
@@ -111,7 +120,11 @@ func (r *ChannelRepository) GetByID(ctx context.Context, id string) (*Notificati
 
 // Update replaces the mutable fields. When encryptedTarget is empty the
 // existing target is kept (so editing a channel without re-entering the
-// secret is allowed). Returns (nil, nil) when the channel does not exist.
+// secret is allowed).
+//
+// Returns an error wrapping store.ErrNotFound when the channel does not exist —
+// the RETURNING clause yields no row, which is the same "matched nothing" the
+// by-id mutators in identity/store report.
 func (r *ChannelRepository) Update(ctx context.Context, id, name, typ string, events []string, enabled bool, encryptedTarget string) (*NotificationChannel, error) {
 	eventsJSON, err := json.Marshal(events)
 	if err != nil {
@@ -129,8 +142,8 @@ func (r *ChannelRepository) Update(ctx context.Context, id, name, typ string, ev
 		RETURNING `+channelColumns,
 		id, name, typ, eventsJSON, enabled, targetArg)
 	ch, err := scanChannel(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("notification channel by id: %w", store.ErrNotFound)
 	}
 	if err != nil {
 		return nil, err
@@ -140,9 +153,29 @@ func (r *ChannelRepository) Update(ctx context.Context, id, name, typ string, ev
 }
 
 // Delete removes a channel.
+//
+// Returns an error wrapping store.ErrNotFound when no channel has that ID, so
+// an admin UI cannot report a channel deleted that it did not delete.
 func (r *ChannelRepository) Delete(ctx context.Context, id string) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM notification_channels WHERE id = $1`, id)
-	return err
+	res, err := r.db.ExecContext(ctx, `DELETE FROM notification_channels WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	return requireChannelRow(res)
+}
+
+// requireChannelRow turns a by-id mutation that matched no notification_channels
+// row into store.ErrNotFound, mirroring identity/store's requireRow (which is
+// unexported and so cannot be shared across the package boundary).
+func requireChannelRow(res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to read rows affected for notification channel by id: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("notification channel by id: %w", store.ErrNotFound)
+	}
+	return nil
 }
 
 // ListEnabledForEvent returns enabled channels subscribed to eventType (a
@@ -168,9 +201,18 @@ func (r *ChannelRepository) ListEnabledForEvent(ctx context.Context, eventType s
 }
 
 // RecordDelivery stamps the outcome of the most recent send attempt.
+//
+// Returns an error wrapping store.ErrNotFound when the channel was deleted
+// between the send and this write. Notifier.record logs that (it is the only
+// caller and delivery has already happened, so there is nothing to roll back)
+// rather than dropping it, which is exactly the difference between a delivery
+// record that is missing for a known reason and one that is silently absent.
 func (r *ChannelRepository) RecordDelivery(ctx context.Context, id, status, errMsg string, sentAt time.Time) error {
-	_, err := r.db.ExecContext(ctx,
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE notification_channels SET last_status=$2, last_error=NULLIF($3,''), last_sent_at=$4, updated_at=now() WHERE id=$1`,
 		id, status, errMsg, sentAt)
-	return err
+	if err != nil {
+		return err
+	}
+	return requireChannelRow(res)
 }

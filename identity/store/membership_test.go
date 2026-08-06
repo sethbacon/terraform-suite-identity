@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -328,10 +329,11 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 	}
 }
 
-// TestGetMemberWithRoleNoRowsConvention pins that a missing membership is still
-// reported as (nil, nil) rather than sql.ErrNoRows. This is the reason
-// scanOrgMemberWithUser returns its Scan error unwrapped, so it is asserted
-// directly rather than left to the helper's doc comment.
+// TestGetMemberWithRoleNoRowsConvention pins that a missing membership is
+// reported as ErrNotFound and NOT as a raw sql.ErrNoRows: the driver sentinel
+// must stay inside this package. This is the reason scanOrgMemberWithUser
+// returns its Scan error unwrapped, so it is asserted directly rather than left
+// to the helper's doc comment.
 func TestGetMemberWithRoleNoRowsConvention(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
@@ -339,8 +341,11 @@ func TestGetMemberWithRoleNoRowsConvention(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols))
 
 	member, err := NewOrganizationRepository(db).GetMemberWithRole(context.Background(), "org-1", "u1")
-	if err != nil {
-		t.Fatalf("expected nil error for a missing membership, got %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for a missing membership, got %v", err)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("sql.ErrNoRows escaped the repository boundary: %v", err)
 	}
 	if member != nil {
 		t.Errorf("expected nil member for a missing membership, got %+v", member)

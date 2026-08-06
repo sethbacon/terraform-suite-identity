@@ -162,8 +162,8 @@ func TestGetActiveOIDCConfig_NotFound(t *testing.T) {
 		WillReturnError(sql.ErrNoRows)
 
 	cfg, err := repo.GetActiveOIDCConfig(context.Background())
-	if err != nil || cfg != nil {
-		t.Fatalf("got (%v, %v), want (nil, nil)", cfg, err)
+	if !errors.Is(err, ErrNotFound) || cfg != nil {
+		t.Fatalf("got (%v, %v), want (nil, ErrNotFound)", cfg, err)
 	}
 }
 
@@ -200,8 +200,8 @@ func TestGetOIDCConfig_NotFound(t *testing.T) {
 		WillReturnError(sql.ErrNoRows)
 
 	cfg, err := repo.GetOIDCConfig(context.Background(), uuid.New())
-	if err != nil || cfg != nil {
-		t.Fatalf("got (%v, %v), want (nil, nil)", cfg, err)
+	if !errors.Is(err, ErrNotFound) || cfg != nil {
+		t.Fatalf("got (%v, %v), want (nil, ErrNotFound)", cfg, err)
 	}
 }
 
@@ -258,8 +258,12 @@ func TestDeactivateAllOIDCConfigs_Success(t *testing.T) {
 	mock.ExpectExec("UPDATE oidc_config SET is_active = false").
 		WillReturnResult(sqlmock.NewResult(0, 2))
 
-	if err := repo.DeactivateAllOIDCConfigs(context.Background()); err != nil {
+	n, err := repo.DeactivateAllOIDCConfigs(context.Background())
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("deactivated %d configs, want 2", n)
 	}
 }
 

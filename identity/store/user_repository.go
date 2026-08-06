@@ -58,7 +58,9 @@ func (r *UserRepository) CreateUser(ctx context.Context, user *models.User) erro
 	return nil
 }
 
-// GetUserByID retrieves a user by ID
+// GetUserByID retrieves a user by ID.
+//
+// Returns an error wrapping ErrNotFound when no user has that ID.
 func (r *UserRepository) GetUserByID(ctx context.Context, userID string) (*models.User, error) {
 	query := `
 		SELECT id, email, name, oidc_sub, created_at, updated_at
@@ -76,8 +78,8 @@ func (r *UserRepository) GetUserByID(ctx context.Context, userID string) (*model
 		&user.UpdatedAt,
 	)
 
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("user by id")
 	}
 
 	if err != nil {
@@ -87,7 +89,9 @@ func (r *UserRepository) GetUserByID(ctx context.Context, userID string) (*model
 	return user, nil
 }
 
-// GetUserByEmail retrieves a user by email
+// GetUserByEmail retrieves a user by email.
+//
+// Returns an error wrapping ErrNotFound when no user has that email.
 func (r *UserRepository) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
 	query := `
 		SELECT id, email, name, oidc_sub, created_at, updated_at
@@ -105,8 +109,8 @@ func (r *UserRepository) GetUserByEmail(ctx context.Context, email string) (*mod
 		&user.UpdatedAt,
 	)
 
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("user by email")
 	}
 
 	if err != nil {
@@ -116,7 +120,10 @@ func (r *UserRepository) GetUserByEmail(ctx context.Context, email string) (*mod
 	return user, nil
 }
 
-// GetUserByOIDCSub retrieves a user by OIDC subject identifier
+// GetUserByOIDCSub retrieves a user by OIDC subject identifier.
+//
+// Returns an error wrapping ErrNotFound when no user carries that subject —
+// the ordinary result for a first login, which GetOrCreateUserFromOIDC handles.
 func (r *UserRepository) GetUserByOIDCSub(ctx context.Context, oidcSub string) (*models.User, error) {
 	query := `
 		SELECT id, email, name, oidc_sub, created_at, updated_at
@@ -134,8 +141,8 @@ func (r *UserRepository) GetUserByOIDCSub(ctx context.Context, oidcSub string) (
 		&user.UpdatedAt,
 	)
 
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("user by oidc sub")
 	}
 
 	if err != nil {
@@ -145,7 +152,11 @@ func (r *UserRepository) GetUserByOIDCSub(ctx context.Context, oidcSub string) (
 	return user, nil
 }
 
-// UpdateUser updates a user's information
+// UpdateUser updates a user's information.
+//
+// Returns an error wrapping ErrNotFound when no row has user.ID, so an edit
+// applied to a user that was deleted concurrently is not reported as a
+// successful save.
 func (r *UserRepository) UpdateUser(ctx context.Context, user *models.User) error {
 	user.UpdatedAt = time.Now()
 
@@ -155,7 +166,7 @@ func (r *UserRepository) UpdateUser(ctx context.Context, user *models.User) erro
 		WHERE id = $1
 	`
 
-	_, err := r.db.ExecContext(ctx, query,
+	res, err := r.db.ExecContext(ctx, query,
 		user.ID,
 		user.Email,
 		user.Name,
@@ -166,7 +177,7 @@ func (r *UserRepository) UpdateUser(ctx context.Context, user *models.User) erro
 		return fmt.Errorf("failed to update user: %w", err)
 	}
 
-	return nil
+	return requireRow(res, "user by id")
 }
 
 // linkOIDCIdentity atomically links oidcSub to the pre-provisioned user
@@ -200,14 +211,19 @@ func (r *UserRepository) linkOIDCIdentity(ctx context.Context, userID, oidcSub, 
 	return n > 0, nil
 }
 
-// DeleteUser deletes a user (cascades to API keys and memberships)
+// DeleteUser deletes a user (cascades to API keys and memberships).
+//
+// Returns an error wrapping ErrNotFound when no row has that ID. Deleting a
+// user is a security-state change a consuming app reports to an operator and
+// writes to its audit log; a stale or wrong id must not produce a nil error
+// that both records as a deletion that never happened.
 func (r *UserRepository) DeleteUser(ctx context.Context, userID string) error {
 	query := `DELETE FROM users WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, userID)
+	res, err := r.db.ExecContext(ctx, query, userID)
 	if err != nil {
 		return fmt.Errorf("failed to delete user: %w", err)
 	}
-	return nil
+	return requireRow(res, "user by id")
 }
 
 // listUsersPage runs the shared paginated users SELECT, used by both ListUsers
@@ -276,13 +292,17 @@ func (r *UserRepository) ListUsers(ctx context.Context, limit, offset int) ([]*m
 // provisioned-account takeover path where an IdP lets a principal assert an
 // unverified email that matches an existing account.
 func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, email, name string, emailVerified bool) (*models.User, error) {
-	// Try to find existing user by OIDC sub
+	// Try to find existing user by OIDC sub. A miss is the ordinary first-login
+	// path, so ErrNotFound is absorbed here and falls through to the link/create
+	// paths below; any OTHER error is a real failure and must not be mistaken for
+	// "no such user", which would take a login down the account-creation path on
+	// a transient database fault.
 	user, err := r.GetUserByOIDCSub(ctx, oidcSub)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
 
-	if user != nil {
+	if err == nil {
 		// User exists, update email and name if changed
 		if user.Email != email || user.Name != name {
 			user.Email = email
@@ -304,11 +324,11 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 	// changed sub is an explicit administrative action, not an implicit login
 	// side effect.
 	emailUser, err := r.GetUserByEmail(ctx, email)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
 
-	if emailUser != nil {
+	if err == nil {
 		if emailUser.OIDCSub != nil && *emailUser.OIDCSub != oidcSub {
 			return nil, fmt.Errorf("oidc account linking refused: email %q is already linked to a different OIDC subject", email)
 		}
@@ -342,11 +362,11 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 		// trusting our stale in-memory copy — mirroring the INSERT path's
 		// re-read-the-winner fallback.
 		winner, werr := r.GetUserByID(ctx, emailUser.ID)
+		if errors.Is(werr, ErrNotFound) {
+			return nil, fmt.Errorf("oidc account linking: user %s vanished while linking", emailUser.ID)
+		}
 		if werr != nil {
 			return nil, werr
-		}
-		if winner == nil {
-			return nil, fmt.Errorf("oidc account linking: user %s vanished while linking", emailUser.ID)
 		}
 		if winner.OIDCSub != nil && *winner.OIDCSub != oidcSub {
 			return nil, fmt.Errorf("oidc account linking refused: email %q is already linked to a different OIDC subject", email)
@@ -394,19 +414,28 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 		if !isUniqueViolation(err) {
 			return nil, fmt.Errorf("failed to create user from oidc: %w", err)
 		}
-	} else if n, _ := result.RowsAffected(); n > 0 {
-		return newUser, nil
+	} else {
+		// A driver that cannot report RowsAffected here leaves "did my INSERT
+		// land?" unanswerable. Reporting that as zero would silently send a
+		// successful creation down the lost-the-race re-read path; surface it.
+		n, aerr := result.RowsAffected()
+		if aerr != nil {
+			return nil, fmt.Errorf("failed to read rows affected creating user from oidc: %w", aerr)
+		}
+		if n > 0 {
+			return newUser, nil
+		}
 	}
 
 	// Either RowsAffected was 0 (ON CONFLICT suppressed our insert) or the insert
 	// hit the unique-violation fallback above: a concurrent request already
 	// created this identity. Return the winner's row instead of erroring.
 	winner, werr := r.GetUserByOIDCSub(ctx, oidcSub)
-	if werr != nil {
-		return nil, werr
-	}
-	if winner != nil {
+	if werr == nil {
 		return winner, nil
+	}
+	if !errors.Is(werr, ErrNotFound) {
+		return nil, werr
 	}
 	// Exceptionally unlikely: the conflict was detected but the row is gone by
 	// the time we re-read (e.g. deleted between the conflict and this SELECT).
@@ -486,15 +515,19 @@ func (r *UserRepository) GetOrCreateUserByOIDC(ctx context.Context, oidcSub, ema
 	return r.GetOrCreateUserFromOIDC(ctx, oidcSub, email, name, emailVerified)
 }
 
-// GetUserWithOrgRoles retrieves a user with their per-organization role template information
+// GetUserWithOrgRoles retrieves a user with their per-organization role
+// template information.
+//
+// Returns an error wrapping ErrNotFound when no user has that ID. A user with
+// no memberships is NOT a miss — that returns the user with an empty
+// Memberships slice.
 func (r *UserRepository) GetUserWithOrgRoles(ctx context.Context, userID string) (*models.UserWithOrgRoles, error) {
-	// First get the basic user info
+	// First get the basic user info. ErrNotFound propagates unchanged: the
+	// distinction this method needs to preserve is "no such user" (an error)
+	// versus "a user with no memberships" (a value with an empty slice).
 	user, err := r.GetUserByID(ctx, userID)
 	if err != nil {
 		return nil, err
-	}
-	if user == nil {
-		return nil, nil
 	}
 
 	// Then get all memberships with role templates (see membership.go for the

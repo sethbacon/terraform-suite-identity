@@ -124,12 +124,12 @@ func (n *Notifier) SendTest(ctx context.Context, channelID string) error {
 	if n == nil || n.repo == nil {
 		return fmt.Errorf("notifications are not available")
 	}
+	// GetByID reports a missing channel as store.ErrNotFound; returning it
+	// unwrapped lets a handler map it to 404 with errors.Is instead of matching
+	// on the string "channel not found" this used to fabricate.
 	ch, err := n.repo.GetByID(ctx, channelID)
 	if err != nil {
 		return err
-	}
-	if ch == nil {
-		return fmt.Errorf("channel not found")
 	}
 	return n.deliver(ctx, ch, "Test notification", n.opts.TestMessage)
 }

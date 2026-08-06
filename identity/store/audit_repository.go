@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -250,9 +251,11 @@ func buildListAuditLogsQueries(filters AuditFilters, scope AuditScope, limit, of
 
 // GetAuditLog retrieves a single audit log entry by ID within scope.
 //
-// An entry outside the scope is reported as not found (nil, nil) rather than
-// forbidden, so the by-id read cannot be used to probe for the existence of
-// another organization's audit entries.
+// An entry outside the scope is reported as not found (an error wrapping
+// ErrNotFound) rather than forbidden, and by the SAME error a genuinely absent
+// entry produces, so the by-id read cannot be used to probe for the existence of
+// another organization's audit entries. A scope that matches nothing at all
+// short-circuits to that same result without a round trip.
 //
 // scope is mandatory for the same reason it is mandatory on ListAuditLogs: the
 // by-id axis previously carried no tenant predicate at all while the list axis
@@ -260,7 +263,7 @@ func buildListAuditLogsQueries(filters AuditFilters, scope AuditScope, limit, of
 // being closed.
 func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope AuditScope) (*models.AuditLog, error) {
 	if scope.MatchesNothing() {
-		return nil, nil
+		return nil, notFound("audit log by id")
 	}
 
 	// GUARD audit-scope-byid (issue terraform-registry#719).
@@ -292,8 +295,8 @@ func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope A
 		&log.CreatedAt,
 	)
 
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, notFound("audit log by id")
 	}
 
 	if err != nil {
@@ -324,11 +327,7 @@ func (r *AuditRepository) DeleteAuditLogsBefore(ctx context.Context, cutoff time
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete audit logs before cutoff: %w", err)
 	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get rows affected deleting audit logs: %w", err)
-	}
-	return n, nil
+	return affectedRows(result, "audit logs before cutoff")
 }
 
 // StreamAuditLogs returns rows for the given date range, constrained to scope,

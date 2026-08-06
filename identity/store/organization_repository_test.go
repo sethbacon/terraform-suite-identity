@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -83,8 +84,8 @@ func TestGetByName_NotFound(t *testing.T) {
 		WillReturnRows(emptyOrgRow())
 
 	org, err := repo.GetByName(context.Background(), "missing")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if org != nil {
 		t.Error("expected nil, got non-nil")
@@ -131,8 +132,8 @@ func TestGetByID_NotFound(t *testing.T) {
 		WillReturnRows(emptyOrgRow())
 
 	org, err := repo.GetByID(context.Background(), "missing")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if org != nil {
 		t.Error("expected nil, got non-nil")
@@ -264,8 +265,8 @@ func TestGetMember_NotFound(t *testing.T) {
 		WillReturnRows(emptyOrgMemberRow())
 
 	m, err := repo.GetMember(context.Background(), "org-1", "user-2")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if m != nil {
 		t.Error("expected nil, got non-nil")
@@ -421,8 +422,8 @@ func TestGetMemberWithRole_NotFound(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(orgMemberWithRoleRepoCols))
 
 	m, err := repo.GetMemberWithRole(context.Background(), "org-1", "user-1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 	if m != nil {
 		t.Errorf("expected nil, got %v", m)
