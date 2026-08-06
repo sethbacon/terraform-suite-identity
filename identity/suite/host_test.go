@@ -36,6 +36,17 @@ func TestCanonicalHost(t *testing.T) {
 		{"ipv6 default port", "[::1]:443", "::1"},
 		{"ipv6 non-default port", "[::1]:8080", "[::1]:8080"},
 		{"ipv6 uppercase + default port", "[2001:DB8::1]:443", "2001:db8::1"},
+		// A bare, unbracketed, non-zone-scoped IPv6 literal with no port reaches
+		// splitHostPort's url.Parse fallback: net.SplitHostPort rejects it ("too
+		// many colons") and bareIPv6WithZone declines it (no "%zone"), but
+		// url.Parse("//::1") recovers it cleanly. This is a legitimate input
+		// shape, not malformed junk, so it must round-trip unchanged — and it
+		// must fold to the SAME key as its bracketed spelling "[::1]" above, or
+		// the "Consumed by" join would miss.
+		{"ipv6 bare unbracketed, no port", "::1", "::1"},
+		{"ipv6 bare unbracketed non-loopback, no port", "2001:db8::1", "2001:db8::1"},
+		{"ipv6 bare unbracketed uppercase folds to lowercase", "2001:DB8::1", "2001:db8::1"},
+		{"ipv6 unspecified address", "::", "::"},
 		// Adversarial input shapes not exploitable beyond join-key mismatch (this
 		// is a normalization helper, not an auth check) but worth pinning since a
 		// real consumer (parsing a user-editable module source address or a
@@ -95,12 +106,151 @@ func TestCanonicalHost(t *testing.T) {
 	}
 }
 
+// TestCanonicalHost_IPv6SpellingsFoldTogether states the join invariant the two
+// new bare-IPv6 cases exist for: bracketed and unbracketed spellings of one
+// literal, with or without a default port, must all produce the same key.
+func TestCanonicalHost_IPv6SpellingsFoldTogether(t *testing.T) {
+	groups := [][]string{
+		{"::1", "[::1]", "[::1]:443", "[::1]:80", "[::1]:080"},
+		{"2001:db8::1", "2001:DB8::1", "[2001:db8::1]", "[2001:DB8::1]:443"},
+	}
+	for _, group := range groups {
+		want := CanonicalHost(group[0])
+		for _, in := range group[1:] {
+			if got := CanonicalHost(in); got != want {
+				t.Errorf("CanonicalHost(%q) = %q, want %q (same literal as %q)", in, got, want, group[0])
+			}
+		}
+	}
+}
+
+// TestSplitHostPort exercises the four host/port-splitting sub-cases directly,
+// which the audit noted were only reachable through the whole of CanonicalHost.
+func TestSplitHostPort(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		wantHost string
+		wantPort string
+		wantOK   bool
+	}{
+		{"no colon fast path", "reg.example.com", "reg.example.com", "", true},
+		{"SplitHostPort accepts host:port", "reg.example.com:8443", "reg.example.com", "8443", true},
+		{"SplitHostPort accepts [ipv6]:port", "[::1]:8443", "::1", "8443", true},
+		{"bare zone-scoped IPv6", "fe80::1%eth0", "fe80::1%eth0", "", true},
+		{"url.Parse fallback recovers bare IPv6", "::1", "::1", "", true},
+		{"malformed multi-colon rejected", "host:443:extra", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			host, port, ok := splitHostPort(tc.in)
+			if host != tc.wantHost || port != tc.wantPort || ok != tc.wantOK {
+				t.Errorf("splitHostPort(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tc.in, host, port, ok, tc.wantHost, tc.wantPort, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestCanonicalPort covers the port sub-case on its own, including the
+// "never mangle input" branch for a non-numeric port.
+func TestCanonicalPort(t *testing.T) {
+	cases := map[string]string{
+		"":          "",
+		"80":        "",
+		"443":       "",
+		"080":       "",
+		"0443":      "",
+		"8443":      "8443",
+		"08443":     "8443",
+		"notaport":  "notaport",
+		"65535":     "65535",
+		"-1":        "-1",
+		"000000080": "",
+	}
+	for in, want := range cases {
+		if got := canonicalPort(in); got != want {
+			t.Errorf("canonicalPort(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestStripScheme and TestFoldHost cover the remaining two pipeline steps.
+func TestStripScheme(t *testing.T) {
+	cases := map[string]string{
+		"reg.example.com":                 "reg.example.com",
+		"https://reg.example.com/":        "reg.example.com",
+		"http://reg.example.com:8080/v1/": "reg.example.com:8080",
+		// No "://" at all: returned untouched, colon or not.
+		"reg.example.com:8443": "reg.example.com:8443",
+		// Contains "://" but yields no usable authority — url.Parse either
+		// errors or returns an empty Host. The input is handed back untouched
+		// rather than silently emptied, so the caller's later steps decide.
+		"http://":   "http://",
+		"://nohost": "://nohost",
+		"https:// ": "https:// ",
+		"foo://":    "foo://",
+	}
+	for in, want := range cases {
+		if got := stripScheme(in); got != want {
+			t.Errorf("stripScheme(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestBareIPv6WithZone covers the zone-scoped-literal recognizer on its own,
+// including the two rejection branches (no "%" at all, and a "%" on something
+// that is not an IPv6 literal) that CanonicalHost can only reach indirectly.
+func TestBareIPv6WithZone(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantHost string
+		wantOK   bool
+	}{
+		{"fe80::1%eth0", "fe80::1%eth0", true},
+		{"2001:db8::1%eth0", "2001:db8::1%eth0", true},
+		// No "%" — not a zone-scoped literal.
+		{"fe80::1", "", false},
+		{"reg.example.com", "", false},
+		// "%" present, but the part before it is not an IP at all.
+		{"host%zone", "", false},
+		// "%" present and the prefix parses as an IP, but it is IPv4: the zone
+		// form is IPv6-only, so this must be rejected rather than passed through.
+		{"10.0.0.1%eth0", "", false},
+	}
+	for _, tc := range cases {
+		host, ok := bareIPv6WithZone(tc.in)
+		if host != tc.wantHost || ok != tc.wantOK {
+			t.Errorf("bareIPv6WithZone(%q) = (%q, %v), want (%q, %v)",
+				tc.in, host, ok, tc.wantHost, tc.wantOK)
+		}
+	}
+}
+
+func TestFoldHost(t *testing.T) {
+	cases := map[string]string{
+		"REG.Example.COM":  "reg.example.com",
+		"reg.example.com.": "reg.example.com",
+		"[::1]":            "::1",
+		"[2001:DB8::1]":    "2001:db8::1",
+		// IDNA lookup rejects underscores, so the host is kept as the
+		// lowercased value rather than dropped or mangled.
+		"Under_Score.Example.com": "under_score.example.com",
+	}
+	for in, want := range cases {
+		if got := foldHost(in); got != want {
+			t.Errorf("foldHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestCanonicalHost_Idempotent guards the join invariant: applying the function
 // twice equals applying it once, so re-canonicalizing a stored host never drifts.
 func TestCanonicalHost_Idempotent(t *testing.T) {
 	for _, in := range []string{
 		"reg.example.com", "REG.Example.com:443", "https://reg.example.com:8080",
-		"CAFÉ.Example.com", // IDN: punycode form must re-canonicalize stably
+		"CAFÉ.Example.com",                 // IDN: punycode form must re-canonicalize stably
+		"::1", "2001:db8::1", "[::1]:8080", // bare + bracketed IPv6
 	} {
 		once := CanonicalHost(in)
 		if twice := CanonicalHost(once); twice != once {

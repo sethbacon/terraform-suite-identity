@@ -52,24 +52,55 @@ func CanonicalHost(raw string) string {
 	if strings.Contains(raw, "@") {
 		return ""
 	}
-	// If a scheme slipped in (e.g. the value came from a full URL), keep only
-	// the authority component.
-	if strings.Contains(raw, "://") {
-		if u, err := url.Parse(raw); err == nil && u.Host != "" {
-			raw = u.Host
-		}
+	// The remainder is a linear pipeline: strip scheme → split host/port →
+	// fold the host → canonicalize the port → rejoin. Each step is a named
+	// helper below so it can be read, changed and unit-tested on its own.
+	raw = stripScheme(raw)
+	host, port, ok := splitHostPort(raw)
+	if !ok {
+		return ""
 	}
-	var host, port string
+	host = foldHost(host)
+	port = canonicalPort(port)
+	if port == "" {
+		return host
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// stripScheme keeps only the authority component when a scheme slipped in
+// (e.g. the value came from a full URL). Input without "://" is returned
+// unchanged, as is a full URL that does not parse into a non-empty Host.
+func stripScheme(raw string) string {
+	if !strings.Contains(raw, "://") {
+		return raw
+	}
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return raw
+}
+
+// splitHostPort separates an authority into its host and port components.
+// ok is false only for input that is not legitimate for a bare host-identity
+// join key, in which case CanonicalHost returns "" rather than passing garbage
+// through. Userinfo is rejected by CanonicalHost before this is reached, so
+// u.User is never non-nil here.
+//
+// The four cases are distinct enough that each carries its own rationale:
+func splitHostPort(raw string) (host, port string, ok bool) {
 	if !strings.Contains(raw, ":") {
 		// Fast path: the overwhelmingly common case is a bare hostname with no
 		// port and no colon at all. net.SplitHostPort always errors on this
 		// shape (there's no port to split off), so historically the code fell
 		// back to treating the whole string as the host — which is correct
 		// here and must not change.
-		host = raw
-	} else if h, p, err := net.SplitHostPort(raw); err == nil {
-		host, port = h, p
-	} else if zoned, ok := bareIPv6WithZone(raw); ok {
+		return raw, "", true
+	}
+	if h, p, err := net.SplitHostPort(raw); err == nil {
+		return h, p, true
+	}
+	if zoned, isZoned := bareIPv6WithZone(raw); isZoned {
 		// raw is a bare (unbracketed) IPv6 literal carrying an RFC 4007 zone ID
 		// (e.g. "fe80::1%eth0"). net.SplitHostPort demands brackets around an
 		// IPv6 host and errors on this shape even though there's no port to
@@ -77,30 +108,29 @@ func CanonicalHost(raw string) string {
 		// recover it (it misreads the "%zone" suffix as an invalid port).
 		// Handled directly via net.ParseIP so this legitimate, if rare,
 		// address form round-trips unchanged instead of being rejected.
-		host = zoned
-	} else {
-		// raw contains a colon, but it isn't a clean "host:port" or
-		// "[ipv6]:port" that net.SplitHostPort accepts, and it isn't a bare
-		// zone-scoped IPv6 literal either. This is either a shape net/url's
-		// authority parser can still recover cleanly (e.g. a bare, unbracketed
-		// IPv6 literal without a zone) or genuinely malformed junk
-		// ("host:443:extra") — never legitimate for a bare host-identity join
-		// key. Recover via url.Parse against a synthesized authority; anything
-		// that doesn't come back clean (parse failure, empty host) is rejected
-		// outright (returns "") rather than silently passed through as
-		// garbage. (Userinfo is already rejected above, so u.User is never
-		// non-nil here.)
-		u, err := url.Parse("//" + raw)
-		if err != nil || u.Host == "" {
-			return ""
-		}
-		raw = u.Host
-		if h, p, err := net.SplitHostPort(raw); err == nil {
-			host, port = h, p
-		} else {
-			host = raw
-		}
+		return zoned, "", true
 	}
+	// raw contains a colon, but it isn't a clean "host:port" or "[ipv6]:port"
+	// that net.SplitHostPort accepts, and it isn't a bare zone-scoped IPv6
+	// literal either. This is either a shape net/url's authority parser can
+	// still recover cleanly (e.g. a bare, unbracketed IPv6 literal without a
+	// zone, such as "::1") or genuinely malformed junk ("host:443:extra") —
+	// never legitimate for a bare host-identity join key. Recover via url.Parse
+	// against a synthesized authority; anything that doesn't come back clean
+	// (parse failure, empty host) is rejected outright.
+	u, err := url.Parse("//" + raw)
+	if err != nil || u.Host == "" {
+		return "", "", false
+	}
+	if h, p, splitErr := net.SplitHostPort(u.Host); splitErr == nil {
+		return h, p, true
+	}
+	return u.Host, "", true
+}
+
+// foldHost applies the case/dot/bracket/IDN folding that makes two cosmetically
+// different spellings of the same host compare equal.
+func foldHost(host string) string {
 	// Unwrap IPv6 brackets so bracketed and unbracketed spellings of the same
 	// literal fold together (e.g. "[::1]" and "[::1]:443" both → "::1").
 	host = strings.TrimPrefix(host, "[")
@@ -112,22 +142,25 @@ func CanonicalHost(raw string) string {
 	if ascii, err := idna.Lookup.ToASCII(host); err == nil && ascii != "" {
 		host = ascii
 	}
-	// Canonicalize the port numerically so equivalent spellings (":80", ":080")
-	// fold identically: drop default ports, and re-emit any other port without
-	// leading zeros.
-	if port != "" {
-		if n, err := strconv.Atoi(port); err == nil {
-			if n == 80 || n == 443 {
-				port = ""
-			} else {
-				port = strconv.Itoa(n)
-			}
-		}
-	}
+	return host
+}
+
+// canonicalPort normalizes a port numerically so equivalent spellings (":80",
+// ":080") fold identically: it drops the default ports and re-emits any other
+// port without leading zeros. A non-numeric port is returned unchanged, matching
+// the "never drop or mangle input" rule.
+func canonicalPort(port string) string {
 	if port == "" {
-		return host
+		return ""
 	}
-	return net.JoinHostPort(host, port)
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return port
+	}
+	if n == 80 || n == 443 {
+		return ""
+	}
+	return strconv.Itoa(n)
 }
 
 // bareIPv6WithZone recognizes a bare (unbracketed) IPv6 literal that carries an
