@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.22.0...v0.22.1) (2026-08-06)
+
+
+### Bug Fixes
+
+* **ci:** make CI controls able to fail a merge ([#164](https://github.com/sethbacon/terraform-suite-identity/issues/164)) ([041f3cc](https://github.com/sethbacon/terraform-suite-identity/commit/041f3cc2216e44baf34053650da1f2f517d3ddc3))
+* **notify:** contain background-job faults instead of crashing the host ([#166](https://github.com/sethbacon/terraform-suite-identity/issues/166)) ([d616d6e](https://github.com/sethbacon/terraform-suite-identity/commit/d616d6e792e28fea099c82e304dc8d0e54fa96e1))
+
 ## [0.22.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.21.0...v0.22.0) (2026-08-02)
 
 
