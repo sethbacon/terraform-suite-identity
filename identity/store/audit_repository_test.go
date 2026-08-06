@@ -14,16 +14,20 @@ import (
 // Column definitions
 // ---------------------------------------------------------------------------
 
+// auditCols mirrors the SELECT in ListAuditLogs and StreamAuditLogs: ten stored
+// columns, then the two the LEFT JOIN on users supplies. actor_email is STORED
+// (it is the actor retained on the row, which is what survives a user delete —
+// issue #142) and so sits with the stored columns, before the joined pair.
 var auditCols = []string{
 	"id", "user_id", "organization_id", "action",
-	"resource_type", "resource_id", "metadata", "ip_address", "created_at",
+	"resource_type", "resource_id", "metadata", "ip_address", "created_at", "actor_email",
 	"user_email", "user_name",
 }
 
-// auditGetCols mirrors the SELECT in GetAuditLog (9 base columns, no JOIN fields).
+// auditGetCols mirrors the SELECT in GetAuditLog (10 stored columns, no JOIN fields).
 var auditGetCols = []string{
 	"id", "user_id", "organization_id", "action",
-	"resource_type", "resource_id", "metadata", "ip_address", "created_at",
+	"resource_type", "resource_id", "metadata", "ip_address", "created_at", "actor_email",
 }
 
 // ---------------------------------------------------------------------------
@@ -43,13 +47,21 @@ func newAuditRepo(t *testing.T) (*AuditRepository, sqlmock.Sqlmock) {
 func sampleAuditRow() *sqlmock.Rows {
 	return sqlmock.NewRows(auditCols).
 		AddRow("log-1", "user-1", "org-1", "CREATE",
-			"module", "module-1", []byte(`{"key":"val"}`), "1.2.3.4", time.Now(), nil, nil)
+			"module", "module-1", []byte(`{"key":"val"}`), "1.2.3.4", time.Now(),
+			"actor@example.test", nil, nil)
 }
 
 func sampleAuditGetRow() *sqlmock.Rows {
 	return sqlmock.NewRows(auditGetCols).
 		AddRow("log-1", "user-1", "org-1", "CREATE",
-			"module", "module-1", []byte(`{"key":"val"}`), "1.2.3.4", time.Now())
+			"module", "module-1", []byte(`{"key":"val"}`), "1.2.3.4", time.Now(),
+			"actor@example.test")
+}
+
+// createdAuditRow is what the INSERT's RETURNING clause hands back: the
+// actor_email the database resolved (or the caller supplied).
+func createdAuditRow(actorEmail interface{}) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"actor_email"}).AddRow(actorEmail)
 }
 
 // ---------------------------------------------------------------------------
@@ -60,8 +72,8 @@ func strPtr(s string) *string { return &s }
 
 func TestCreateAuditLog_Success(t *testing.T) {
 	repo, mock := newAuditRepo(t)
-	mock.ExpectExec("INSERT INTO audit_logs").
-		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WillReturnRows(createdAuditRow("resolved@example.test"))
 
 	log := &models.AuditLog{
 		UserID:         strPtr("user-1"),
@@ -74,12 +86,60 @@ func TestCreateAuditLog_Success(t *testing.T) {
 	if err := repo.CreateAuditLog(context.Background(), log); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	// The caller left ActorEmail nil, so what the statement resolved has to come
+	// back on the struct — otherwise the write path can silently stop retaining
+	// the actor and nothing in-process would notice.
+	if log.ActorEmail == nil || *log.ActorEmail != "resolved@example.test" {
+		t.Errorf("ActorEmail = %v, want the address the INSERT resolved", log.ActorEmail)
+	}
+}
+
+// TestCreateAuditLog_ResolvesTheActorInTheInsert pins the shape of the statement,
+// not just its effect: the actor is resolved by a sub-select inside the INSERT.
+// A second round trip would be a different (and racier) design, and reverting to
+// a plain INSERT would silently stop retaining attribution.
+func TestCreateAuditLog_ResolvesTheActorInTheInsert(t *testing.T) {
+	repo, mock := newAuditRepo(t)
+	mock.ExpectQuery(`INSERT INTO audit_logs.*actor_email.*SELECT email FROM users WHERE id`).
+		WillReturnRows(createdAuditRow("resolved@example.test"))
+
+	if err := repo.CreateAuditLog(context.Background(), &models.AuditLog{
+		UserID: strPtr("user-1"),
+		Action: "CREATE",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("CreateAuditLog no longer resolves the actor inside the INSERT: %v", err)
+	}
+}
+
+// TestCreateAuditLog_CallerSuppliedActorWins covers the federated case: an entry
+// whose actor has no users row in THIS database still has to arrive attributed.
+func TestCreateAuditLog_CallerSuppliedActorWins(t *testing.T) {
+	repo, mock := newAuditRepo(t)
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(sqlmock.AnyArg(), strPtr("user-1"), nil, "CREATE", nil, nil, nil, nil,
+			sqlmock.AnyArg(), strPtr("sibling@example.test")).
+		WillReturnRows(createdAuditRow("sibling@example.test"))
+
+	log := &models.AuditLog{
+		UserID:     strPtr("user-1"),
+		Action:     "CREATE",
+		ActorEmail: strPtr("sibling@example.test"),
+	}
+	if err := repo.CreateAuditLog(context.Background(), log); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("the caller-supplied actor did not reach the statement: %v", err)
+	}
 }
 
 func TestCreateAuditLog_WithMetadata(t *testing.T) {
 	repo, mock := newAuditRepo(t)
-	mock.ExpectExec("INSERT INTO audit_logs").
-		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WillReturnRows(createdAuditRow(nil))
 
 	log := &models.AuditLog{
 		UserID:       strPtr("user-1"),
@@ -94,7 +154,7 @@ func TestCreateAuditLog_WithMetadata(t *testing.T) {
 
 func TestCreateAuditLog_DBError(t *testing.T) {
 	repo, mock := newAuditRepo(t)
-	mock.ExpectExec("INSERT INTO audit_logs").
+	mock.ExpectQuery("INSERT INTO audit_logs").
 		WillReturnError(errDB)
 
 	log := &models.AuditLog{Action: "CREATE"}

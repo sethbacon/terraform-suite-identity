@@ -35,7 +35,20 @@ type AuditFilters struct {
 	EndDate        *time.Time
 }
 
-// CreateAuditLog creates a new audit log entry
+// CreateAuditLog creates a new audit log entry.
+//
+// It stamps log.ID and log.CreatedAt, and — when the caller left ActorEmail nil
+// and UserID set — resolves the actor's address from the users table IN THE SAME
+// STATEMENT and writes it back into log. That denormalised copy is what keeps
+// the entry attributable after the user is deleted: audit_logs has carried no
+// foreign key to users since v0.25.0, so UserID survives the delete, but a uuid
+// whose users row is gone resolves to nobody (issue #142).
+//
+// Resolution is a scalar sub-select on the users primary key rather than a
+// second round trip, so a caller that does nothing still gets an attributed row
+// at the cost of one index lookup. A caller that DOES set ActorEmail wins: that
+// is the path for recording an actor this database holds no users row for (a
+// federated entry from a sibling application, for instance).
 func (r *AuditRepository) CreateAuditLog(ctx context.Context, log *models.AuditLog) error {
 	log.ID = uuid.New().String()
 	log.CreatedAt = time.Now()
@@ -51,11 +64,12 @@ func (r *AuditRepository) CreateAuditLog(ctx context.Context, log *models.AuditL
 	}
 
 	query := `
-		INSERT INTO audit_logs (id, user_id, organization_id, action, resource_type, resource_id, metadata, ip_address, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO audit_logs (id, user_id, organization_id, action, resource_type, resource_id, metadata, ip_address, created_at, actor_email)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, (SELECT email FROM users WHERE id = $2)))
+		RETURNING actor_email
 	`
 
-	_, err := r.db.ExecContext(ctx, query,
+	err := r.db.QueryRowContext(ctx, query,
 		log.ID,
 		log.UserID,
 		log.OrganizationID,
@@ -65,7 +79,8 @@ func (r *AuditRepository) CreateAuditLog(ctx context.Context, log *models.AuditL
 		metadataArg,
 		log.IPAddress,
 		log.CreatedAt,
-	)
+		log.ActorEmail,
+	).Scan(&log.ActorEmail)
 	if err != nil {
 		return fmt.Errorf("failed to create audit log: %w", err)
 	}
@@ -118,6 +133,7 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 			&metadataJSON,
 			&log.IPAddress,
 			&log.CreatedAt,
+			&log.ActorEmail,
 			&log.UserEmail,
 			&log.UserName,
 		)
@@ -157,9 +173,13 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 func buildListAuditLogsQueries(filters AuditFilters, scope OrgScope, limit, offset int) (countQuery string, countArgs []interface{}, listQuery string, listArgs []interface{}) {
 	// Build query with filters
 	countQuery = `SELECT COUNT(*) FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`
+	// al.actor_email is the RETAINED actor (stored on the row); u.email is the
+	// CURRENT one (joined). Both are projected, and neither COALESCEs into the
+	// other: a reader must be able to tell "this user still exists" from "this
+	// is who acted, and they are gone".
 	query := `
 		SELECT al.id, al.user_id, al.organization_id, al.action, al.resource_type, al.resource_id,
-		       al.metadata, al.ip_address, al.created_at,
+		       al.metadata, al.ip_address, al.created_at, al.actor_email,
 		       u.email AS user_email, u.name AS user_name
 		FROM audit_logs al
 		LEFT JOIN users u ON al.user_id = u.id
@@ -263,7 +283,7 @@ func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope O
 
 	// GUARD audit-scope-byid (issue terraform-registry#719).
 	query := `
-		SELECT id, user_id, organization_id, action, resource_type, resource_id, metadata, ip_address, created_at
+		SELECT id, user_id, organization_id, action, resource_type, resource_id, metadata, ip_address, created_at, actor_email
 		FROM audit_logs
 		WHERE id = $1
 	`
@@ -283,6 +303,7 @@ func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope O
 		&metadataJSON,
 		&log.IPAddress,
 		&log.CreatedAt,
+		&log.ActorEmail,
 	)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -329,11 +350,17 @@ func (r *AuditRepository) DeleteAuditLogsBefore(ctx context.Context, cutoff time
 // search rooted at ListAuditLogs reaches a different method in a different file
 // serving GET /admin/audit-logs/export. Making scope a required parameter here
 // is what stops the next access axis from repeating it.
+//
+// The projection is part of this method's contract because the caller scans the
+// rows itself. It gained al.actor_email in v0.25.0, in COLUMN 10, between
+// created_at and the joined user_email/user_name — a caller's Scan must add the
+// destination there. The export is the compliance artefact, so it is the last
+// place that should omit the attribution that survives a user deletion.
 func (r *AuditRepository) StreamAuditLogs(ctx context.Context, startDate, endDate time.Time, scope OrgScope) (*sql.Rows, error) {
 	// GUARD audit-scope-export (issue terraform-registry#719).
 	query := `
 		SELECT al.id, al.user_id, al.organization_id, al.action, al.resource_type, al.resource_id,
-		       al.metadata, al.ip_address, al.created_at,
+		       al.metadata, al.ip_address, al.created_at, al.actor_email,
 		       u.email AS user_email, u.name AS user_name
 		FROM audit_logs al
 		LEFT JOIN users u ON al.user_id = u.id
