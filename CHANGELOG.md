@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.23.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.22.1...v0.23.0) (2026-08-06)
+
+
+### Features
+
+* **store:** index the audit scope predicate and self-bound revocations ([#170](https://github.com/sethbacon/terraform-suite-identity/issues/170)) ([601adfb](https://github.com/sethbacon/terraform-suite-identity/commit/601adfbcc8f8211bc4de0fa38445d2a24affd91b)), closes [#154](https://github.com/sethbacon/terraform-suite-identity/issues/154)
+
+
+### Bug Fixes
+
+* **auth,store:** fail closed on empty, missing and evicted security input ([#167](https://github.com/sethbacon/terraform-suite-identity/issues/167)) ([a1af44b](https://github.com/sethbacon/terraform-suite-identity/commit/a1af44b204b380c7d08d3d2e9a09824dfc4549bb)), closes [#69](https://github.com/sethbacon/terraform-suite-identity/issues/69) [#134](https://github.com/sethbacon/terraform-suite-identity/issues/134) [#135](https://github.com/sethbacon/terraform-suite-identity/issues/135)
+* **db,store:** return borrowed pooled connections and stop handing out cached state ([#169](https://github.com/sethbacon/terraform-suite-identity/issues/169)) ([e045f86](https://github.com/sethbacon/terraform-suite-identity/commit/e045f86487d7f39dc291057c238dcc0fecb86702)), closes [#139](https://github.com/sethbacon/terraform-suite-identity/issues/139) [#147](https://github.com/sethbacon/terraform-suite-identity/issues/147)
+* **docs:** reconcile documented controls with the code, and collapse duplicated membership queries ([#171](https://github.com/sethbacon/terraform-suite-identity/issues/171)) ([3199143](https://github.com/sethbacon/terraform-suite-identity/commit/319914303c8481ebd93095eac9889b30c971a373))
+
 ## [0.22.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.22.0...v0.22.1) (2026-08-06)
 
 
