@@ -86,8 +86,76 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 		return []*models.AuditLog{}, 0, nil
 	}
 
+	countQuery, countArgs, query, args := buildListAuditLogsQueries(filters, scope, limit, offset)
+
+	// Get total count
+	var total int
+	err := r.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count audit logs: %w", err)
+	}
+
+	// Execute query
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list audit logs: %w", err)
+	}
+	defer rows.Close()
+
+	logs := make([]*models.AuditLog, 0)
+	for rows.Next() {
+		log := &models.AuditLog{}
+		var metadataJSON []byte
+
+		err := rows.Scan(
+			&log.ID,
+			&log.UserID,
+			&log.OrganizationID,
+			&log.Action,
+			&log.ResourceType,
+			&log.ResourceID,
+			&metadataJSON,
+			&log.IPAddress,
+			&log.CreatedAt,
+			&log.UserEmail,
+			&log.UserName,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan audit log: %w", err)
+		}
+
+		// Unmarshal metadata from JSONB
+		if metadataJSON != nil {
+			err = json.Unmarshal(metadataJSON, &log.Metadata)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to unmarshal audit log metadata: %w", err)
+			}
+		}
+
+		logs = append(logs, log)
+	}
+
+	return logs, total, rows.Err()
+}
+
+// buildListAuditLogsQueries assembles the two statements ListAuditLogs emits —
+// the COUNT and the ordered, paginated page query — together with their
+// arguments.
+//
+// It is a separate function so that the SQL a test reasons about is the SQL
+// that actually reaches PostgreSQL, byte for byte. The index this query depends
+// on (idx_identity_audit_logs_org_created_at, migration 000006) is only useful
+// if it matches the predicate AND the ORDER BY that are really produced here, so
+// the integration test that EXPLAINs the plan calls this builder rather than
+// restating the query — a hand-copied query in a test can drift from the
+// emitted one and would then be proving the wrong plan.
+//
+// The caller is responsible for the MatchesNothing() short-circuit; a
+// fail-closed scope reaching here still yields an " AND FALSE" predicate rather
+// than an unfiltered query.
+func buildListAuditLogsQueries(filters AuditFilters, scope AuditScope, limit, offset int) (countQuery string, countArgs []interface{}, listQuery string, listArgs []interface{}) {
 	// Build query with filters
-	countQuery := `SELECT COUNT(*) FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`
+	countQuery = `SELECT COUNT(*) FROM audit_logs al LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`
 	query := `
 		SELECT al.id, al.user_id, al.organization_id, al.action, al.resource_type, al.resource_id,
 		       al.metadata, al.ip_address, al.created_at,
@@ -162,58 +230,22 @@ func (r *AuditRepository) ListAuditLogs(ctx context.Context, filters AuditFilter
 		paramIndex++
 	}
 
-	// Get total count
-	var total int
-	err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to count audit logs: %w", err)
-	}
+	// The COUNT runs with exactly the predicate built so far and none of the
+	// pagination arguments, so it is snapshotted before ORDER BY/LIMIT/OFFSET
+	// are appended. Copying keeps the two argument lists independent — appending
+	// to `args` below must not be able to reach the count's backing array.
+	countArgs = make([]interface{}, len(args))
+	copy(countArgs, args)
 
-	// Add ordering and pagination
+	// Add ordering and pagination. The ORDER BY is part of the hot path, not
+	// decoration: idx_identity_audit_logs_org_created_at is
+	// (organization_id, created_at DESC) precisely so the tenant predicate and
+	// this sort are served by one index rather than an index scan followed by a
+	// sort of every row the tenant owns.
 	query += fmt.Sprintf(` ORDER BY al.created_at DESC LIMIT $%d OFFSET $%d`, paramIndex, paramIndex+1) // #nosec G202 -- paramIndex is an internal counter for $N placeholder numbering; no user input is interpolated into the query string
 	args = append(args, limit, offset)
 
-	// Execute query
-	rows, err := r.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to list audit logs: %w", err)
-	}
-	defer rows.Close()
-
-	logs := make([]*models.AuditLog, 0)
-	for rows.Next() {
-		log := &models.AuditLog{}
-		var metadataJSON []byte
-
-		err := rows.Scan(
-			&log.ID,
-			&log.UserID,
-			&log.OrganizationID,
-			&log.Action,
-			&log.ResourceType,
-			&log.ResourceID,
-			&metadataJSON,
-			&log.IPAddress,
-			&log.CreatedAt,
-			&log.UserEmail,
-			&log.UserName,
-		)
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to scan audit log: %w", err)
-		}
-
-		// Unmarshal metadata from JSONB
-		if metadataJSON != nil {
-			err = json.Unmarshal(metadataJSON, &log.Metadata)
-			if err != nil {
-				return nil, 0, fmt.Errorf("failed to unmarshal audit log metadata: %w", err)
-			}
-		}
-
-		logs = append(logs, log)
-	}
-
-	return logs, total, rows.Err()
+	return countQuery, countArgs, query, args
 }
 
 // GetAuditLog retrieves a single audit log entry by ID within scope.

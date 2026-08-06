@@ -226,9 +226,17 @@ jobs:
         # Force/recovery entry point in identity/db.go to clear the dirty state
         # a partially applied migration leaves behind. A non-blocking migration
         # gate is the same as no migration gate.
+        #
+        # The -run filter is the whole TestIntegration prefix, not one test
+        # name: a filter naming a single test is a gate that silently ignores
+        # every integration test added after it. Any package may contribute
+        # (identity/store's migration-index and prune suites do), and each
+        # DB-backed suite must use its own database — package test binaries run
+        # concurrently, and two suites resetting one identity schema would make
+        # each one's result depend on the other's timing.
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/identity_test?sslmode=disable
-        run: go test -tags=integration ./... -run TestIntegrationRunMigrations -v
+        run: go test -tags=integration ./... -run 'TestIntegration' -v
 
   gosec:
     name: Security Scan (gosec)
