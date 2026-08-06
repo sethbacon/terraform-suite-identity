@@ -22,6 +22,8 @@ import (
 	"net"
 	"net/smtp"
 	"strconv"
+	"sync/atomic"
+	"time"
 )
 
 // Config is the shared outbound mail relay used to deliver a message. Host
@@ -40,6 +42,39 @@ type Config struct {
 	UseTLS bool
 }
 
+// defaultSendTimeout is the fallback deadline Send applies to the WHOLE SMTP
+// conversation when the caller's context carries none of its own.
+//
+// Only the TCP dial is bounded by context cancellation; every subsequent step
+// (greeting, EHLO, STARTTLS, AUTH, MAIL, RCPT, DATA, QUIT) goes through
+// net/smtp, which is not context-aware, so the connection deadline set below
+// is the only thing that can end them. Without a fallback, a caller holding an
+// app-lifetime context — which is exactly what a background job's context is —
+// would block here forever against a relay that accepts the connection and
+// then stalls, wedging that job for the life of the process.
+//
+// The value is a whole-conversation cap, not a per-command one. RFC 5321
+// §4.5.3.2 recommends per-command client timeouts on the order of minutes, so
+// this is deliberately generous enough not to fail a slow-but-working relay,
+// while still guaranteeing the call returns.
+const defaultSendTimeout = 2 * time.Minute
+
+// sendTimeoutOverride shortens the fallback deadline. It exists only so a test
+// can watch the deadline fire without waiting the production budget, and it is
+// atomic because Send reads it on whichever goroutine the caller is running
+// while a finished test may be restoring it — a plain var would be a data race
+// by construction. Zero (the default, and what a test restores) means
+// defaultSendTimeout.
+var sendTimeoutOverride atomic.Int64
+
+// sendTimeout is the fallback deadline in force right now.
+func sendTimeout() time.Duration {
+	if ns := sendTimeoutOverride.Load(); ns > 0 {
+		return time.Duration(ns)
+	}
+	return defaultSendTimeout
+}
+
 // authFor returns the SMTP authentication mechanism for the configured
 // credentials, or nil when no username is set (an internal relay may accept
 // unauthenticated mail, and PlainAuth.Start would otherwise refuse to send a
@@ -56,7 +91,20 @@ func authFor(cfg Config) smtp.Auth {
 // implicit TLS connection (port 465) is attempted first, falling back to an
 // explicit STARTTLS upgrade (port 587/25 pattern) on dial failure; otherwise
 // the connection is deliberately kept plaintext — see sendPlain.
+//
+// Send always returns. When ctx carries no deadline of its own, Send imposes
+// sendTimeout on the whole conversation, so a relay that accepts the TCP
+// connection and then stalls produces a timeout error rather than blocking the
+// caller indefinitely. A caller that wants a tighter (or looser) bound passes
+// a context with its own deadline, which is honoured as-is.
 func Send(ctx context.Context, cfg Config, to []string, msg []byte) error {
+	// A background job's context is cancelled at shutdown but has no deadline,
+	// so without this the entire SMTP conversation below would be unbounded.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, sendTimeout())
+		defer cancel()
+	}
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	auth := authFor(cfg)
 	if cfg.UseTLS {

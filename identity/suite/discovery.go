@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/safeloop"
 )
 
 // SiblingState is the discovery client's view of the configured sibling.
@@ -130,8 +132,14 @@ func (d *DiscoveryClient) Snapshot() (SiblingState, *Manifest) {
 }
 
 // Start runs the poll loop until ctx is cancelled. Run it in a goroutine.
+//
+// A panic inside a single poll is recovered and logged, and the loop continues
+// with the next tick. The goroutine belongs to the host application, so an
+// unrecovered panic here would terminate the host process rather than fail a
+// library call — losing one poll (the client simply keeps its previous state
+// until the next one) is strictly preferable.
 func (d *DiscoveryClient) Start(ctx context.Context) {
-	d.pollOnce(ctx)
+	d.safePollOnce(ctx)
 	t := time.NewTicker(d.pollInterval)
 	defer t.Stop()
 	for {
@@ -139,9 +147,16 @@ func (d *DiscoveryClient) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			d.pollOnce(ctx)
+			d.safePollOnce(ctx)
 		}
 	}
+}
+
+// safePollOnce is the loop body's panic boundary. pollOnce releases d.mu with
+// a deferred unlock, so a recovered panic cannot leave the client's state lock
+// held (which would wedge every Snapshot caller instead of crashing).
+func (d *DiscoveryClient) safePollOnce(ctx context.Context) {
+	safeloop.Guard("suite-discovery", func() { d.pollOnce(ctx) })
 }
 
 func (d *DiscoveryClient) pollOnce(ctx context.Context) {

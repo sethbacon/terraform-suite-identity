@@ -195,10 +195,16 @@ func TestExpiryNotifier_SendExpiryEmail_AlreadyExpired(t *testing.T) {
 // runCheck — exercised via sqlmock
 // ---------------------------------------------------------------------------
 
-// findExpiringKeysCols mirrors the SELECT columns in identity/store's FindExpiringKeys
+// findExpiringKeysCols mirrors the SELECT columns in identity/store's
+// FindExpiringKeys, which shares scanAPIKey's full 12-column projection
+// (expiry_notification_sent_at included). It must match exactly: a short
+// column list makes every row fail to scan, so a test that thinks it is
+// exercising the per-key loop would silently only exercise the query error
+// path.
 var findExpiringKeysCols = []string{
 	"id", "user_id", "organization_id", "name", "description",
-	"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at", "created_at",
+	"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at",
+	"expiry_notification_sent_at", "created_at",
 }
 
 var userColsForNotifier = []string{"id", "email", "name", "oidc_sub", "created_at", "updated_at"}
@@ -261,7 +267,7 @@ func TestExpiryNotifier_RunCheck_KeyWithNilUserID_Skipped(t *testing.T) {
 	apiKeyMock.ExpectQuery("SELECT.*FROM api_keys").
 		WillReturnRows(sqlmock.NewRows(findExpiringKeysCols).
 			AddRow("key-1", nil, "org-1", "CI Key", nil,
-				"hash", "tfr_abc", []byte(`["modules:read"]`), &expiresAt, nil, time.Now()))
+				"hash", "tfr_abc", []byte(`["modules:read"]`), &expiresAt, nil, nil, time.Now()))
 
 	n.runCheck(context.Background()) // must not panic
 }
@@ -278,7 +284,7 @@ func TestExpiryNotifier_RunCheck_UserLookupError_Skipped(t *testing.T) {
 	apiKeyMock.ExpectQuery("SELECT.*FROM api_keys").
 		WillReturnRows(sqlmock.NewRows(findExpiringKeysCols).
 			AddRow("key-1", &userID, "org-1", "CI Key", nil,
-				"hash", "tfr_abc", []byte(`["modules:read"]`), &expiresAt, nil, time.Now()))
+				"hash", "tfr_abc", []byte(`["modules:read"]`), &expiresAt, nil, nil, time.Now()))
 
 	// User lookup fails → key is skipped, no email sent
 	userMock.ExpectQuery("SELECT.*FROM users WHERE id").
@@ -303,7 +309,7 @@ func TestExpiryNotifier_RunCheck_EmptyUserEmail_Skipped(t *testing.T) {
 	apiKeyMock.ExpectQuery("SELECT.*FROM api_keys").
 		WillReturnRows(sqlmock.NewRows(findExpiringKeysCols).
 			AddRow("key-1", &userID, "org-1", "CI Key", nil,
-				"hash", "tfr_abc", []byte(`["modules:read"]`), &expiresAt, nil, time.Now()))
+				"hash", "tfr_abc", []byte(`["modules:read"]`), &expiresAt, nil, nil, time.Now()))
 
 	// User exists but has no email address → skip
 	userMock.ExpectQuery("SELECT.*FROM users WHERE id").
@@ -322,16 +328,8 @@ func TestExpiryNotifier_RunCheck_AlreadyClaimed_SkipsSend(t *testing.T) {
 
 	expiresAt := time.Now().Add(3 * 24 * time.Hour)
 	userID := "user-1"
-	// The full scanAPIKey projection includes expiry_notification_sent_at (NULL for
-	// an as-yet-unnotified expiring key), so FindExpiringKeys scans successfully and
-	// the run reaches the claim.
-	fullCols := []string{
-		"id", "user_id", "organization_id", "name", "description",
-		"key_hash", "key_prefix", "scopes", "expires_at", "last_used_at",
-		"expiry_notification_sent_at", "created_at",
-	}
 	apiKeyMock.ExpectQuery("SELECT.*FROM api_keys").
-		WillReturnRows(sqlmock.NewRows(fullCols).
+		WillReturnRows(sqlmock.NewRows(findExpiringKeysCols).
 			AddRow("key-1", &userID, "org-1", "CI Key", nil,
 				"hash", "tfr_abc", []byte(`["modules:read"]`), &expiresAt, nil, nil, time.Now()))
 	userMock.ExpectQuery("SELECT.*FROM users WHERE id").
