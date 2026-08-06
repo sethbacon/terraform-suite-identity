@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.24.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.23.0...v0.24.0) (2026-08-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **store:** not-found and zero-row mutations are now reported as errors wrapping store.ErrNotFound, and four bulk accessors plus models.OIDCConfig.GetScopes changed signature. Most affected call sites still COMPILE and change behaviour silently: a handler written as `if err != nil { 500 }` followed by `if value == nil { 404 }` keeps building and turns every 404 into a 500, and an existence probe where not-found is the happy path (GetUserByEmail before creating a user, GetByName before creating an organization, GetMember before adding a member) becomes an unconditional 500. Idempotent SCIM/IdP reconciliation loops calling RemoveMember, UpdateMemberRole or RevokeAPIKey now abort on the first already-applied element unless they skip store.ErrNotFound. Signature changes: APIKeyRepository.DeleteExpiredKeys, OrganizationRepository.RemoveAllMembershipsForUser, OIDCConfigRepository.DeactivateAllOIDCConfigs and TokenRepository.CleanupExpiredRevocations now return (int64, error); models.OIDCConfig.GetScopes now returns ([]string, error). See UPGRADING.md for the five-step migration and the full accessor list.
+
+### Bug Fixes
+
+* **store:** report not-found with a single ErrNotFound sentinel ([#172](https://github.com/sethbacon/terraform-suite-identity/issues/172)) ([cf03788](https://github.com/sethbacon/terraform-suite-identity/commit/cf037884230c5a1ae694f6c12907560dfb848f8e))
+
 ## [0.23.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.22.1...v0.23.0) (2026-08-06)
 
 
