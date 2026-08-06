@@ -124,6 +124,11 @@ func TestFailOpenClass_RevokeToken(t *testing.T) {
 				mock.ExpectExec("INSERT INTO revoked_tokens").
 					WithArgs("jti-123", "user-456", exp).
 					WillReturnResult(sqlmock.NewResult(1, 1))
+				// A successful revocation also self-prunes the denylist
+				// (see RevokeToken); expected here so the prune's DELETE
+				// is not an unexpected call.
+				mock.ExpectExec("DELETE FROM revoked_tokens").
+					WillReturnResult(sqlmock.NewResult(0, 0))
 			},
 		},
 		{

@@ -32,9 +32,17 @@ func TestRevokeToken_Success(t *testing.T) {
 	mock.ExpectExec("INSERT INTO revoked_tokens").
 		WithArgs("jti-123", "user-456", exp).
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	// The insert is followed by the self-prune (see RevokeToken): the write
+	// path is what bounds the table, so a successful revocation on a fresh
+	// repository issues both statements.
+	mock.ExpectExec("DELETE FROM revoked_tokens").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	if err := repo.RevokeToken(context.Background(), "jti-123", "user-456", exp); err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }
 
@@ -47,6 +55,11 @@ func TestRevokeToken_DBError(t *testing.T) {
 
 	if err := repo.RevokeToken(context.Background(), "jti-123", "user-456", exp); err == nil {
 		t.Error("expected error, got nil")
+	}
+	// A failed insert added nothing, so there is nothing to prune: the throttle
+	// slot must still be unclaimed.
+	if got := repo.nextPruneAtUnixNano.Load(); got != 0 {
+		t.Errorf("a failed revocation must not claim a prune slot, got nextPruneAt=%d", got)
 	}
 }
 
