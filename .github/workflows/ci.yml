@@ -68,25 +68,24 @@ jobs:
             print "PASS: " cov "% meets the " thr "% threshold."
           }'
 
-      - name: Check per-package coverage floor (security-critical packages)
+      - name: Check per-package coverage floor (derived — every package gated by default)
         # The aggregate 75% floor above can hide a low-coverage security-critical
-        # package behind easy-to-cover CRUD/model packages (see issue #66: this
-        # once let identity/auth/oidc sit at ~53% while the blended total looked
-        # fine). Reuse the coverage.out profile the "Test (with coverage)" step
-        # already produced above (no re-running tests, no new tooling — pure
-        # stdlib python3, preinstalled on ubuntu-latest) and enforce a
-        # statement-weighted floor scoped to identity/auth,
-        # identity/auth/oauthstate, identity/auth/oidc, identity/store, and
-        # identity/suite (JWT, OAuth state store-and-consume, OIDC
-        # relying-party, API-key, data-access, and suite-coupling/discovery-client
-        # logic) independent of the blended total. identity/suite was added per the reopened #66: it is
-        # the library's other named security-relevant surface (the suite-coupling
-        # contract) and had been omitted from this list, so a coverage regression
-        # there could hide behind the aggregate the same way identity/auth/oidc
-        # once did. The root "identity" package (migration runner) is deliberately
-        # not gated here: it legitimately requires a live PostgreSQL to exercise
-        # and is covered instead by the "integration-test" job's
-        # identity/db_integration_test.go.
+        # package behind easy-to-cover CRUD/model packages (issue #66: this once
+        # let identity/auth/oidc sit at ~53% while the blended total looked fine).
+        #
+        # The package set is DERIVED from the coverage profile, not hand-listed.
+        # An opt-in list of "security-critical packages" is the same control gap
+        # one level up: it is maintained by hand, so a newly added package is
+        # ungated until someone remembers to add it — which is precisely how
+        # identity/auth/oidc slid, and then how identity/mailer (the outbound
+        # SMTP transport, whose entire reason for existing is getting TLS
+        # negotiation right) sat at 61.9% while never appearing in the list at
+        # all. Every package that appears in the profile is therefore gated
+        # unless it is explicitly EXEMPT below with a written justification.
+        #
+        # Reuses the coverage.out profile the "Test (with coverage)" step already
+        # produced (no re-running tests, no new tooling — stdlib python3,
+        # preinstalled on ubuntu-latest).
         run: |
           python3 - <<'PY'
           import sys
@@ -94,13 +93,19 @@ jobs:
 
           THRESHOLD = 75.0
           MODULE_PREFIX = "github.com/sethbacon/terraform-suite-identity/"
-          GATED_PACKAGES = [
-              "identity/auth",
-              "identity/auth/oauthstate",
-              "identity/auth/oidc",
-              "identity/store",
-              "identity/suite",
-          ]
+
+          # Packages exempt from the per-package floor, each with the reason it
+          # cannot be gated here. Adding an entry is a deliberate, reviewable act
+          # (this file is CODEOWNER-gated); forgetting to add one is not, which
+          # is why the default is "gated".
+          EXEMPT = {
+              "identity": (
+                  "migration runner (RunMigrations/GetMigrationVersion): requires a "
+                  "live PostgreSQL, so it cannot be covered by this unit-test job. "
+                  "It is exercised by the required 'Integration Tests (PostgreSQL)' "
+                  "job instead (identity/db_integration_test.go, -tags=integration)."
+              ),
+          }
 
           covered = defaultdict(int)
           total = defaultdict(int)
@@ -119,19 +124,37 @@ jobs:
                       continue
                   rel_path = file_path[len(MODULE_PREFIX):]
                   pkg = rel_path.rsplit("/", 1)[0] if "/" in rel_path else rel_path
-                  numstmt = int(numstmt_str)
-                  count = int(count_str)
-                  total[pkg] += numstmt
-                  if count > 0:
-                      covered[pkg] += numstmt
+                  total[pkg] += int(numstmt_str)
+                  if int(count_str) > 0:
+                      covered[pkg] += int(numstmt_str)
+
+          if not total:
+              print("FAIL: coverage.out contained no statements for this module — "
+                    "the coverage gate would pass vacuously.")
+              sys.exit(1)
+
+          # A stale exemption is itself an ungated package waiting to happen:
+          # if an exempt package is renamed or removed, the entry must not
+          # silently linger and pre-authorize a future package of that name.
+          stale = sorted(set(EXEMPT) - set(total))
+          if stale:
+              print("FAIL: EXEMPT lists package(s) not present in the coverage profile; "
+                    "remove the stale entr(y/ies) so they cannot silently pre-exempt "
+                    "a future package of the same name:")
+              for pkg in stale:
+                  print(f"  - {pkg}")
+              sys.exit(1)
 
           failed = []
-          for pkg in GATED_PACKAGES:
-              stmt_total = total.get(pkg, 0)
+          for pkg in sorted(total):
+              stmt_total = total[pkg]
+              pct = covered.get(pkg, 0) * 100.0 / stmt_total
+              if pkg in EXEMPT:
+                  print(f"EXEMPT: {pkg} coverage {pct:.1f}% — {EXEMPT[pkg]}")
+                  continue
               if stmt_total == 0:
                   print(f"SKIP: {pkg} has no statements to cover")
                   continue
-              pct = covered.get(pkg, 0) * 100.0 / stmt_total
               status = "PASS" if pct >= THRESHOLD else "FAIL"
               cmp = ">=" if pct >= THRESHOLD else "<"
               print(f"{status}: {pkg} coverage {pct:.1f}% ({cmp} {THRESHOLD:.0f}% required floor)")
@@ -140,13 +163,18 @@ jobs:
 
           if failed:
               print()
-              print("One or more security-critical packages are below their per-package coverage floor:")
+              print("One or more packages are below the per-package coverage floor:")
               for pkg, pct in failed:
                   print(f"  - {pkg}: {pct:.1f}% < {THRESHOLD:.0f}%")
+              print()
+              print("Raise the package's coverage. Do not lower THRESHOLD, and do not "
+                    "add an EXEMPT entry unless the package genuinely cannot be "
+                    "exercised by this job (and is gated by another required job).")
               sys.exit(1)
 
           print()
-          print("All gated packages meet their per-package coverage floor.")
+          print(f"All {len(total) - len(EXEMPT)} gated package(s) meet the "
+                f"{THRESHOLD:.0f}% per-package coverage floor.")
           PY
 
       - name: Upload coverage
@@ -185,24 +213,19 @@ jobs:
       - name: Run migration integration tests
         # A separate job (not a step in "test" above) on purpose: it needs its
         # own postgres service container, and keeping it independent means a
-        # slow or transiently flaky DB-backed job never blocks the fast
-        # unit-test feedback loop. The "integration" build tag keeps this test
-        # out of every plain `go test ./...` invocation (this job is the only
-        # place it runs). See identity/db_integration_test.go and issue #66.
+        # slow DB-backed job never slows the fast unit-test feedback loop. The
+        # "integration" build tag keeps this test out of every plain
+        # `go test ./...` invocation (this job is the only place it runs). See
+        # identity/db_integration_test.go.
         #
-        # TEMPORARY: continue-on-error until issue #64's fix
-        # (fix/64-migration-down-schema-drop, PR #101) merges to main. Until
-        # then, this step's TestIntegrationRunMigrations deterministically
-        # fails its final RunMigrations(db, "down") assertion, because
-        # 000001's down-migration still ends with `DROP SCHEMA IF EXISTS
-        # identity`, which fails while golang-migrate's own bookkeeping table
-        # still lives inside that schema -- that failure is expected, and is
-        # exactly the regression this test exists to catch (see the test's
-        # doc comment). continue-on-error keeps that known, already-fixed-
-        # elsewhere failure from blocking merges to main while #101 is still
-        # in independent review. Remove this line once #101 merges and this
-        # job goes green for real.
-        continue-on-error: true
+        # This step is deliberately NOT continue-on-error, and this job is a
+        # required status check on main (issue #140). It is the only place the
+        # migration runner is exercised against a real PostgreSQL, and both
+        # consuming applications call RunMigrations at startup, so a migration
+        # defect that does not fail here fails a live deploy instead — with no
+        # Force/recovery entry point in identity/db.go to clear the dirty state
+        # a partially applied migration leaves behind. A non-blocking migration
+        # gate is the same as no migration gate.
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/identity_test?sslmode=disable
         run: go test -tags=integration ./... -run TestIntegrationRunMigrations -v
@@ -247,7 +270,15 @@ jobs:
         # Reachability-aware scan of the Go vulnerability database against the
         # currently pinned go.sum versions. Runs on every push/PR AND weekly via
         # the schedule trigger above, independent of Dependabot's cadence.
+        #
+        # The scanner binary is version-pinned (like gosec above) rather than
+        # installed from @latest: an unpinned scanner is an unreviewed
+        # third-party binary executing in CI on every run, and pinning it costs
+        # nothing in freshness — govulncheck fetches the vulnerability database
+        # at runtime, so a pinned binary still reports newly disclosed
+        # advisories. Dependabot does not bump this pin (it is not a module
+        # dependency); refresh it deliberately.
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           export PATH="$PATH:$(go env GOPATH)/bin"
           govulncheck ./...
