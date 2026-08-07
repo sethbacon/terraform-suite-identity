@@ -1,10 +1,15 @@
 // channel_repository.go is the DAO for notification_channels: admin-configured
 // delivery destinations (webhook, Slack, Microsoft Teams, or an ad-hoc email
 // recipient list) for notification events, in addition to each app's own
-// shared SMTP recipients list. Every consuming app's notification_channels
-// table must use this exact schema: id UUID, name/type/encrypted_target TEXT,
-// events JSONB, enabled BOOLEAN, last_status/last_error TEXT,
-// last_sent_at/created_at/updated_at TIMESTAMPTZ.
+// shared SMTP recipients list.
+//
+// The table is owned and created by the CONSUMING APP, not by this module's
+// migrations. Its required shape used to be stated here as a sentence, which
+// each app then re-implemented by hand and drifted from; it now lives in
+// schema.go as ChannelTableDDL (the statement to apply) and
+// channelColumnRequirements (what VerifyChannelTable asserts at startup), both
+// executed by this package's own tests. See schema.go for the shape and for why
+// no migration here creates the table.
 package notify
 
 import (
