@@ -28,6 +28,7 @@ package httpsafe
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -171,12 +172,22 @@ func deniedRange(ip net.IP) string {
 // ValidateURL checks a configured URL against the egress policy: http/https
 // scheme, non-empty host, and — when the host is not allow-listed — no
 // resolution to a denied range. It is intended for config-write time so
-// private/metadata targets are rejected with a clear error at save.
+// private/metadata targets are rejected with a clear error at save, and for
+// pre-flighting a URL this process is about to fetch.
+//
+// ctx governs the DNS lookup, capped at resolveTimeout. Callers on a request
+// path MUST pass the request's context so a client disconnect or a shorter
+// caller deadline cancels the lookup instead of always waiting the full
+// timeout; a nil ctx (a CLI or startup path with no caller context) is treated
+// as context.Background().
 //
 // A DNS lookup failure is NOT a validation error: the record may only resolve
 // later (or only inside the deployment network), and the dial-time
-// resolve-and-pin check remains the authoritative enforcement point.
-func (g *Guard) ValidateURL(rawURL string) error {
+// resolve-and-pin check remains the authoritative enforcement point. A lookup
+// CANCELLED by ctx is likewise not a validation error — cancellation says
+// nothing about the target, and turning "the caller went away" into "this URL
+// is denied" would be a false rejection at config-write time.
+func (g *Guard) ValidateURL(ctx context.Context, rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL format: %w", err)
@@ -195,7 +206,10 @@ func (g *Guard) ValidateURL(rawURL string) error {
 		return g.checkIP(host, ip)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
 	defer cancel()
 	ips, err := g.resolve(ctx, host)
 	if err != nil {
@@ -312,7 +326,7 @@ func (g *Guard) CheckRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
 	}
-	if err := g.ValidateURL(req.URL.String()); err != nil {
+	if err := g.ValidateURL(req.Context(), req.URL.String()); err != nil {
 		return fmt.Errorf("redirect blocked: %w", err)
 	}
 	if len(via) > 0 && !safeToFollow(via[0].URL, req.URL) {
@@ -341,6 +355,28 @@ func (g *Guard) CheckRedirect(req *http.Request, via []*http.Request) error {
 // here) egress policy, which is a different trust model than this package
 // provides; supporting it safely is out of scope.
 func NewClient(timeout time.Duration, g *Guard) *http.Client {
+	return NewClientWithTLS(timeout, g, nil)
+}
+
+// NewClientWithTLS is NewClient with a caller-supplied *tls.Config installed on
+// the guarded transport. It exists so the ONE legitimate reason a caller had to
+// substitute its own *http.Client — TLS material this package cannot know about,
+// such as a private-CA root pool or mTLS client certificates for an internal
+// identity provider — no longer requires substituting the transport, and
+// therefore no longer silently discards the egress guard along with it.
+//
+// The split is deliberate: TLS configuration is the caller's, the DIALER is
+// not. Everything that decides *where the connection goes* (DialContext's
+// resolve-and-pin, CheckRedirect's per-hop re-validation, the refusal to honour
+// HTTP_PROXY) is owned by this package and is not overridable through this
+// entry point. A caller that needs a genuinely different transport is asking
+// for an unguarded client and must say so by building one itself, in its own
+// package, where a reviewer can see it.
+//
+// tlsCfg is cloned, so a caller may keep and mutate its own *tls.Config without
+// changing the roots this client will trust. A nil tlsCfg is identical to
+// NewClient.
+func NewClientWithTLS(timeout time.Duration, g *Guard, tlsCfg *tls.Config) *http.Client {
 	transport := &http.Transport{
 		DialContext:           g.DialContext,
 		ForceAttemptHTTP2:     true,
@@ -348,6 +384,9 @@ func NewClient(timeout time.Duration, g *Guard) *http.Client {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+	}
+	if tlsCfg != nil {
+		transport.TLSClientConfig = tlsCfg.Clone()
 	}
 	return &http.Client{
 		Timeout:       timeout,

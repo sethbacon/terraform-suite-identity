@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sethbacon/terraform-suite-identity/identity/httpsafe"
 	"github.com/sethbacon/terraform-suite-identity/identity/internal/safeloop"
 )
 
@@ -58,6 +59,7 @@ type DiscoveryClient struct {
 	pollInterval time.Duration
 	graceWindow  time.Duration
 	httpClient   *http.Client
+	guard        *httpsafe.Guard
 
 	mu       sync.RWMutex
 	state    SiblingState
@@ -81,12 +83,20 @@ type DiscoveryClient struct {
 // HTTP (e.g. loopback), use NewInsecureDiscoveryClient instead — its name is
 // the explicit, deliberate opt-out of this check. Never pass an
 // operator-configured production siblingURL to it.
-func NewDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration) (*DiscoveryClient, error) {
+//
+// guard applies the deployment's egress policy (security.egress.allowlist) to
+// the manifest poll AND is the guard SiblingPublicURL validates against. A nil
+// guard is the strict default policy, which denies loopback, RFC 1918 and
+// link-local — so a sibling on an internal address (the usual case for two apps
+// in one cluster, and for every local dev stack) requires a guard built from
+// the deployment's allow-list. This parameter is new in v0.25.0; see
+// UPGRADING.md for the configuration each deployment must add.
+func NewDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration, guard *httpsafe.Guard) (*DiscoveryClient, error) {
 	normalized := strings.TrimRight(siblingURL, "/")
 	if strings.HasPrefix(strings.ToLower(normalized), "http://") {
 		return nil, fmt.Errorf("insecure sibling URL: %q uses plaintext HTTP; suite discovery requires HTTPS to protect the manifest fetch from tampering — use NewInsecureDiscoveryClient only if you understand and accept this risk (e.g. local development)", normalized)
 	}
-	return newDiscoveryClient(normalized, self, pollInterval), nil
+	return newDiscoveryClient(normalized, self, pollInterval, guard), nil
 }
 
 // NewInsecureDiscoveryClient builds a client exactly like NewDiscoveryClient,
@@ -98,21 +108,39 @@ func NewDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Dura
 // the sibling is reached over plaintext HTTP (e.g. loopback). Passing it an
 // operator-configured production siblingURL reintroduces the spoofing risk
 // documented on NewDiscoveryClient.
-func NewInsecureDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration) *DiscoveryClient {
+//
+// Note what this does NOT opt out of: guard still applies in full. The scheme
+// rule and the destination rule are separate, and a dev stack that needs a
+// loopback or RFC 1918 sibling must say so in its allow-list rather than
+// getting it for free with the plaintext opt-out.
+func NewInsecureDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration, guard *httpsafe.Guard) *DiscoveryClient {
 	normalized := strings.TrimRight(siblingURL, "/")
 	if strings.HasPrefix(strings.ToLower(normalized), "http://") {
 		slog.Warn("suite discovery: sibling URL uses plaintext HTTP; manifest polling is exposed to interception and tampering — use HTTPS",
 			"sibling_url", normalized)
 	}
-	return newDiscoveryClient(normalized, self, pollInterval)
+	return newDiscoveryClient(normalized, self, pollInterval, guard)
 }
 
 // newDiscoveryClient builds the client itself. siblingURL must already be
 // normalized (trailing slash trimmed) — shared by NewDiscoveryClient and
 // NewInsecureDiscoveryClient after each applies its own scheme check.
-func newDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration) *DiscoveryClient {
+func newDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Duration, guard *httpsafe.Guard) *DiscoveryClient {
 	if pollInterval <= 0 {
 		pollInterval = defaultPollInterval
+	}
+	// The manifest poll goes through the shared egress guard like every other
+	// outbound request in this module: resolve-and-pin on the dial, so the
+	// checked IP is the connected IP.
+	httpClient := httpsafe.NewClient(pollTimeout, guard)
+	// Do not follow redirects: the manifest lives at a known path on the
+	// configured sibling. Following a redirect could be steered to an
+	// unintended (e.g. internal) host. This REPLACES the guard's own
+	// re-validating CheckRedirect with a strictly stronger rule — refuse every
+	// hop rather than re-check it. ErrUseLastResponse returns the 3xx as-is,
+	// which then fails the StatusOK check and is treated as unreachable.
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	return &DiscoveryClient{
 		siblingURL: siblingURL,
@@ -125,17 +153,9 @@ func newDiscoveryClient(siblingURL string, self Manifest, pollInterval time.Dura
 		self:         *self.clone(),
 		pollInterval: pollInterval,
 		graceWindow:  defaultGraceWindow,
-		// Do not follow redirects: the manifest lives at a known path on the
-		// configured sibling. Following a redirect could be steered to an
-		// unintended (e.g. internal) host. ErrUseLastResponse returns the 3xx as-is,
-		// which then fails the StatusOK check and is treated as unreachable.
-		httpClient: &http.Client{
-			Timeout: pollTimeout,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-		state: StateUnknown,
+		httpClient:   httpClient,
+		guard:        guard,
+		state:        StateUnknown,
 	}
 }
 
@@ -148,6 +168,43 @@ func (d *DiscoveryClient) Snapshot() (SiblingState, *Manifest) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.state, d.lastGood.clone()
+}
+
+// SiblingPublicURL returns the sibling's self-advertised publicUrl, validated
+// against this client's egress guard and ready to use as the base of an
+// outbound request — but ONLY with a client built from the SAME guard, which
+// GuardedClient returns.
+//
+// This is the whole correct sequence in one call, and it exists because the
+// sequence is what consumers got wrong: read the field, notice it is
+// sibling-asserted rather than operator-pinned, validate it, and dial it with
+// a guarded client. Skipping any step compiles.
+//
+// It returns an error when the sibling is not currently Active, when it has
+// never been reached, when it advertises no publicUrl, or when the URL it
+// advertises is not reachable under the deployment's egress policy. A caller
+// that just wants to render the value (a UI config payload) wants
+// Snapshot().PublicURL.Display() instead — no fetch, no check, no error.
+func (d *DiscoveryClient) SiblingPublicURL(ctx context.Context) (string, error) {
+	state, m := d.Snapshot()
+	if state != StateActive || m == nil {
+		return "", fmt.Errorf("suite: sibling is not active (state %q)", state)
+	}
+	return m.PublicURL.Resolve(ctx, d.guard)
+}
+
+// GuardedClient returns an *http.Client bound to this deployment's egress
+// policy, for a consumer making its own follow-up requests to the sibling
+// (the module-freshness join, for instance). timeout is the total per-request
+// budget.
+//
+// It is a convenience with a purpose: it removes the last reason a consumer
+// had to reach for a bare &http.Client{} — not knowing where the guard
+// lived — and so removes the last way to accidentally leave a sibling-named
+// destination unguarded. Pair it with SiblingPublicURL; using one without the
+// other leaves half the check in place.
+func (d *DiscoveryClient) GuardedClient(timeout time.Duration) *http.Client {
+	return httpsafe.NewClient(timeout, d.guard)
 }
 
 // Start runs the poll loop until ctx is cancelled. Run it in a goroutine.

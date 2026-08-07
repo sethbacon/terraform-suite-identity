@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +20,19 @@ import (
 	oidcpkg "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/oauth2"
+
+	"github.com/sethbacon/terraform-suite-identity/identity/httpsafe"
 )
+
+// loopbackGuard is the allow-list a test needs to reach an httptest identity
+// provider.
+//
+// Every test in this file talks to an httptest server on loopback, which the
+// DEFAULT egress policy denies — the same denial a real deployment gets for an
+// IdP on an internal address. Each test therefore has to opt in explicitly,
+// exactly as an operator does, so no assertion here can pass because the guard
+// was quietly absent.
+func loopbackGuard() *httpsafe.Guard { return httpsafe.MustGuard("127.0.0.1", "::1") }
 
 func TestNewProvider_ValidationErrors(t *testing.T) {
 	cases := []struct {
@@ -82,6 +95,7 @@ func TestNewProvider_DiscoveryAndAuthURL(t *testing.T) {
 	defer srv.Close()
 
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           srv.URL,
 		ClientID:            "my-client",
 		ClientSecret:        "my-secret",
@@ -117,6 +131,7 @@ func TestNewProvider_DiscoveryFailure(t *testing.T) {
 	defer srv.Close()
 
 	if _, err := NewProvider(Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           srv.URL,
 		ClientID:            "id",
 		ClientSecret:        "secret",
@@ -130,6 +145,7 @@ func TestNewProvider_RejectsHTTPIssuerByDefault(t *testing.T) {
 	// HTTPS is required by default — a plaintext issuer must be rejected before
 	// any discovery attempt, with no explicit opt-in required.
 	_, err := NewProvider(Config{
+		EgressGuard:  loopbackGuard(),
 		IssuerURL:    "http://issuer.example",
 		ClientID:     "id",
 		ClientSecret: "secret",
@@ -150,6 +166,7 @@ func TestNewProvider_RejectsHTTPRedirectURLByDefault(t *testing.T) {
 	// An https issuer is used here so the error can only come from the
 	// RedirectURL scheme check, not the IssuerURL one.
 	_, err := NewProvider(Config{
+		EgressGuard:  loopbackGuard(),
 		IssuerURL:    "https://issuer.example",
 		ClientID:     "id",
 		ClientSecret: "secret",
@@ -168,6 +185,7 @@ func TestNewProvider_AllowsEmptyRedirectURLByDefault(t *testing.T) {
 	// for token exchange, not browser redirects) must not be rejected: the
 	// check only fires when RedirectURL is non-empty.
 	_, err := NewProvider(Config{
+		EgressGuard:  loopbackGuard(),
 		IssuerURL:    "https://issuer.example",
 		ClientID:     "id",
 		ClientSecret: "secret",
@@ -216,22 +234,23 @@ func TestNewProvider_AcceptsHTTPSIssuerAndRedirectByDefault(t *testing.T) {
 		})
 	})
 
-	// The injected *http.Client (added by NewProviderWithContext for the
-	// HTTP-timeout fix) uses http.DefaultTransport, which by default doesn't
-	// trust httptest's self-signed certificate. Swap in a transport that
-	// trusts this server's certificate for the duration of the call, then
-	// restore the original so no other test is affected.
+	// This package builds its own guarded transport, so httptest's self-signed
+	// certificate is trusted via Config.TLSClientConfig — the supported hook —
+	// rather than by mutating the process-global http.DefaultTransport, which
+	// is what this test used to have to do. That the private-CA case is now
+	// expressible per-Provider, with no global state and no displaced guard,
+	// IS the fix: it is the reason the caller-supplied-client escape hatch
+	// could be closed without taking a real use case with it.
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
-	origTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = origTransport })
-	http.DefaultTransport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
 
 	p, err := NewProvider(Config{
-		IssuerURL:    srv.URL,
-		ClientID:     "my-client",
-		ClientSecret: "my-secret",
-		RedirectURL:  "https://app.example/callback",
+		EgressGuard:     loopbackGuard(),
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		IssuerURL:       srv.URL,
+		ClientID:        "my-client",
+		ClientSecret:    "my-secret",
+		RedirectURL:     "https://app.example/callback",
 	})
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
@@ -249,6 +268,7 @@ func TestNewProvider_AllowInsecureIssuerTrueAllowsHTTPIssuerAndRedirect(t *testi
 	defer srv.Close()
 
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           srv.URL,
 		ClientID:            "my-client",
 		ClientSecret:        "my-secret",
@@ -283,6 +303,7 @@ func TestNewProviderWithContext_SlowDiscoveryFailsFast(t *testing.T) {
 
 	start := time.Now()
 	_, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           srv.URL,
 		ClientID:            "id",
 		ClientSecret:        "secret",
@@ -323,6 +344,7 @@ func TestNewProvider_SlowDiscoveryFailsFast(t *testing.T) {
 
 	start := time.Now()
 	_, err := NewProvider(Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           srv.URL,
 		ClientID:            "id",
 		ClientSecret:        "secret",
@@ -365,6 +387,7 @@ func TestExchangeCode_SlowTokenEndpointFailsFast(t *testing.T) {
 	})
 
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           srv.URL,
 		ClientID:            "id",
 		ClientSecret:        "secret",
@@ -405,59 +428,119 @@ func TestExchangeCode_SlowTokenEndpointFailsFast(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// contextWithBoundedClient / boundHTTPClient
+// The guarded client: one per Provider, and no way to substitute another
 // ---------------------------------------------------------------------------
 
-func TestContextWithBoundedClient_NoExistingClientGetsDefault(t *testing.T) {
-	got := contextWithBoundedClient(context.Background())
-	client, ok := got.Value(oauth2.HTTPClient).(*http.Client)
-	if !ok {
-		t.Fatal("expected an *http.Client on the returned context")
-	}
+func TestNewGuardedClient_IsBoundedAndGuarded(t *testing.T) {
+	client := newGuardedClient(Config{EgressGuard: loopbackGuard()})
 	if client.Timeout != oidcHTTPTimeout {
 		t.Errorf("Timeout = %s, want %s", client.Timeout, oidcHTTPTimeout)
 	}
-}
-
-func TestContextWithBoundedClient_PreservesCallerTransport(t *testing.T) {
-	// A caller that already injected a custom *http.Client into ctx (e.g.
-	// carrying a private-CA root pool or mTLS certs) via the same
-	// oidc.ClientContext/oauth2 context convention this package uses must not
-	// have that Transport silently discarded — only the Timeout is capped.
-	marker := &http.Transport{}
-	callerClient := &http.Client{Transport: marker, Timeout: time.Hour}
-
-	ctx := oidcpkg.ClientContext(context.Background(), callerClient)
-	got := contextWithBoundedClient(ctx)
-
-	client, ok := got.Value(oauth2.HTTPClient).(*http.Client)
+	if client.CheckRedirect == nil {
+		t.Error("the client follows redirects with the default policy: every hop must be re-validated")
+	}
+	tr, ok := client.Transport.(*http.Transport)
 	if !ok {
-		t.Fatal("expected an *http.Client on the returned context")
+		t.Fatalf("Transport is %T, want *http.Transport built by httpsafe", client.Transport)
 	}
-	if client.Transport != marker {
-		t.Error("expected the caller-supplied Transport to be preserved")
+	if tr.DialContext == nil {
+		t.Error("the transport has no DialContext: the resolve-and-pin egress check is absent")
 	}
-	if client.Timeout != oidcHTTPTimeout {
-		t.Errorf("Timeout = %s, want capped to oidcHTTPTimeout (%s)", client.Timeout, oidcHTTPTimeout)
+	if tr.Proxy != nil {
+		t.Error("the transport honours a proxy, which would leave the real destination unresolved and unchecked")
 	}
 }
 
-func TestContextWithBoundedClient_LeavesStricterCallerTimeoutAlone(t *testing.T) {
-	// A caller whose client already has a tighter deadline than
-	// oidcHTTPTimeout must not have it loosened, and the client itself must
-	// not be needlessly replaced.
-	callerClient := &http.Client{Timeout: time.Second}
-	ctx := oidcpkg.ClientContext(context.Background(), callerClient)
-	got := contextWithBoundedClient(ctx)
-
-	client, ok := got.Value(oauth2.HTTPClient).(*http.Client)
+func TestNewGuardedClient_InstallsCallerTLSWithoutDisplacingTheDialer(t *testing.T) {
+	// The one legitimate reason a caller had to substitute its own client —
+	// TLS material this package cannot know about — must reach the transport
+	// WITHOUT taking the egress guard with it.
+	pool := x509.NewCertPool()
+	client := newGuardedClient(Config{
+		EgressGuard:     loopbackGuard(),
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13},
+	})
+	tr, ok := client.Transport.(*http.Transport)
 	if !ok {
-		t.Fatal("expected an *http.Client on the returned context")
+		t.Fatalf("Transport is %T, want *http.Transport", client.Transport)
 	}
-	if client != callerClient {
-		t.Error("expected the caller's own (already-strict) client to be reused unchanged")
+	if tr.TLSClientConfig == nil || tr.TLSClientConfig.RootCAs != pool {
+		t.Error("the caller's TLS root pool did not reach the transport")
+	}
+	if tr.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Error("the caller's TLS settings did not reach the transport")
+	}
+	if tr.DialContext == nil {
+		t.Error("supplying a TLS config removed the guard's dialer — this is exactly the bypass being closed")
 	}
 }
+
+func TestNewProviderWithContext_RejectsCallerClientOnContext(t *testing.T) {
+	// Before v0.25.0 an *http.Client on the context was ADOPTED, capping only
+	// its Timeout — so the egress guard protecting the discovered
+	// token_endpoint and jwks_uri could be displaced by a caller who thought
+	// they were only supplying TLS material. Adopting it is unsafe and
+	// ignoring it is dishonest, so it is now an error naming the replacement.
+	srv := discoveryServer(t)
+	defer srv.Close()
+
+	ctx := oidcpkg.ClientContext(context.Background(), &http.Client{Transport: &http.Transport{}})
+	_, err := NewProviderWithContext(ctx, Config{
+		EgressGuard:         loopbackGuard(),
+		IssuerURL:           srv.URL,
+		ClientID:            "my-client",
+		ClientSecret:        "my-secret",
+		AllowInsecureIssuer: true,
+	})
+	if err == nil {
+		t.Fatal("expected an error for a caller-supplied *http.Client on the context")
+	}
+	if !errors.Is(err, errCallerClientOnContext) {
+		t.Errorf("error = %v, want errCallerClientOnContext", err)
+	}
+	if !strings.Contains(err.Error(), "TLSClientConfig") {
+		t.Errorf("error does not name the replacement (Config.TLSClientConfig): %v", err)
+	}
+}
+
+func TestExchangeAndVerify_UsesTheProviderGuardedClientNotTheContexts(t *testing.T) {
+	// A client on the per-request context must not be able to displace the
+	// guarded client for the token exchange, which carries the client_secret
+	// and the authorization code to an ISSUER-NAMED endpoint.
+	idp := newMockIDP(t, "my-client")
+
+	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
+		IssuerURL:           idp.server.URL,
+		ClientID:            "my-client",
+		ClientSecret:        "my-secret",
+		RedirectURL:         "https://app.example/callback",
+		AllowInsecureIssuer: true,
+	})
+	if err != nil {
+		t.Fatalf("NewProviderWithContext: %v", err)
+	}
+
+	// A sentinel client that fails every request. If the exchange used it, the
+	// call below would fail with this error instead of succeeding.
+	sentinel := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("sentinel client was used")
+	})}
+	ctx := oidcpkg.ClientContext(context.Background(), sentinel)
+
+	challenge, err := p.BeginAuth("state-xyz")
+	if err != nil {
+		t.Fatalf("BeginAuth: %v", err)
+	}
+	idp.setNonce(challenge.Session.Nonce)
+	if _, _, err := p.ExchangeAndVerify(ctx, "code-abc", challenge.Session); err != nil {
+		t.Fatalf("ExchangeAndVerify used the context's client instead of the Provider's guarded one: %v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestNewProviderForConfig_BeginAuth(t *testing.T) {
 	// A discovery-free provider still builds authorization URLs.
@@ -571,6 +654,7 @@ func TestBeginAuth_IncludesNonceAndPKCE(t *testing.T) {
 func TestExchangeAndVerify_NonceAndPKCE(t *testing.T) {
 	idp := newMockIDP(t, "my-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           idp.server.URL,
 		ClientID:            "my-client",
 		ClientSecret:        "my-secret",
@@ -614,6 +698,7 @@ func TestExchangeAndVerify_NonceAndPKCE(t *testing.T) {
 func TestExchangeAndVerify_RejectsMissingBinding(t *testing.T) {
 	idp := newMockIDP(t, "my-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           idp.server.URL,
 		ClientID:            "my-client",
 		ClientSecret:        "my-secret",
@@ -656,6 +741,7 @@ func TestExchangeAndVerify_RejectsResponseWithoutIDToken(t *testing.T) {
 	idp := newMockIDP(t, "my-client")
 	idp.setOmitIDToken()
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           idp.server.URL,
 		ClientID:            "my-client",
 		ClientSecret:        "my-secret",
@@ -684,6 +770,7 @@ func TestExchangeAndVerify_RejectsResponseWithoutIDToken(t *testing.T) {
 func TestExchangeAndVerify_NonceMismatch(t *testing.T) {
 	idp := newMockIDP(t, "my-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           idp.server.URL,
 		ClientID:            "my-client",
 		ClientSecret:        "my-secret",
@@ -715,6 +802,7 @@ func TestExchangeAndVerify_NonceMismatch(t *testing.T) {
 func TestExchangeAndVerify_RejectsIDTokenWithoutNonce(t *testing.T) {
 	idp := newMockIDP(t, "my-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           idp.server.URL,
 		ClientID:            "my-client",
 		ClientSecret:        "my-secret",
@@ -903,6 +991,7 @@ func verifiedIDToken(t *testing.T, extra jwt.MapClaims) *oidcpkg.IDToken {
 	t.Helper()
 	idp := newMockIDP(t, "test-client")
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           idp.server.URL,
 		ClientID:            "test-client",
 		ClientSecret:        "test-secret",

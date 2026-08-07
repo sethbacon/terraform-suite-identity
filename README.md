@@ -336,8 +336,20 @@ import identityoidc "github.com/sethbacon/terraform-suite-identity/identity/auth
 prov, _ := identityoidc.NewProvider(identityoidc.Config{
     IssuerURL: issuer, ClientID: id, ClientSecret: secret,
     RedirectURL: redirectURL, Scopes: []string{"openid", "email", "profile"},
-    // HTTPS is required by default on BOTH the issuer and the redirect URL; set
+    // HTTPS is required by default on BOTH the issuer and the redirect URL, and
+    // on the endpoints read out of the discovery document; set
     // AllowInsecureIssuer: true only for a local/dev http issuer.
+
+    // REQUIRED for an IdP on an internal address (since v0.25.0). Every request
+    // this package makes — discovery, JWKS, token exchange — goes through the
+    // egress guard, and a nil guard is the STRICT default: loopback, RFC 1918
+    // and link-local are all denied. Build it from the deployment's
+    // security.egress.allowlist. See UPGRADING.md.
+    EgressGuard: httpsafe.MustGuard("idp.corp.internal"),
+    // Optional: a private-CA root pool or mTLS certificates for that IdP. This
+    // reaches the guarded transport WITHOUT displacing the guard, which is why
+    // supplying an *http.Client on the context is no longer accepted.
+    TLSClientConfig: myTLSConfig,
 })
 
 // Login: BeginAuthSession takes no state parameter — it mints one, and stores this
@@ -441,12 +453,24 @@ self := suite.Manifest{
 //
 // NewDiscoveryClient fails closed on a plaintext http:// siblingURL — use
 // suite.NewInsecureDiscoveryClient instead for a local/dev loopback sibling.
-dc, err := suite.NewDiscoveryClient("https://tfstate.example.com", self, 0) // 0 → default 60s
+//
+// The guard applies the deployment's egress policy to the poll AND is what
+// SiblingPublicURL validates against. A nil guard is the STRICT default (since
+// v0.25.0), so a sibling on an internal address — two apps in one cluster, or
+// any dev stack — needs the deployment's allow-list here. See UPGRADING.md.
+dc, err := suite.NewDiscoveryClient("https://tfstate.example.com", self, 0, egressGuard) // 0 → default 60s
 if err != nil {
     log.Fatal(err)
 }
 go dc.Start(ctx)
 state, sibling := dc.Snapshot() // active / degraded / unreachable / unknown
+
+// The sibling's manifest is UNTRUSTED INPUT it asserts about itself — not the
+// siblingURL you pinned. To make a follow-up request to it, take the base URL
+// and the client from the discovery client, so both carry the same policy:
+base, err := dc.SiblingPublicURL(ctx)        // validated; refuses a denied destination
+client := dc.GuardedClient(2 * time.Second)  // resolve-and-pin dialing
+// To merely RENDER what the sibling claims: sibling.PublicURL.Display().
 ```
 
 The poller calls `NegotiateCompat` for you; call it directly when you receive a manifest

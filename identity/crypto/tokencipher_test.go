@@ -2,6 +2,9 @@ package crypto
 
 import (
 	"bytes"
+	"errors"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -71,7 +74,7 @@ func TestNewTokenCipherIsolatesKey(t *testing.T) {
 func TestDeriveTokenCipher(t *testing.T) {
 	t.Run("valid passphrase and salt", func(t *testing.T) {
 		salt := bytes.Repeat([]byte("s"), 16)
-		tc, err := DeriveTokenCipher("my-secret-passphrase", salt, 100000)
+		tc, err := DeriveTokenCipher("my-secret-passphrase", salt, MinPBKDF2Iterations)
 		if err != nil {
 			t.Fatalf("DeriveTokenCipher() unexpected error: %v", err)
 		}
@@ -81,33 +84,66 @@ func TestDeriveTokenCipher(t *testing.T) {
 	})
 
 	t.Run("salt too short", func(t *testing.T) {
-		_, err := DeriveTokenCipher("passphrase", make([]byte, 8), 100000)
+		_, err := DeriveTokenCipher("passphrase", make([]byte, 8), MinPBKDF2Iterations)
 		if err != ErrSaltTooShort {
 			t.Errorf("DeriveTokenCipher() error = %v, want %v", err, ErrSaltTooShort)
 		}
 	})
 
-	t.Run("low iteration count uses secure default", func(t *testing.T) {
+	t.Run("iterations below the floor are rejected, not rewritten", func(t *testing.T) {
+		// The previous guard read `if iterations < 10000 { iterations = 100000 }`,
+		// which silently upgraded 1 while honouring 10000 — so the weakest
+		// value the API accepted was reachable only by a caller who had thought
+		// about the number. Both of those inputs must now be errors, because a
+		// caller that named a work factor has a belief about the cost of its own
+		// key derivation and deriving with a different one leaves it in place.
 		salt := bytes.Repeat([]byte("s"), 16)
-		// Should not error; low count is silently bumped to 100000
-		tc, err := DeriveTokenCipher("pass", salt, 1)
-		if err != nil {
-			t.Fatalf("DeriveTokenCipher() error: %v", err)
+		for _, iterations := range []int{1, 10000, 100000, MinPBKDF2Iterations - 1} {
+			tc, err := DeriveTokenCipher("pass", salt, iterations)
+			if !errors.Is(err, ErrIterationsTooLow) {
+				t.Errorf("DeriveTokenCipher(iterations=%d) error = %v, want ErrIterationsTooLow", iterations, err)
+			}
+			if tc != nil {
+				t.Errorf("DeriveTokenCipher(iterations=%d) returned a usable cipher alongside its error", iterations)
+			}
+			if err != nil && !strings.Contains(err.Error(), strconv.Itoa(MinPBKDF2Iterations)) {
+				t.Errorf("DeriveTokenCipher(iterations=%d) error does not name the minimum: %v", iterations, err)
+			}
 		}
-		if tc == nil {
-			t.Fatal("DeriveTokenCipher() returned nil")
+	})
+
+	t.Run("no preference uses the default work factor", func(t *testing.T) {
+		salt := bytes.Repeat([]byte("s"), 16)
+		for _, iterations := range []int{0, -1} {
+			tc, err := DeriveTokenCipher("pass", salt, iterations)
+			if err != nil {
+				t.Fatalf("DeriveTokenCipher(iterations=%d) error: %v", iterations, err)
+			}
+			if tc == nil {
+				t.Fatalf("DeriveTokenCipher(iterations=%d) returned nil", iterations)
+			}
+		}
+		if DefaultPBKDF2Iterations < MinPBKDF2Iterations {
+			t.Errorf("DefaultPBKDF2Iterations (%d) is below MinPBKDF2Iterations (%d): "+
+				"the no-preference path would derive a key the explicit path rejects",
+				DefaultPBKDF2Iterations, MinPBKDF2Iterations)
 		}
 	})
 
 	t.Run("different passphrases produce different ciphers", func(t *testing.T) {
 		salt := bytes.Repeat([]byte("s"), 16)
-		tc1, _ := DeriveTokenCipher("passphrase-one", salt, 100000)
-		tc2, _ := DeriveTokenCipher("passphrase-two", salt, 100000)
+		tc1, err1 := DeriveTokenCipher("passphrase-one", salt, MinPBKDF2Iterations)
+		tc2, err2 := DeriveTokenCipher("passphrase-two", salt, MinPBKDF2Iterations)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("DeriveTokenCipher: %v / %v", err1, err2)
+		}
 
-		sealed, _ := tc1.Seal("secret")
+		sealed, err := tc1.Seal("secret")
+		if err != nil {
+			t.Fatalf("Seal: %v", err)
+		}
 		// tc2 should NOT be able to decrypt what tc1 sealed
-		_, err := tc2.Open(sealed)
-		if err == nil {
+		if _, err := tc2.Open(sealed); err == nil {
 			t.Error("different-key cipher decrypted ciphertext; expected failure")
 		}
 	})

@@ -2,6 +2,8 @@ package httpsafe
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -87,7 +89,7 @@ func TestValidateURL_DeniedRanges(t *testing.T) {
 		"http://[::ffff:169.254.169.254]/", // IPv4-mapped metadata
 	}
 	for _, u := range denied {
-		if err := g.ValidateURL(u); err == nil {
+		if err := g.ValidateURL(context.Background(), u); err == nil {
 			t.Errorf("ValidateURL(%q) = nil, want blocked", u)
 		}
 	}
@@ -96,7 +98,7 @@ func TestValidateURL_DeniedRanges(t *testing.T) {
 func TestValidateURL_PublicAllowed(t *testing.T) {
 	var g *Guard
 	for _, u := range []string{"https://8.8.8.8/", "http://1.1.1.1:8080/x", "https://[2606:4700::1111]/"} {
-		if err := g.ValidateURL(u); err != nil {
+		if err := g.ValidateURL(context.Background(), u); err != nil {
 			t.Errorf("ValidateURL(%q) = %v, want nil", u, err)
 		}
 	}
@@ -104,13 +106,13 @@ func TestValidateURL_PublicAllowed(t *testing.T) {
 
 func TestValidateURL_SchemeAndHost(t *testing.T) {
 	var g *Guard
-	if err := g.ValidateURL("ftp://example.com/x"); err == nil {
+	if err := g.ValidateURL(context.Background(), "ftp://example.com/x"); err == nil {
 		t.Error("expected error for ftp scheme")
 	}
-	if err := g.ValidateURL("file:///etc/passwd"); err == nil {
+	if err := g.ValidateURL(context.Background(), "file:///etc/passwd"); err == nil {
 		t.Error("expected error for file scheme")
 	}
-	if err := g.ValidateURL("https:///nohost"); err == nil {
+	if err := g.ValidateURL(context.Background(), "https:///nohost"); err == nil {
 		t.Error("expected error for empty host")
 	}
 }
@@ -118,7 +120,7 @@ func TestValidateURL_SchemeAndHost(t *testing.T) {
 func TestValidateURL_ResolvedPrivateRejected(t *testing.T) {
 	g := MustGuard()
 	g.lookupIP = fakeResolver("192.168.7.7")
-	if err := g.ValidateURL("https://internal.example.com/"); err == nil {
+	if err := g.ValidateURL(context.Background(), "https://internal.example.com/"); err == nil {
 		t.Error("hostname resolving to RFC 1918 should be rejected")
 	}
 }
@@ -126,7 +128,7 @@ func TestValidateURL_ResolvedPrivateRejected(t *testing.T) {
 func TestValidateURL_MixedResolutionRejected(t *testing.T) {
 	g := MustGuard()
 	g.lookupIP = fakeResolver("93.184.216.34", "10.0.0.5")
-	if err := g.ValidateURL("https://dual.example.com/"); err == nil {
+	if err := g.ValidateURL(context.Background(), "https://dual.example.com/"); err == nil {
 		t.Error("hostname resolving to any private address should be rejected")
 	}
 }
@@ -134,7 +136,7 @@ func TestValidateURL_MixedResolutionRejected(t *testing.T) {
 func TestValidateURL_ResolvedPublicAllowed(t *testing.T) {
 	g := MustGuard()
 	g.lookupIP = fakeResolver("93.184.216.34")
-	if err := g.ValidateURL("https://public.example.com/"); err != nil {
+	if err := g.ValidateURL(context.Background(), "https://public.example.com/"); err != nil {
 		t.Errorf("public resolution should pass, got %v", err)
 	}
 }
@@ -146,8 +148,126 @@ func TestValidateURL_LookupFailureFailsOpen(t *testing.T) {
 	}
 	// Dial-time enforcement is authoritative; config-write validation must not
 	// reject names that don't resolve from this vantage point.
-	if err := g.ValidateURL("https://unresolvable.example.com/"); err != nil {
+	if err := g.ValidateURL(context.Background(), "https://unresolvable.example.com/"); err != nil {
 		t.Errorf("lookup failure should fail open at validation time, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ValidateURL — caller cancellation and deadline
+// ---------------------------------------------------------------------------
+
+// TestValidateURL_HonorsCallerCancellation covers the reason ValidateURL grew a
+// context parameter. Its own doc comment says it is meant to be called
+// synchronously from a request handler validating an admin-submitted URL, but
+// it used to manufacture a context from context.Background() and always wait
+// the full 5s resolve timeout — even when the calling request had already been
+// cancelled by a client disconnect, or carried a shorter deadline of its own.
+func TestValidateURL_HonorsCallerCancellation(t *testing.T) {
+	g := MustGuard()
+	resolveStarted := make(chan struct{})
+	released := make(chan struct{})
+	g.lookupIP = func(ctx context.Context, _ string) ([]net.IP, error) {
+		close(resolveStarted)
+		select {
+		case <-ctx.Done():
+			close(released)
+			return nil, ctx.Err()
+		case <-time.After(resolveTimeout):
+			t.Error("the resolve waited the full timeout despite a cancelled caller context")
+			return nil, fmt.Errorf("timed out")
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-resolveStarted
+		cancel()
+	}()
+
+	start := time.Now()
+	// A CANCELLED lookup is not a validation error: cancellation says nothing
+	// about the target, and turning "the caller went away" into "this URL is
+	// denied" would be a false rejection at config-write time.
+	if err := g.ValidateURL(ctx, "https://slow.example.com/"); err != nil {
+		t.Errorf("cancellation became a validation error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= resolveTimeout {
+		t.Errorf("ValidateURL took %s: the caller's cancellation did not reach the resolver", elapsed)
+	}
+	select {
+	case <-released:
+	default:
+		t.Error("the resolver never observed the caller's cancellation")
+	}
+	cancel()
+}
+
+// TestValidateURL_NilContextIsBackground keeps the CLI/startup path — a caller
+// with no context to propagate — working rather than panicking.
+func TestValidateURL_NilContextIsBackground(t *testing.T) {
+	g := MustGuard()
+	//nolint:staticcheck // passing nil is the documented no-caller-context path
+	if err := g.ValidateURL(nil, "http://169.254.169.254/"); err == nil {
+		t.Error("a nil context skipped the check entirely")
+	}
+	//nolint:staticcheck // passing nil is the documented no-caller-context path
+	if err := g.ValidateURL(nil, "https://198.51.100.7/"); err != nil {
+		t.Errorf("a nil context rejected a public address: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewClientWithTLS — caller TLS material without a displaced dialer
+// ---------------------------------------------------------------------------
+
+func TestNewClientWithTLS_KeepsTheGuardsDialer(t *testing.T) {
+	pool := x509.NewCertPool()
+	client := NewClientWithTLS(5*time.Second, MustGuard(), &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13})
+
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", client.Transport)
+	}
+	if tr.TLSClientConfig == nil || tr.TLSClientConfig.RootCAs != pool {
+		t.Error("the caller's root pool did not reach the transport")
+	}
+	if tr.DialContext == nil {
+		t.Error("supplying TLS material removed the resolve-and-pin dialer")
+	}
+	if client.CheckRedirect == nil {
+		t.Error("supplying TLS material removed the per-hop redirect re-validation")
+	}
+	if tr.Proxy != nil {
+		t.Error("the transport honours a proxy, leaving the real destination unresolved and unchecked")
+	}
+
+	// Still enforcing: the TLS config does not buy an exemption.
+	if _, err := client.Get("http://169.254.169.254/"); err == nil {
+		t.Error("a client built with caller TLS material reached the cloud metadata endpoint")
+	}
+}
+
+func TestNewClientWithTLS_ClonesTheCallersConfig(t *testing.T) {
+	// The caller may keep and mutate its own *tls.Config; that must not change
+	// the roots this client trusts.
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	client := NewClientWithTLS(time.Second, nil, cfg)
+	cfg.MinVersion = tls.VersionTLS10
+
+	tr := client.Transport.(*http.Transport)
+	if tr.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+		t.Error("the transport shares the caller's *tls.Config: a later mutation weakened it")
+	}
+}
+
+func TestNewClient_IsNewClientWithTLSWithNoTLSConfig(t *testing.T) {
+	tr := NewClient(time.Second, nil).Transport.(*http.Transport)
+	if tr.TLSClientConfig != nil {
+		t.Error("NewClient installed a TLS config where the platform defaults were expected")
+	}
+	if tr.DialContext == nil {
+		t.Error("NewClient produced a transport with no resolve-and-pin dialer")
 	}
 }
 
@@ -168,7 +288,7 @@ func TestValidateURL_AllowlistOverrides(t *testing.T) {
 	for _, tc := range cases {
 		g := MustGuard(tc.allow...)
 		g.lookupIP = fakeResolver("10.20.4.2") // for the hostname case
-		if err := g.ValidateURL(tc.url); err != nil {
+		if err := g.ValidateURL(context.Background(), tc.url); err != nil {
 			t.Errorf("allowlist %v: ValidateURL(%q) = %v, want nil", tc.allow, tc.url, err)
 		}
 	}

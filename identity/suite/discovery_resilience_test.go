@@ -46,7 +46,7 @@ func captureSlog(t *testing.T) *syncBuffer {
 // was.
 func faultingClient(t *testing.T) *DiscoveryClient {
 	t.Helper()
-	d := newDiscoveryClient("https://sibling.example.com", Manifest{App: "registry"}, 10*time.Millisecond)
+	d := newDiscoveryClient("https://sibling.example.com", Manifest{App: "registry"}, 10*time.Millisecond, testGuard())
 	d.httpClient = nil
 	return d
 }

@@ -86,6 +86,7 @@ func TestNewProviderWithContextDoesNotRetainTheCallersScopes(t *testing.T) {
 	scopes := []string{"openid", "email"}
 
 	p, err := NewProviderWithContext(context.Background(), Config{
+		EgressGuard:         loopbackGuard(),
 		IssuerURL:           srv.URL,
 		ClientID:            "my-client",
 		ClientSecret:        "my-secret",

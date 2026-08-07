@@ -168,3 +168,61 @@ func TestExtractAPIKeyFromHeader_BearerWithWhitespaceOnly(t *testing.T) {
 		t.Error("expected an error when only whitespace follows Bearer")
 	}
 }
+
+// TestExtractAPIKeyFromHeader_SchemeIsCaseInsensitive covers RFC 7235 §2.1
+// (auth-scheme is a case-insensitive token) and RFC 6750 §2.1, which repeats it
+// for Bearer. The previous strings.HasPrefix(header, "Bearer ") accepted exactly
+// one capitalisation and exactly one separator, so a conformant client sending
+// "bearer <key>" was told its header "must start with 'Bearer '" — while in fact
+// sending Bearer. This fails CLOSED (a conformant caller is denied, never
+// wrongly admitted), which is why it is an interoperability fix; both suite
+// backends route every API-key request through this one parser, so the
+// deviation was uniform across the suite.
+func TestExtractAPIKeyFromHeader_SchemeIsCaseInsensitive(t *testing.T) {
+	for _, header := range []string{
+		"Bearer tsm_abc123xyz",
+		"bearer tsm_abc123xyz",
+		"BEARER tsm_abc123xyz",
+		"BeArEr tsm_abc123xyz",
+		"Bearer\ttsm_abc123xyz", // HTAB is valid RFC 7230 whitespace
+		"Bearer   tsm_abc123xyz",
+	} {
+		key, err := ExtractAPIKeyFromHeader(header)
+		if err != nil {
+			t.Errorf("ExtractAPIKeyFromHeader(%q): %v", header, err)
+			continue
+		}
+		if key != "tsm_abc123xyz" {
+			t.Errorf("ExtractAPIKeyFromHeader(%q) = %q, want %q", header, key, "tsm_abc123xyz")
+		}
+	}
+}
+
+// TestExtractAPIKeyFromHeader_CredentialIsNotCaseFolded is the paired
+// direction: only the SCHEME token is case-insensitive. Folding the credential
+// too would collapse distinct keys onto one another.
+func TestExtractAPIKeyFromHeader_CredentialIsNotCaseFolded(t *testing.T) {
+	key, err := ExtractAPIKeyFromHeader("bearer TsM_AbC123XyZ")
+	if err != nil {
+		t.Fatalf("ExtractAPIKeyFromHeader: %v", err)
+	}
+	if key != "TsM_AbC123XyZ" {
+		t.Errorf("credential = %q, want it preserved verbatim", key)
+	}
+}
+
+// TestExtractAPIKeyFromHeader_RejectsOtherSchemes keeps the relaxation from
+// becoming "accept anything with a space in it".
+func TestExtractAPIKeyFromHeader_RejectsOtherSchemes(t *testing.T) {
+	for _, header := range []string{
+		"Basic dXNlcjpwYXNz",
+		"Token tsm_abc123xyz",
+		"Bearerish tsm_abc123xyz",
+		"Bear tsm_abc123xyz",
+		"tsm_abc123xyz",
+	} {
+		if _, err := ExtractAPIKeyFromHeader(header); err == nil {
+			t.Errorf("ExtractAPIKeyFromHeader(%q) succeeded; want a rejection", header)
+		}
+	}
+}
