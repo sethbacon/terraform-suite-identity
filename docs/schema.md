@@ -103,6 +103,34 @@ All tables live in the `identity` schema. UUID primary keys default to
 > this module**: `org_quotas` and `system_settings`. They exist so both apps agree on the
 > shape; each app queries them from its own data layer.
 
+### Which tables are organization-owned, and how that is enforced
+
+Four tables carry (or are) an organization identity, and every accessor that
+reads or mutates one of their rows takes a required `store.OrgScope` parameter
+whose zero value denies everything (v0.25.0; `AuditScope` for `audit_logs` alone
+since v0.21.0):
+
+| Table | How the row's owner is expressed | Predicate emitted |
+| --- | --- | --- |
+| `organizations` | the row **is** the tenant | `id = ANY($n)` |
+| `organization_members` | `organization_id` (NOT NULL) | `organization_id = ANY($n)` |
+| `api_keys` | `organization_id` (NOT NULL) | `organization_id = ANY($n)` |
+| `audit_logs` | `organization_id` (NULLABLE — a NULL row is platform-level) | `organization_id = ANY($n)`, plus `OR IS NULL` for the orgs+unowned variant |
+| `users` | **no owning organization** — derived through `organization_members` | `EXISTS (SELECT 1 FROM organization_members osm WHERE osm.user_id = … AND osm.organization_id = ANY($n))` |
+
+The predicate is applied in SQL, before any caller-supplied filter, so no filter
+combination can produce an unscoped query; an out-of-scope target is reported as
+`store.ErrNotFound` on every axis, which is why v0.24.0's sentinel is a
+precondition for this control rather than an unrelated change. The remaining
+tables — `role_templates`, `oidc_config`, `system_settings`, `revoked_tokens`,
+`org_quotas` — are either platform-wide configuration or keyed on a user rather
+than an organization, and carry no scope parameter.
+
+Accessors deliberately left unscoped are marked `UNSCOPED BY DESIGN` in their doc
+comment with the reason; the reasons are authority derivation (the accessors that
+COMPUTE a scope), authentication bookkeeping, unattended maintenance, bootstrap,
+and the two create axes with no owning organization to check against.
+
 ### Notable modelling choices
 
 - **Hashed secrets only.** `api_keys` stores a hash and a short `key_prefix`
@@ -156,7 +184,7 @@ new sequential pair instead.
 | `000003` | `000003_registry_canonical_identity` | Reconciles the schema to the suite's canonical identity shape. Adds per-org IdP binding (`organizations.idp_type`, `idp_name`); converts `scopes` in place from `TEXT[]`/`TEXT` to `JSONB` on **three** tables — `role_templates`, `api_keys` and `oidc_config`; adds `api_keys.expiry_notification_sent_at`; and widens `oidc_config` to multi-provider (`name`, `provider_type`, `extra_config`, `created_by`, `updated_by`). Safe in place because these tables hold only seed data until an app cuts over (the `USING` clauses convert seeded values losslessly). |
 | `000004` | `000004_drop_vestigial_is_active` | Drops `is_active` from `organizations`, `users`, and `api_keys`. An audit confirmed no Go code (models or store, in this library or either consuming app) ever read or wrote these columns — see [README.md](../README.md#notable-modelling-choices) — so the column was a silent no-op rather than a working kill-switch. `oidc_config.is_active` is untouched; it is genuinely used. |
 | `000005` | `000005_oidc_config_single_active` | Enforces **at most one active OIDC config** at the database level. First deactivates every active row except the most recently updated one (`UPDATE … SET is_active = false … WHERE is_active AND id NOT IN (… ORDER BY updated_at DESC LIMIT 1)`), so the constraint can be created on existing data; then adds the partial unique index `idx_oidc_config_single_active ON identity.oidc_config (is_active) WHERE is_active`. This is the invariant `GetActiveOIDCConfig`/`ActivateOIDCConfig` rely on, previously enforced only in application code. |
-| `000006` | `000006_hot_path_indexes` | Adds indexes for the query shapes the module now forces on every caller. `AuditScope` became a required parameter in v0.21.0, so every audit read carries an `organization_id` predicate that had no supporting index: this adds the composite `(organization_id, created_at DESC)` covering both the list/count and export-stream shapes. Also indexes `organization_members(user_id)` (previously only the trailing column of a unique, so unseekable — every membership resolution on the auth path depends on it), `api_keys(user_id)` and `api_keys(organization_id)`, and the two unindexed referencing columns whose parents the module deletes: `organization_members(role_template_id)` (SET NULL) and `revoked_tokens(user_id)` (CASCADE). Index-only and fully reversible. |
+| `000006` | `000006_hot_path_indexes` | Adds indexes for the query shapes the module now forces on every caller. The tenant scope (`AuditScope`, renamed `OrgScope` in v0.25.0) became a required parameter in v0.21.0, so every audit read carries an `organization_id` predicate that had no supporting index: this adds the composite `(organization_id, created_at DESC)` covering both the list/count and export-stream shapes. Also indexes `organization_members(user_id)` (previously only the trailing column of a unique, so unseekable — every membership resolution on the auth path depends on it), `api_keys(user_id)` and `api_keys(organization_id)`, and the two unindexed referencing columns whose parents the module deletes: `organization_members(role_template_id)` (SET NULL) and `revoked_tokens(user_id)` (CASCADE). Index-only and fully reversible. |
 
 The current version is `000006`.
 

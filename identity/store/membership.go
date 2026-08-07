@@ -52,9 +52,18 @@ const userMembershipFrom = `
 // before this constant existed and differ only in the slice type they return.
 const userMembershipByUserQuery = `
 		SELECT ` + userMembershipColumns + userMembershipFrom + `
-		WHERE om.user_id = $1
-		ORDER BY om.created_at DESC
-	`
+		WHERE om.user_id = $1`
+
+// userMembershipOrderBy is the ordering the single-user membership read appends
+// AFTER any tenant predicate.
+//
+// It is a separate constant, and not the tail of the query above, because a
+// tenant predicate is spliced onto the WHERE clause (andScope) and a query
+// constant that already ended in ORDER BY would receive it in the wrong place —
+// producing `ORDER BY om.created_at DESC AND <predicate>`, which is a syntax
+// error rather than an unscoped read. Splitting the ordering out makes the
+// splice point unambiguous for every caller.
+const userMembershipOrderBy = ` ORDER BY om.created_at DESC`
 
 // userMembershipByUserIDsQuery is the bulk form: it reads memberships for many
 // users in one round trip (avoiding N+1) and therefore carries one extra leading
@@ -63,9 +72,12 @@ const userMembershipByUserQuery = `
 // userMembershipByUserQuery gives within each user.
 const userMembershipByUserIDsQuery = `
 		SELECT om.user_id, ` + userMembershipColumns + userMembershipFrom + `
-		WHERE om.user_id = ANY($1)
-		ORDER BY om.user_id, om.created_at DESC
-	`
+		WHERE om.user_id = ANY($1)`
+
+// userMembershipBulkOrderBy groups by user first, preserving the created_at
+// DESC ordering that userMembershipOrderBy gives within each user. Split out for
+// the same reason as userMembershipOrderBy.
+const userMembershipBulkOrderBy = ` ORDER BY om.user_id, om.created_at DESC`
 
 // unmarshalRoleTemplateScopes decodes the role_template_scopes JSONB column into
 // dest. Both membership shapes select that column identically and both wrapped
@@ -143,9 +155,11 @@ const orgMemberByOrgAndUserQuery = `
 // orgMembersByOrgQuery reads every membership row for one organization.
 const orgMembersByOrgQuery = `
 		SELECT ` + orgMemberWithUserColumns + orgMemberWithUserFrom + `
-		WHERE om.organization_id = $1
-		ORDER BY om.created_at DESC
-	`
+		WHERE om.organization_id = $1`
+
+// orgMembersByOrgOrderBy is split out for the same reason as
+// userMembershipOrderBy: the tenant predicate is appended to the WHERE clause.
+const orgMembersByOrgOrderBy = ` ORDER BY om.created_at DESC`
 
 // scanOrgMemberWithUser scans one orgMemberWithUserColumns row and returns the
 // member together with the still-encoded role_template_scopes value, which the

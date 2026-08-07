@@ -10,12 +10,18 @@ live database. That is the reason a release that ships DDL gets an entry here.
 
 ---
 
-## v0.25.0 — one canonical name per operation; the deprecated surface is gone
+## v0.25.0 — one canonical name per operation; tenancy is a required parameter
 
 **BREAKING. No migration.** Unlike v0.24.0, **every** change here is a compile
-error at the call site. Nothing changes behaviour except the deletions
-themselves; if it builds, it does what it did before. Two exceptions are called
-out under "Behaviour that changed with the deletion" below — read those.
+error at the call site — including the tenant-scope work in sections 6 and 7,
+which adds a required parameter to every accessor that touches an
+organization-owned row.
+
+Sections 1–5 are pure renames and deletions: if it builds, it does what it did
+before, with two exceptions called out under "Behaviour that changed with the
+deletion". Sections 6–7 change what accessors RETURN for a caller whose tenancy
+does not cover the target — that is the fix, and it is the part to read
+carefully.
 
 ### Why the deprecated methods were deleted rather than re-marked
 
@@ -184,6 +190,169 @@ reviewable.
 The places this does surface as a compile error are `reflect.DeepEqual` against a
 `[]string` literal and type switches, both of which are almost always in tests.
 
+### 6. `store.OrgScope` — tenancy is now a required parameter, not an optional filter
+
+**BREAKING, and every call site is a compile error.** Issues
+[#138](https://github.com/sethbacon/terraform-suite-identity/issues/138),
+[#160](https://github.com/sethbacon/terraform-suite-identity/issues/160),
+[#161](https://github.com/sethbacon/terraform-suite-identity/issues/161),
+[#162](https://github.com/sethbacon/terraform-suite-identity/issues/162).
+
+v0.21.0 closed the cross-tenant read class for `audit_logs` with `AuditScope`: a
+value type with a fail-closed zero value, made a required parameter, applied as a
+SQL predicate. That fix was correct and it stopped at one table — even though
+`audit_scope.go`'s own package doc argued the defect is a CLASS of
+(resource x access axis). `api_keys`, `organizations`, `organization_members` and
+`users` were the unfixed remainder: `GetAPIKeyByID` returned any organization's
+row *including its bcrypt `key_hash`*, `Update` rewrote any organization's key
+scopes and expiry, `RevokeAPIKey` deleted any organization's key, and
+`GetUserOrganizations` disclosed a user's complete cross-tenant membership list
+to any flat `users:read` holder — all on a bare id a handler naturally binds from
+a path parameter.
+
+#### `AuditScope` is now `OrgScope`
+
+One type, not one per table. Mechanical rename:
+
+| Removed | Use instead |
+| --- | --- |
+| `store.AuditScope` | `store.OrgScope` |
+| `store.AuditScopeOrganizations` | `store.OrgScopeOrganizations` |
+| `store.AuditScopeOrganizationsAndUnowned` | `store.OrgScopeOrganizationsAndUnowned` |
+| `store.AuditScopeAllOrganizations` | `store.OrgScopeAllOrganizations` |
+
+Semantics are unchanged, with two additions: ids are now **deduplicated and
+sorted** (so the bound argument is a function of the set, not of map iteration
+order), and `OrgScope.WithUnowned()` widens an existing scope in place of
+unpacking and rebuilding it.
+
+> **Check your source-scanning tests.** `terraform-state-manager`'s
+> `TestNoPlatformWideAuditScopeInHandlers` greps for the literal string
+> `"AuditScopeAllOrganizations"`. After this rename it keeps compiling and keeps
+> passing while checking nothing. Update the literal or the guard is gone.
+
+#### The three things you no longer have to write yourself
+
+These are the point of the release. Both consumers had hand-rolled all three,
+because the one remedy shape they were told to copy — `AuditScope.sqlPredicate` —
+was **unexported**.
+
+1. **The resolver.** `OrganizationRepository.OrgScopeForUser(ctx, userID,
+   required, rwPairs)` returns the organizations in which the user's ROLE
+   TEMPLATE grants `required`. It replaces
+   `terraform-registry-backend/backend/internal/tenantscope`'s membership branch
+   and `terraform-state-manager-backend/backend/internal/api.adminOrgSet`
+   verbatim. It deliberately does NOT decide whether the caller is platform-wide
+   — that is a property of the token or of an API key's organization binding,
+   neither of which the store layer can see. Keep that branch in your resolver
+   and call `OrgScopeAllOrganizations()` for it.
+2. **The predicate builder.** `OrgScope.SQL(column, paramIndex) (clause, args)`
+   is now exported, so you can scope **your own** organization-owned tables
+   (registry: modules, providers, SCM providers; state-manager: states, sources)
+   with the same expression this package scopes its own with. The clause is
+   never empty — `TRUE` for platform-wide, `FALSE` for a scope that matches
+   nothing — so appending it can never degrade into an unfiltered statement.
+   `paramIndex` is `len(args)+1` at the splice point; append the returned `args`
+   slice unconditionally.
+3. **The in-memory check.** `OrgScope.PermitsOrganization` (unchanged) for rows
+   you have already loaded.
+
+#### What a refused access looks like
+
+Uniformly `store.ErrNotFound` (v0.24.0's sentinel), on **every** axis including
+create — never a distinct "forbidden". A caller able to tell "exists but not
+yours" from "does not exist" has an existence oracle over other tenants' ids,
+which is the disclosure half of this same class. List axes return an empty slice
+or a zero count.
+
+#### Migrating a call site
+
+Every scoped accessor gained a trailing `scope store.OrgScope` parameter, so the
+compiler names each site. For each one, answer *whose tenancy is this?*
+
+- A route already behind a per-organization guard: pass the scope you resolved
+  for that guard.
+- An authority-derivation path (login, API-key authentication, a middleware that
+  is itself the tenant check): pass `store.OrgScopeAllOrganizations()`. It is
+  greppable, which "no argument" was not.
+- A background job with no principal: `store.OrgScopeAllOrganizations()`.
+
+Accessors deliberately left **unscoped** are marked `UNSCOPED BY DESIGN` in their
+doc comment with the reason: authority derivation (`GetUserMemberships`,
+`GetUserCombinedScopes`, `GetUserScopesForOrg`, `GetAPIKeysByPrefix`,
+`GetUserByOIDCSub`, `GetOrCreateUserFromOIDC`, `GetUserByEmail`), authentication
+bookkeeping (`UpdateLastUsed`), unattended maintenance (`DeleteExpiredKeys`,
+`FindExpiringKeys`, `ClaimExpiryNotification`), bootstrap
+(`GetDefaultOrganization`), and the two creates with no owning organization to
+check against (`OrganizationRepository.Create`, `UserRepository.CreateUser`).
+
+#### Renamed accessor
+
+`APIKeyRepository.ListAll` is now **`ListAPIKeys(ctx, scope)`**. With a scope
+parameter the old name is a contradiction (`ListAll(ctx,
+OrgScopeOrganizations("a"))`), and both consumers were filtering its result in
+memory against a hand-computed admin-organization set — that filter is now the
+query's own predicate.
+
+#### Signature changes with a changed RETURN type
+
+`OrganizationRepository.RemoveAllMembershipsForUser(ctx, userID, scope)` now
+returns `(OrgScope, error)` instead of `(int64, error)`: the organizations whose
+membership it **actually removed**. See the next section for why.
+
+#### The users table
+
+`users` carries no `organization_id`, so its predicate is an `EXISTS` over
+`organization_members` — "shares an in-scope organization with the caller", which
+is what `terraform-state-manager`'s `requireSharedOrgAdminWithTargetUser` already
+computes in Go.
+
+**One behaviour change to decide on.** A user with NO memberships is now DENIED
+by a plain organization scope, where that middleware allowed it through ("nothing
+cross-tenant to protect against"). To keep the old behaviour, say so at the call
+site with `OrgScopeOrganizationsAndUnowned(...)` / `.WithUnowned()` — on this
+table the unowned axis means "a user belonging to no organization".
+
+### 7. SCIM deprovisioning: the credential sweep now matches the membership strip
+
+Issues #160 and #162 are one defect with two halves and are fixed together.
+
+SCIM deactivation strips memberships and revokes the credentials those
+memberships backed. Before v0.25.0 the two halves disagreed about tenancy: the
+registry's strip was tenant-scoped (its #719) while the sweep beside it reached
+`RevokeAPIKey` per key with no scope, so a holder of `scim:provision` — obtainable
+through membership in a SINGLE organization — irreversibly deleted `api_keys`
+rows owned by organizations they had no relationship with. `terraform-state-manager`
+had neither half scoped.
+
+Narrowing the sweep must not reintroduce the **stranded credential** defect that
+motivated it (registry #732/#736): a key that outlives the authority it was
+issued under keeps working from a stale snapshot. The two halves therefore share
+one scope, and the second is derived from the first:
+
+```go
+removed, err := orgRepo.RemoveAllMembershipsForUser(ctx, userID, scope)
+if err != nil {
+    return err
+}
+n, err := keyRepo.RevokeAPIKeysForUser(ctx, userID, removed)
+```
+
+`removed` is the set of organizations whose membership was **actually** removed —
+not the ones the caller asked about — returned as an `OrgScope` so it is directly
+passable to the sweep. A key is revoked exactly when the authority behind it was
+just withdrawn, in the same organization, in the same request:
+
+- **Not too wide** — no membership removed in an organization means no authority
+  reduced there, so that organization's keys are left alone (#160).
+- **Not too narrow** — every organization where authority WAS reduced is, by
+  construction, in the sweep's scope, so nothing is stranded (#732/#736).
+
+Replace per-key `RevokeAPIKey` loops in deprovisioning with the single
+`RevokeAPIKeysForUser` call. A caller that wants the old count reads
+`len(removed.OrganizationIDs())`; one that wants to log WHICH organizations were
+touched now can, which the old `int64` never allowed.
+
 ---
 
 ## v0.24.0 — `store.ErrNotFound`: not-found is no longer silent
@@ -351,7 +520,7 @@ Adds six indexes to the `identity` schema:
 
 | Index | Table (column) | Why |
 | --- | --- | --- |
-| `idx_identity_audit_logs_org_created_at` | `audit_logs (organization_id, created_at DESC)` | The mandatory `AuditScope` predicate (v0.21.0) plus the audit page's `ORDER BY` |
+| `idx_identity_audit_logs_org_created_at` | `audit_logs (organization_id, created_at DESC)` | The mandatory tenant predicate (`AuditScope` in v0.21.0, `OrgScope` since v0.25.0) plus the audit page's `ORDER BY` |
 | `idx_identity_organization_members_user_id` | `organization_members (user_id)` | Membership/scope resolution on every login and token mint |
 | `idx_identity_organization_members_role_template_id` | `organization_members (role_template_id)` | `ON DELETE SET NULL` from `role_templates` |
 | `idx_identity_api_keys_organization_id` | `api_keys (organization_id)` | `ListAPIKeysByOrganization`; `ON DELETE CASCADE` from `organizations` |

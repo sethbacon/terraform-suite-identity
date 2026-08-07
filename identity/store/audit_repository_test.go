@@ -114,7 +114,7 @@ func TestListAuditLogs_NoFilters(t *testing.T) {
 	mock.ExpectQuery("SELECT al\\.id.*FROM audit_logs").
 		WillReturnRows(sampleAuditRow())
 
-	logs, total, err := repo.ListAuditLogs(context.Background(), AuditFilters{}, AuditScopeAllOrganizations(), 10, 0)
+	logs, total, err := repo.ListAuditLogs(context.Background(), AuditFilters{}, OrgScopeAllOrganizations(), 10, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestListAuditLogs_WithFilters(t *testing.T) {
 		OrganizationID: &orgID,
 		Action:         &action,
 		ResourceType:   &resourceType,
-	}, AuditScopeAllOrganizations(), 10, 0)
+	}, OrgScopeAllOrganizations(), 10, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestListAuditLogs_CountError(t *testing.T) {
 	mock.ExpectQuery("SELECT COUNT.*FROM audit_logs").
 		WillReturnError(errDB)
 
-	_, _, err := repo.ListAuditLogs(context.Background(), AuditFilters{}, AuditScopeAllOrganizations(), 10, 0)
+	_, _, err := repo.ListAuditLogs(context.Background(), AuditFilters{}, OrgScopeAllOrganizations(), 10, 0)
 	if err == nil {
 		t.Error("expected error, got nil")
 	}
@@ -173,7 +173,7 @@ func TestListAuditLogs_QueryError(t *testing.T) {
 	mock.ExpectQuery("SELECT al\\.id.*FROM audit_logs").
 		WillReturnError(errDB)
 
-	_, _, err := repo.ListAuditLogs(context.Background(), AuditFilters{}, AuditScopeAllOrganizations(), 10, 0)
+	_, _, err := repo.ListAuditLogs(context.Background(), AuditFilters{}, OrgScopeAllOrganizations(), 10, 0)
 	if err == nil {
 		t.Error("expected error, got nil")
 	}
@@ -188,7 +188,7 @@ func TestGetAuditLog_Found(t *testing.T) {
 	mock.ExpectQuery("SELECT id.*FROM audit_logs.*WHERE id").
 		WillReturnRows(sampleAuditGetRow())
 
-	log, err := repo.GetAuditLog(context.Background(), "log-1", AuditScopeAllOrganizations())
+	log, err := repo.GetAuditLog(context.Background(), "log-1", OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestGetAuditLog_NotFound(t *testing.T) {
 	mock.ExpectQuery("SELECT id.*FROM audit_logs.*WHERE id").
 		WillReturnRows(sqlmock.NewRows(auditGetCols))
 
-	log, err := repo.GetAuditLog(context.Background(), "missing", AuditScopeAllOrganizations())
+	log, err := repo.GetAuditLog(context.Background(), "missing", OrgScopeAllOrganizations())
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
@@ -219,7 +219,7 @@ func TestGetAuditLog_Error(t *testing.T) {
 	mock.ExpectQuery("SELECT id.*FROM audit_logs.*WHERE id").
 		WillReturnError(errDB)
 
-	_, err := repo.GetAuditLog(context.Background(), "log-1", AuditScopeAllOrganizations())
+	_, err := repo.GetAuditLog(context.Background(), "log-1", OrgScopeAllOrganizations())
 	if err == nil {
 		t.Error("expected error, got nil")
 	}

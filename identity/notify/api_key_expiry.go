@@ -64,7 +64,7 @@ type apiKeyRepo interface {
 }
 
 type userRepo interface {
-	GetUserByID(ctx context.Context, userID string) (*identitymodels.User, error)
+	GetUserByID(ctx context.Context, userID string, scope store.OrgScope) (*identitymodels.User, error)
 }
 
 // ExpiryConfig is a point-in-time snapshot of the settings that gate the
@@ -276,7 +276,11 @@ func (n *APIKeyExpiryNotifier) runCheck(ctx context.Context) {
 		user, err := func() (*identitymodels.User, error) {
 			lookupCtx, cancel := context.WithTimeout(ctx, dbTimeout())
 			defer cancel()
-			return n.userRepo.GetUserByID(lookupCtx, *key.UserID)
+			// The expiry notifier is an unattended background job with no
+			// principal, so it names the platform-wide scope explicitly rather
+			// than reaching it by omission. It emails the key's OWN owner; it
+			// exposes no row to a requester.
+			return n.userRepo.GetUserByID(lookupCtx, *key.UserID, store.OrgScopeAllOrganizations())
 		}()
 		// GetUserByID reports "no such row" as store.ErrNotFound. api_keys.user_id
 		// is ON DELETE SET NULL, so deleting a user whose key is inside the

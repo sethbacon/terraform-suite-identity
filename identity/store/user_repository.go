@@ -32,7 +32,13 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pqErr) && pqErr.Code == "23505"
 }
 
-// CreateUser creates a new user
+// CreateUser creates a new user.
+//
+// UNSCOPED BY DESIGN — a users row has no owning organization at creation time.
+// Tenancy over a user is established by the membership that follows, and THAT
+// insert is scoped (AddMemberWithRoleTemplate). Both consumers already note at
+// their create handlers that a per-organization guard cannot gate user
+// creation, for the same reason.
 func (r *UserRepository) CreateUser(ctx context.Context, user *models.User) error {
 	user.ID = uuid.New().String()
 	user.CreatedAt = time.Now()
@@ -58,18 +64,43 @@ func (r *UserRepository) CreateUser(ctx context.Context, user *models.User) erro
 	return nil
 }
 
-// GetUserByID retrieves a user by ID.
+// GetUserByID retrieves a user by ID, within scope.
 //
-// Returns an error wrapping ErrNotFound when no user has that ID.
-func (r *UserRepository) GetUserByID(ctx context.Context, userID string) (*models.User, error) {
+// Returns an error wrapping ErrNotFound when no user has that ID inside the
+// scope.
+//
+// # How a user is tenant-scoped
+//
+// The users table carries no organization_id — it is the one table in this
+// class whose rows are not themselves organization-owned. A user is reachable
+// from an organization only through organization_members, so the predicate here
+// is an EXISTS over that join table (OrgScope.membershipSQL) rather than a
+// column comparison. "In scope" therefore means "shares at least one in-scope
+// organization with the caller", which is precisely the relation
+// terraform-state-manager's requireSharedOrgAdminWithTargetUser computes in Go
+// today.
+//
+// A user with NO memberships is matched only by OrgScopeAllOrganizations() or by
+// a scope built with OrgScopeOrganizationsAndUnowned — see membershipSQL for why
+// the unowned axis is the right spelling of that case, and note that it is a
+// DENIAL by default where terraform-state-manager's middleware currently allows
+// it. A consumer that wants the old behaviour states it with .WithUnowned().
+func (r *UserRepository) GetUserByID(ctx context.Context, userID string, scope OrgScope) (*models.User, error) {
+	if scope.MatchesNothing() {
+		return nil, notFound("user by id")
+	}
+
+	// GUARD org-scope-user-byid (issue #138).
 	query := `
 		SELECT id, email, name, oidc_sub, created_at, updated_at
 		FROM users
 		WHERE id = $1
 	`
+	args := []interface{}{userID}
+	query, args = andMembershipScope(query, scope, "users.id", args)
 
 	user := &models.User{}
-	err := r.db.QueryRowContext(ctx, query, userID).Scan(
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(
 		&user.ID,
 		&user.Email,
 		&user.Name,
@@ -90,6 +121,11 @@ func (r *UserRepository) GetUserByID(ctx context.Context, userID string) (*model
 }
 
 // GetUserByEmail retrieves a user by email.
+//
+// UNSCOPED BY DESIGN — authentication and provisioning. It is the lookup that
+// decides whether an incoming identity may be linked to an existing account
+// (see GetOrCreateUserFromOIDC, and terraform-state-manager's guardEmailRebind),
+// which happens before any principal — and therefore any scope — exists.
 //
 // Returns an error wrapping ErrNotFound when no user has that email.
 func (r *UserRepository) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
@@ -122,6 +158,10 @@ func (r *UserRepository) GetUserByEmail(ctx context.Context, email string) (*mod
 
 // GetUserByOIDCSub retrieves a user by OIDC subject identifier.
 //
+// UNSCOPED BY DESIGN — authority derivation. This is the login lookup: it
+// establishes WHO the caller is, so it cannot be gated on what the caller may
+// reach.
+//
 // Returns an error wrapping ErrNotFound when no user carries that subject —
 // the ordinary result for a first login, which GetOrCreateUserFromOIDC handles.
 func (r *UserRepository) GetUserByOIDCSub(ctx context.Context, oidcSub string) (*models.User, error) {
@@ -152,27 +192,35 @@ func (r *UserRepository) GetUserByOIDCSub(ctx context.Context, oidcSub string) (
 	return user, nil
 }
 
-// UpdateUser updates a user's information.
+// UpdateUser updates a user's information, within scope.
 //
-// Returns an error wrapping ErrNotFound when no row has user.ID, so an edit
-// applied to a user that was deleted concurrently is not reported as a
-// successful save.
-func (r *UserRepository) UpdateUser(ctx context.Context, user *models.User) error {
+// Returns an error wrapping ErrNotFound when no row has user.ID inside the
+// scope, so neither an edit applied to a user deleted concurrently nor one
+// aimed at another tenant's user is reported as a successful save. It rewrites
+// email and oidc_sub — the account's login identity — so an unscoped update was
+// an account-takeover primitive, not a profile edit.
+func (r *UserRepository) UpdateUser(ctx context.Context, user *models.User, scope OrgScope) error {
+	if scope.MatchesNothing() {
+		return notFound("user by id")
+	}
 	user.UpdatedAt = time.Now()
 
+	// GUARD org-scope-user-update (issue #138).
 	query := `
 		UPDATE users
 		SET email = $2, name = $3, oidc_sub = $4, updated_at = $5
 		WHERE id = $1
 	`
-
-	res, err := r.db.ExecContext(ctx, query,
+	args := []interface{}{
 		user.ID,
 		user.Email,
 		user.Name,
 		user.OIDCSub,
 		user.UpdatedAt,
-	)
+	}
+	query, args = andMembershipScope(query, scope, "users.id", args)
+
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update user: %w", err)
 	}
@@ -211,15 +259,27 @@ func (r *UserRepository) linkOIDCIdentity(ctx context.Context, userID, oidcSub, 
 	return n > 0, nil
 }
 
-// DeleteUser deletes a user (cascades to API keys and memberships).
+// DeleteUser deletes a user, within scope (cascades to API keys and
+// memberships).
 //
-// Returns an error wrapping ErrNotFound when no row has that ID. Deleting a
+// Returns an error wrapping ErrNotFound when no row has that ID inside the
+// scope. The cascade is why this axis matters most on the users table: an
+// unscoped delete destroyed every organization's memberships and credentials
+// for that account, from a single organization's authority. Deleting a
 // user is a security-state change a consuming app reports to an operator and
 // writes to its audit log; a stale or wrong id must not produce a nil error
 // that both records as a deletion that never happened.
-func (r *UserRepository) DeleteUser(ctx context.Context, userID string) error {
+func (r *UserRepository) DeleteUser(ctx context.Context, userID string, scope OrgScope) error {
+	if scope.MatchesNothing() {
+		return notFound("user by id")
+	}
+
+	// GUARD org-scope-user-delete (issue #138).
 	query := `DELETE FROM users WHERE id = $1`
-	res, err := r.db.ExecContext(ctx, query, userID)
+	args := []interface{}{userID}
+	query, args = andMembershipScope(query, scope, "users.id", args)
+
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to delete user: %w", err)
 	}
@@ -234,15 +294,20 @@ func (r *UserRepository) DeleteUser(ctx context.Context, userID string) error {
 // the helper is kept because ListUsers reads better with the count query and the
 // page query separated, and because batch 11's tenancy predicate has one place
 // to land instead of two.
-func (r *UserRepository) listUsersPage(ctx context.Context, limit, offset int) ([]*models.User, error) {
+func (r *UserRepository) listUsersPage(ctx context.Context, limit, offset int, scope OrgScope) ([]*models.User, error) {
+	// GUARD org-scope-user-list (issue #138): the tenant predicate is applied
+	// before LIMIT/OFFSET, so pagination pages the caller's own users.
 	query := `
 		SELECT id, email, name, oidc_sub, created_at, updated_at
 		FROM users
-		ORDER BY created_at DESC
-		LIMIT $1 OFFSET $2
+		WHERE 1=1
 	`
+	var args []interface{}
+	query, args = andMembershipScope(query, scope, "users.id", args)
+	query += fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2) // #nosec G202 -- the appended text is a fixed template; its only interpolations are the integer placeholder indices computed from len(args). Every value travels as a query argument.
+	args = append(args, limit, offset)
 
-	rows, err := r.db.QueryContext(ctx, query, limit, offset)
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list users: %w", err)
 	}
@@ -268,17 +333,28 @@ func (r *UserRepository) listUsersPage(ctx context.Context, limit, offset int) (
 	return users, rows.Err()
 }
 
-// ListUsers retrieves a paginated list of users
-func (r *UserRepository) ListUsers(ctx context.Context, limit, offset int) ([]*models.User, int, error) {
-	// Get total count
+// ListUsers retrieves a paginated list of the users inside scope, and how many
+// there are.
+//
+// The count carries the SAME predicate as the page. A total that counts users
+// the caller can never page to is both a disclosure (how many accounts exist
+// elsewhere) and a bug (page controls that run off the end of the data).
+func (r *UserRepository) ListUsers(ctx context.Context, limit, offset int, scope OrgScope) ([]*models.User, int, error) {
+	if scope.MatchesNothing() {
+		return []*models.User{}, 0, nil
+	}
+
+	// GUARD org-scope-user-list (issue #138).
 	var total int
-	countQuery := `SELECT COUNT(*) FROM users`
-	err := r.db.QueryRowContext(ctx, countQuery).Scan(&total)
+	countQuery := `SELECT COUNT(*) FROM users WHERE 1=1`
+	var countArgs []interface{}
+	countQuery, countArgs = andMembershipScope(countQuery, scope, "users.id", countArgs)
+	err := r.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to count users: %w", err)
 	}
 
-	users, err := r.listUsersPage(ctx, limit, offset)
+	users, err := r.listUsersPage(ctx, limit, offset, scope)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -287,6 +363,11 @@ func (r *UserRepository) ListUsers(ctx context.Context, limit, offset int) ([]*m
 }
 
 // GetOrCreateUserFromOIDC gets or creates a user from OIDC authentication.
+//
+// UNSCOPED BY DESIGN — this IS the login path, and it runs before the principal
+// exists, let alone the principal's scope. Its three internal calls to scoped
+// accessors therefore name OrgScopeAllOrganizations() explicitly, so a reviewer
+// grepping for the platform-wide scope finds them.
 //
 // emailVerified MUST carry the identity provider's `email_verified` signal for
 // the incoming login (see oidc.Provider.ExtractUserInfo). It gates the two paths
@@ -311,7 +392,7 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 		if user.Email != email || user.Name != name {
 			user.Email = email
 			user.Name = name
-			err = r.UpdateUser(ctx, user)
+			err = r.UpdateUser(ctx, user, OrgScopeAllOrganizations()) // pre-authorization login path
 			if err != nil {
 				return nil, err
 			}
@@ -365,7 +446,7 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 		// Re-read the row and decide based on what actually won rather than
 		// trusting our stale in-memory copy — mirroring the INSERT path's
 		// re-read-the-winner fallback.
-		winner, werr := r.GetUserByID(ctx, emailUser.ID)
+		winner, werr := r.GetUserByID(ctx, emailUser.ID, OrgScopeAllOrganizations()) // pre-authorization login path
 		if errors.Is(werr, ErrNotFound) {
 			return nil, fmt.Errorf("oidc account linking: user %s vanished while linking", emailUser.ID)
 		}
@@ -446,29 +527,49 @@ func (r *UserRepository) GetOrCreateUserFromOIDC(ctx context.Context, oidcSub, e
 	return nil, fmt.Errorf("oidc user creation: conflicting row for oidc_sub %q not found on re-read", oidcSub)
 }
 
-// Count returns the total number of users
-func (r *UserRepository) Count(ctx context.Context) (int, error) {
+// Count returns how many users are inside scope.
+func (r *UserRepository) Count(ctx context.Context, scope OrgScope) (int, error) {
+	if scope.MatchesNothing() {
+		return 0, nil
+	}
+
+	// GUARD org-scope-user-list (issue #138).
 	var total int
-	query := `SELECT COUNT(*) FROM users`
-	err := r.db.QueryRowContext(ctx, query).Scan(&total)
+	query := `SELECT COUNT(*) FROM users WHERE 1=1`
+	var args []interface{}
+	query, args = andMembershipScope(query, scope, "users.id", args)
+
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&total)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count users: %w", err)
 	}
 	return total, nil
 }
 
-// Search searches for users by email or name
-func (r *UserRepository) Search(ctx context.Context, query string, limit, offset int) ([]*models.User, error) {
+// Search searches the users inside scope by email or name.
+//
+// The ILIKE alternation is parenthesised so the scope predicate cannot be
+// swallowed by OR precedence — the classic way a tenant predicate is lost on a
+// search axis, and the reason searching is a distinct row in this class's test
+// matrix rather than an alias of listing.
+func (r *UserRepository) Search(ctx context.Context, query string, limit, offset int, scope OrgScope) ([]*models.User, error) {
+	if scope.MatchesNothing() {
+		return []*models.User{}, nil
+	}
+
+	// GUARD org-scope-user-list (issue #138).
 	searchQuery := `
 		SELECT id, email, name, oidc_sub, created_at, updated_at
 		FROM users
-		WHERE email ILIKE $1 OR name ILIKE $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
+		WHERE (email ILIKE $1 OR name ILIKE $1)
 	`
-
 	searchPattern := "%" + escapeLikePattern(query) + "%"
-	rows, err := r.db.QueryContext(ctx, searchQuery, searchPattern, limit, offset)
+	args := []interface{}{searchPattern}
+	searchQuery, args = andMembershipScope(searchQuery, scope, "users.id", args)
+	searchQuery += fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2) // #nosec G202 -- the appended text is a fixed template; its only interpolations are the integer placeholder indices computed from len(args). Every value travels as a query argument.
+	args = append(args, limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, searchQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search users: %w", err)
 	}
@@ -495,23 +596,32 @@ func (r *UserRepository) Search(ctx context.Context, query string, limit, offset
 }
 
 // GetUserWithOrgRoles retrieves a user with their per-organization role
-// template information.
+// template information, within scope.
 //
-// Returns an error wrapping ErrNotFound when no user has that ID. A user with
-// no memberships is NOT a miss — that returns the user with an empty
-// Memberships slice.
-func (r *UserRepository) GetUserWithOrgRoles(ctx context.Context, userID string) (*models.UserWithOrgRoles, error) {
+// Returns an error wrapping ErrNotFound when no user has that ID inside the
+// scope. A user with no IN-SCOPE memberships is NOT a miss — that returns the
+// user with an empty Memberships slice.
+func (r *UserRepository) GetUserWithOrgRoles(ctx context.Context, userID string, scope OrgScope) (*models.UserWithOrgRoles, error) {
+	if scope.MatchesNothing() {
+		return nil, notFound("user by id")
+	}
+
 	// First get the basic user info. ErrNotFound propagates unchanged: the
 	// distinction this method needs to preserve is "no such user" (an error)
 	// versus "a user with no memberships" (a value with an empty slice).
-	user, err := r.GetUserByID(ctx, userID)
+	user, err := r.GetUserByID(ctx, userID, scope)
 	if err != nil {
 		return nil, err
 	}
 
-	// Then get all memberships with role templates (see membership.go for the
-	// shared query constant and scan helper).
-	rows, err := r.db.QueryContext(ctx, userMembershipByUserQuery, userID)
+	// GUARD org-scope-membership-list (issue #161): BOTH statements carry the
+	// scope. Scoping only the user row would still hand back the full membership
+	// list — the organizations and role templates — for any user the caller can
+	// see at all, which is the disclosure #161 reports rather than a weaker
+	// version of it.
+	// See membership.go for the shared query constant and scan helper.
+	membershipQuery, membershipArgs := andScope(userMembershipByUserQuery, scope, "om.organization_id", []interface{}{userID})
+	rows, err := r.db.QueryContext(ctx, membershipQuery+userMembershipOrderBy, membershipArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user memberships: %w", err)
 	}
@@ -535,7 +645,7 @@ func (r *UserRepository) GetUserWithOrgRoles(ctx context.Context, userID string)
 // loadMembershipsForUsers bulk-fetches memberships for a slice of users in a single
 // database round trip, then attaches them to per-user UserWithOrgRoles structs.
 // The returned slice preserves the order of the input users slice.
-func (r *UserRepository) loadMembershipsForUsers(ctx context.Context, users []*models.User) ([]*models.UserWithOrgRoles, error) {
+func (r *UserRepository) loadMembershipsForUsers(ctx context.Context, users []*models.User, scope OrgScope) ([]*models.UserWithOrgRoles, error) {
 	result := make([]*models.UserWithOrgRoles, len(users))
 	for i, u := range users {
 		result[i] = &models.UserWithOrgRoles{
@@ -553,8 +663,13 @@ func (r *UserRepository) loadMembershipsForUsers(ctx context.Context, users []*m
 		userIDs[i] = u.ID
 	}
 
+	// GUARD org-scope-membership-list (issue #161): the bulk membership fetch is
+	// scoped exactly as the single-user one is. This is the N+1-avoiding sibling
+	// of GetUserWithOrgRoles' second statement, and an unscoped bulk form beside
+	// a scoped single form is how a fix half-lands.
 	// See membership.go for the shared query constant and scan helper.
-	rows, err := r.db.QueryContext(ctx, userMembershipByUserIDsQuery, pq.Array(userIDs))
+	query, args := andScope(userMembershipByUserIDsQuery, scope, "om.organization_id", []interface{}{pq.Array(userIDs)})
+	rows, err := r.db.QueryContext(ctx, query+userMembershipBulkOrderBy, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load memberships for users: %w", err)
 	}
@@ -583,20 +698,20 @@ func (r *UserRepository) loadMembershipsForUsers(ctx context.Context, users []*m
 
 // ListUsersWithMemberships returns a paginated list of users with their organization
 // memberships fetched in a single additional query (2 queries total, not N+1).
-func (r *UserRepository) ListUsersWithMemberships(ctx context.Context, limit, offset int) ([]*models.UserWithOrgRoles, int, error) {
-	users, total, err := r.ListUsers(ctx, limit, offset)
+func (r *UserRepository) ListUsersWithMemberships(ctx context.Context, limit, offset int, scope OrgScope) ([]*models.UserWithOrgRoles, int, error) {
+	users, total, err := r.ListUsers(ctx, limit, offset, scope)
 	if err != nil {
 		return nil, 0, err
 	}
-	result, err := r.loadMembershipsForUsers(ctx, users)
+	result, err := r.loadMembershipsForUsers(ctx, users, scope)
 	return result, total, err
 }
 
 // SearchWithMemberships searches users and returns results with their organization memberships.
-func (r *UserRepository) SearchWithMemberships(ctx context.Context, query string, limit, offset int) ([]*models.UserWithOrgRoles, error) {
-	users, err := r.Search(ctx, query, limit, offset)
+func (r *UserRepository) SearchWithMemberships(ctx context.Context, query string, limit, offset int, scope OrgScope) ([]*models.UserWithOrgRoles, error) {
+	users, err := r.Search(ctx, query, limit, offset, scope)
 	if err != nil {
 		return nil, err
 	}
-	return r.loadMembershipsForUsers(ctx, users)
+	return r.loadMembershipsForUsers(ctx, users, scope)
 }

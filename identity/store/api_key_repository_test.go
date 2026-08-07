@@ -73,7 +73,7 @@ func TestCreateAPIKey_Success(t *testing.T) {
 		KeyPrefix:      "tfr_test",
 		Scopes:         []string{"modules:read"},
 	}
-	if err := repo.CreateAPIKey(context.Background(), key); err != nil {
+	if err := repo.CreateAPIKey(context.Background(), key, OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -84,7 +84,7 @@ func TestCreateAPIKey_DBError(t *testing.T) {
 		WillReturnError(errDB)
 
 	key := &models.APIKey{ID: "key-new", Scopes: []string{"modules:read"}}
-	if err := repo.CreateAPIKey(context.Background(), key); err == nil {
+	if err := repo.CreateAPIKey(context.Background(), key, OrgScopeAllOrganizations()); err == nil {
 		t.Error("expected error, got nil")
 	}
 }
@@ -99,7 +99,7 @@ func TestGetAPIKeyByID_Found(t *testing.T) {
 		WithArgs("key-1").
 		WillReturnRows(sampleAPIKeyRow())
 
-	key, err := repo.GetAPIKeyByID(context.Background(), "key-1")
+	key, err := repo.GetAPIKeyByID(context.Background(), "key-1", OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestGetAPIKeyByID_NotFound(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE id").
 		WillReturnRows(emptyAPIKeyRow())
 
-	key, err := repo.GetAPIKeyByID(context.Background(), "missing")
+	key, err := repo.GetAPIKeyByID(context.Background(), "missing", OrgScopeAllOrganizations())
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
@@ -131,7 +131,7 @@ func TestListAPIKeysByUser_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*user_id").
 		WillReturnRows(sampleAPIKeyListRow())
 
-	keys, err := repo.ListAPIKeysByUser(context.Background(), "user-1")
+	keys, err := repo.ListAPIKeysByUser(context.Background(), "user-1", OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestListAPIKeysByUser_Empty(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*user_id").
 		WillReturnRows(sqlmock.NewRows(apiKeyListCols))
 
-	keys, err := repo.ListAPIKeysByUser(context.Background(), "user-1")
+	keys, err := repo.ListAPIKeysByUser(context.Background(), "user-1", OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestListAPIKeysByOrganization_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*organization_id").
 		WillReturnRows(sampleAPIKeyListRow())
 
-	keys, err := repo.ListAPIKeysByOrganization(context.Background(), "org-1")
+	keys, err := repo.ListAPIKeysByOrganization(context.Background(), "org-1", OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestRevokeAPIKey_Success(t *testing.T) {
 		WithArgs("key-1").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	if err := repo.RevokeAPIKey(context.Background(), "key-1"); err != nil {
+	if err := repo.RevokeAPIKey(context.Background(), "key-1", OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -303,7 +303,7 @@ func TestListAllAPIKeys_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM api_keys").
 		WillReturnRows(sampleAPIKeyListRow())
 
-	keys, err := repo.ListAll(context.Background())
+	keys, err := repo.ListAPIKeys(context.Background(), OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestListByUserAndOrganization_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*user_id.*organization_id").
 		WillReturnRows(sampleAPIKeyListRow())
 
-	keys, err := repo.ListByUserAndOrganization(context.Background(), "user-1", "org-1")
+	keys, err := repo.ListByUserAndOrganization(context.Background(), "user-1", "org-1", OrgScopeAllOrganizations())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestAPIKey_Update_Success(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	key := &models.APIKey{ID: "key-1", Name: "updated", Scopes: []string{"read"}}
-	if err := repo.Update(context.Background(), key); err != nil {
+	if err := repo.Update(context.Background(), key, OrgScopeAllOrganizations()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -351,7 +351,7 @@ func TestAPIKey_Update_DBError(t *testing.T) {
 		WillReturnError(errDB)
 
 	key := &models.APIKey{ID: "key-1", Name: "updated", Scopes: []string{"read"}}
-	if err := repo.Update(context.Background(), key); err == nil {
+	if err := repo.Update(context.Background(), key, OrgScopeAllOrganizations()); err == nil {
 		t.Error("expected error")
 	}
 }

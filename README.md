@@ -60,11 +60,32 @@ scope *contents*, and each app seeds its own scopes onto `role_templates` at set
   <br>
   Two limits worth planning for. First, expiry enforcement lives in **that one query**:
   the admin/listing lookups (`GetAPIKeyByID`, `ListAPIKeysByUser`,
-  `ListAPIKeysByOrganization`, `ListAll`, …) deliberately return expired rows so an
+  `ListAPIKeysByOrganization`, `ListAPIKeys`, …) deliberately return expired rows so an
   operator can see and clean them up — **never build an authentication path on those**.
   Second, revocation is a hard delete (no soft flag), so a revoked key disappears rather
   than being marked. JWT revocation is different again: it is tracked in `revoked_tokens`
   but is entirely host-enforced — see the Auth section below.
+- **Tenancy is a required parameter, not an optional filter: `store.OrgScope`.**
+  Every accessor that reads or mutates a row of an organization-owned table
+  (`organizations`, `organization_members`, `api_keys`, `audit_logs`, and `users`
+  via its memberships) takes an `OrgScope`, and **its zero value denies
+  everything** — a caller that has not thought about tenancy gets no rows rather
+  than every tenant's. The predicate is applied in SQL before any caller-supplied
+  filter, so no filter combination yields an unscoped query, and an out-of-scope
+  target is reported as `store.ErrNotFound` on every axis (including create), so
+  the by-id axes cannot become a cross-tenant existence oracle. Reaching across
+  organizations is still possible but must be spelled `OrgScopeAllOrganizations()`,
+  which is greppable in a way an absent filter is not.
+  <br>
+  Three pieces are exported because a host needs all three:
+  `OrganizationRepository.OrgScopeForUser` resolves the organizations in which a
+  user's **role template** grants a scope (membership alone is not authority);
+  `OrgScope.SQL(column, paramIndex)` builds the same predicate for a host's **own**
+  organization-owned tables and never returns an empty clause; and
+  `OrgScope.PermitsOrganization` checks rows already in memory. Accessors that
+  deliberately take no scope — authority derivation, authentication bookkeeping,
+  unattended maintenance, bootstrap — say `UNSCOPED BY DESIGN` in their doc
+  comment with the reason.
 - **Not-found has ONE spelling: `store.ErrNotFound`.** Every read that can miss and
   every by-identifier `UPDATE`/`DELETE` that can match zero rows returns an error
   wrapping it; test with `errors.Is(err, store.ErrNotFound)`. Before v0.24.0 a read
@@ -73,8 +94,9 @@ scope *contents*, and each app seeds its own scopes onto `role_templates` at set
   revocation report success and made the idiomatic `if err != nil { return err }` panic
   on a miss. Three deliberate exceptions: **list/search** accessors return an empty
   slice (an empty result set is an answer, not a miss); **bulk sweeps**
-  (`DeleteExpiredKeys`, `RemoveAllMembershipsForUser`, `DeactivateAllOIDCConfigs`,
+  (`DeleteExpiredKeys`, `RevokeAPIKeysForUser`, `DeactivateAllOIDCConfigs`,
   `CleanupExpiredRevocations`, `DeleteAuditLogsBefore`) return an affected-row **count**,
+  and `RemoveAllMembershipsForUser` returns the **set** of organizations it emptied,
   since zero is a normal outcome for a sweep; and `CheckMembership` /
   `GetUserScopesForOrg` **absorb** the sentinel because their `bool` / empty scope set
   already says "nothing matched" in band — both still propagate a real failure, so a
