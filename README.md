@@ -27,6 +27,8 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 | `identity/httpsafe`  | An SSRF-safe HTTP client: outbound requests from library code (and from a host that wants the same guard) are restricted so a user-supplied destination cannot be steered at link-local, loopback or private-range addresses. |
 | `identity/mailer`    | An SMTP transport hardened against opportunistic-TLS downgrade, used to deliver notifications. |
 | `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. Ships `ChannelTableDDL` (the canonical table definition, for the app's own migration set) and `VerifyChannelTable` (the startup shape assertion). |
+| `identity/mailer`    | An SMTP transport hardened against opportunistic-TLS downgrade, used to deliver notifications. TLS is the zero value (`TLSMode`); plaintext must be named. |
+| `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. |
 
 The `notification_channels` table `identity/notify` reads is **owned by the consuming
 app**, not created by this module's migrations. The shape is not prose you transcribe:
@@ -92,6 +94,19 @@ scope *contents*, and each app seeds its own scopes onto `role_templates` at set
   deliberately take no scope — authority derivation, authentication bookkeeping,
   unattended maintenance, bootstrap — say `UNSCOPED BY DESIGN` in their doc
   comment with the reason.
+- **The key prefix is a lookup discriminator, not just a label — so it is capped at
+  `auth.MaxAPIKeyPrefixLength` (7 bytes).** `key_prefix` is the only narrowing predicate
+  that query has, and every row it returns costs the host one bcrypt comparison. Because
+  the stored prefix is the first `DisplayPrefixLength` (10) bytes of
+  `"<prefix>_<randomPart>"`, a caller-supplied prefix long enough to fill that window
+  leaves no randomness in it at all — every key the app issues then shares one identical,
+  and publicly visible, prefix. The cap guarantees at least `auth.MinPrefixRandomChars`
+  (2) random characters survive, and a compile-time assertion in `identity/auth/apikey.go`
+  keeps the two constants consistent so the cap cannot be raised back into that range.
+  `GetAPIKeysByPrefix` additionally bounds its own result set and returns an error
+  wrapping `store.ErrPrefixNotDiscriminating` rather than serving a fan-out from a prefix
+  persisted before the cap existed — deny and alert, not retry; those keys need
+  re-issuing.
 - **Not-found has ONE spelling: `store.ErrNotFound`.** Every read that can miss and
   every by-identifier `UPDATE`/`DELETE` that can match zero rows returns an error
   wrapping it; test with `errors.Is(err, store.ErrNotFound)`. Before v0.24.0 a read

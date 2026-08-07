@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -275,7 +277,7 @@ func TestGetAPIKeysByPrefix_ExcludesExpired(t *testing.T) {
 		// database level, so the repository must never see it in the result set.
 
 	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*key_prefix.*expires_at.*IS NULL.*expires_at.*NOW").
-		WithArgs("tfr_abc123").
+		WithArgs("tfr_abc123", maxPrefixCandidates+1).
 		WillReturnRows(rows)
 
 	keys, err := repo.GetAPIKeysByPrefix(context.Background(), "tfr_abc123")
@@ -291,6 +293,143 @@ func TestGetAPIKeysByPrefix_ExcludesExpired(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetAPIKeysByPrefix — bounded fan-out (issue #136)
+// ---------------------------------------------------------------------------
+
+// prefixRows builds n candidate rows all sharing one key_prefix: the shape a
+// degenerate prefix produces, where the discriminator has stopped
+// discriminating and the lookup returns the population rather than a candidate
+// set.
+func prefixRows(n int) *sqlmock.Rows {
+	rows := sqlmock.NewRows(apiKeyCols)
+	for i := 0; i < n; i++ {
+		rows.AddRow(
+			"key-"+strconv.Itoa(i), "user-1", "org-1", "Key "+strconv.Itoa(i), nil,
+			"hash-"+strconv.Itoa(i), "tfregistry", sampleScopes, nil, nil, nil, time.Now())
+	}
+	return rows
+}
+
+// TestGetAPIKeysByPrefix_QueryIsBounded proves the LIMIT reaches the database
+// rather than being applied after the fact.
+//
+// Trimming an unbounded result set in Go would leave the DATABASE doing the
+// full scan and shipping every row across the wire, which is most of the cost
+// the bound exists to avoid. sqlmock's argument matching is what distinguishes
+// the two: the limit has to be a query parameter for this to pass.
+//
+// The bound is fetched as maxPrefixCandidates+1 so saturation is DETECTABLE —
+// a query limited to exactly the budget cannot tell a table holding the budget
+// apart from one holding ten thousand.
+func TestGetAPIKeysByPrefix_QueryIsBounded(t *testing.T) {
+	repo, mock := newAPIKeyRepo(t)
+	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*key_prefix.*LIMIT").
+		WithArgs("tfr_abc", maxPrefixCandidates+1).
+		WillReturnRows(sampleAPIKeyRow())
+
+	if _, err := repo.GetAPIKeysByPrefix(context.Background(), "tfr_abc"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("the lookup did not push its bound into the query: %v", err)
+	}
+}
+
+// TestGetAPIKeysByPrefix_FanOutBoundary is the bidirectional table for the
+// saturation refusal.
+//
+// A table asserting only the refusal would pass against a repository that
+// refused every lookup — which denies all authentication and is a worse
+// outage than the DoS it was meant to prevent. So the row at exactly the
+// budget must SUCCEED and return every candidate, and only the row past it may
+// fail.
+func TestGetAPIKeysByPrefix_FanOutBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		rows    int
+		wantErr bool
+		why     string
+	}{
+		{
+			name: "well under the budget: the ordinary case",
+			rows: 3,
+			why:  "a discriminating prefix selects a handful of candidates and must be served",
+		},
+		{
+			name: "exactly at the budget: still a usable candidate set",
+			rows: maxPrefixCandidates,
+			why: "the budget is an inclusive ceiling; refusing here would deny a deployment " +
+				"that is large but still bounded",
+		},
+		{
+			name:    "one past the budget: the prefix is not discriminating",
+			rows:    maxPrefixCandidates + 1,
+			wantErr: true,
+			why: "past this point the prefix has stopped narrowing anything, and serving the set " +
+				"would hand the caller an unbounded bcrypt loop for an unauthenticated request",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, mock := newAPIKeyRepo(t)
+			mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*key_prefix.*LIMIT").
+				WithArgs("tfregistry", maxPrefixCandidates+1).
+				WillReturnRows(prefixRows(tt.rows))
+
+			keys, err := repo.GetAPIKeysByPrefix(context.Background(), "tfregistry")
+
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("GetAPIKeysByPrefix with %d candidates = %v, want success (%s)", tt.rows, err, tt.why)
+				}
+				if len(keys) != tt.rows {
+					t.Fatalf("returned %d candidates, want all %d — a silently truncated set makes "+
+						"authentication depend on created_at ordering", len(keys), tt.rows)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("GetAPIKeysByPrefix served %d candidates without complaint (%s)", tt.rows, tt.why)
+			}
+			if !errors.Is(err, ErrPrefixNotDiscriminating) {
+				t.Fatalf("error = %v, want it to wrap ErrPrefixNotDiscriminating so a host can tell "+
+					"an actionable configuration fault from a transient database error", err)
+			}
+			// Returning the partial set alongside the error would let a caller
+			// that checks only `len(keys)` walk straight into the bcrypt loop
+			// this refusal exists to prevent.
+			if keys != nil {
+				t.Fatalf("returned %d candidates alongside the refusal, want nil", len(keys))
+			}
+		})
+	}
+}
+
+// TestGetAPIKeysByPrefix_SaturationErrorIsActionable pins that the refusal
+// names what an operator has to DO about it.
+//
+// The condition is not transient and cannot be retried away: the affected keys
+// were minted under the old cap and have to be re-issued. An error that only
+// said "too many results" would be read as load and route to the wrong fix.
+func TestGetAPIKeysByPrefix_SaturationErrorIsActionable(t *testing.T) {
+	repo, mock := newAPIKeyRepo(t)
+	mock.ExpectQuery("SELECT.*FROM api_keys.*WHERE.*key_prefix.*LIMIT").
+		WillReturnRows(prefixRows(maxPrefixCandidates + 1))
+
+	_, err := repo.GetAPIKeysByPrefix(context.Background(), "tfregistry")
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	for _, want := range []string{"tfregistry", "re-issued", "MaxAPIKeyPrefixLength"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err.Error(), want)
+		}
 	}
 }
 

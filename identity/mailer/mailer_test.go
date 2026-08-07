@@ -23,6 +23,12 @@ type fakeSMTPOptions struct {
 	// makes the client's SMTP handshake (smtp.NewClient) fail.
 	dropOnConnect bool
 
+	// record, when non-nil, is called with the verb of every command the
+	// relay receives. It is how a test asserts which commands a transport did
+	// and did NOT issue — notably that a plaintext send never sends STARTTLS
+	// even to a relay advertising it.
+	record func(verb string)
+
 	// Replies to individual commands. Empty means "use the accepting default".
 	starttlsResponse  string
 	authResponse      string
@@ -61,54 +67,77 @@ func fakeSMTPServer(t *testing.T, opts fakeSMTPOptions) (host string, port int, 
 		if opts.dropOnConnect {
 			return
 		}
-		r := bufio.NewReader(conn)
-		writeLine := func(s string) { _, _ = fmt.Fprint(conn, s+"\r\n") }
-		writeLine("220 fake.smtp.local ESMTP")
-		inData := false
-		for {
-			line, err := r.ReadString('\n')
-			if err != nil {
-				return
-			}
-			line = strings.TrimRight(line, "\r\n")
-			upper := strings.ToUpper(line)
-			if inData {
-				if line == "." {
-					inData = false
-					writeLine(orDefault(opts.endOfDataResponse, "250 OK: queued"))
-				}
-				continue
-			}
-			switch {
-			case strings.HasPrefix(upper, "EHLO"), strings.HasPrefix(upper, "HELO"):
-				writeLine("250-fake.smtp.local")
-				if opts.advertiseSTARTTLS {
-					writeLine("250-STARTTLS")
-				}
-				writeLine("250 AUTH PLAIN")
-			case strings.HasPrefix(upper, "STARTTLS"):
-				writeLine(orDefault(opts.starttlsResponse, "220 go ahead"))
-			case strings.HasPrefix(upper, "AUTH"):
-				writeLine(orDefault(opts.authResponse, "235 OK"))
-			case strings.HasPrefix(upper, "MAIL FROM"):
-				writeLine(orDefault(opts.mailResponse, "250 OK"))
-			case strings.HasPrefix(upper, "RCPT TO"):
-				writeLine(orDefault(opts.rcptResponse, "250 OK"))
-			case upper == "DATA":
-				resp := orDefault(opts.dataResponse, "354 Start mail input")
-				writeLine(resp)
-				inData = strings.HasPrefix(resp, "354")
-			case upper == "QUIT":
-				writeLine("221 Bye")
-				return
-			default:
-				writeLine("500 unrecognized command")
-			}
-		}
+		serveFakeSMTP(conn, bufio.NewReader(conn), opts)
 	}()
 	h, p, _ := net.SplitHostPort(ln.Addr().String())
 	pn, _ := strconv.Atoi(p)
 	return h, pn, func() { _ = ln.Close() }
+}
+
+// serveFakeSMTP speaks the fake relay's SMTP conversation over one already
+// accepted connection, reading through r (which may have already buffered
+// bytes peeked by the caller).
+//
+// It is split out of fakeSMTPServer so a relay with different ACCEPT
+// behaviour — notably tlsRefusingRelay, which must serve more than one
+// connection and must distinguish a TLS handshake from an SMTP greeting — can
+// reuse the conversation without duplicating this state machine.
+func serveFakeSMTP(conn net.Conn, r *bufio.Reader, opts fakeSMTPOptions) {
+	writeLine := func(s string) { _, _ = fmt.Fprint(conn, s+"\r\n") }
+	note := func(verb string) {
+		if opts.record != nil {
+			opts.record(verb)
+		}
+	}
+	writeLine("220 fake.smtp.local ESMTP")
+	inData := false
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		upper := strings.ToUpper(line)
+		if inData {
+			if line == "." {
+				inData = false
+				writeLine(orDefault(opts.endOfDataResponse, "250 OK: queued"))
+			}
+			continue
+		}
+		switch {
+		case strings.HasPrefix(upper, "EHLO"), strings.HasPrefix(upper, "HELO"):
+			note("EHLO")
+			writeLine("250-fake.smtp.local")
+			if opts.advertiseSTARTTLS {
+				writeLine("250-STARTTLS")
+			}
+			writeLine("250 AUTH PLAIN")
+		case strings.HasPrefix(upper, "STARTTLS"):
+			note("STARTTLS")
+			writeLine(orDefault(opts.starttlsResponse, "220 go ahead"))
+		case strings.HasPrefix(upper, "AUTH"):
+			note("AUTH")
+			writeLine(orDefault(opts.authResponse, "235 OK"))
+		case strings.HasPrefix(upper, "MAIL FROM"):
+			note("MAIL")
+			writeLine(orDefault(opts.mailResponse, "250 OK"))
+		case strings.HasPrefix(upper, "RCPT TO"):
+			note("RCPT")
+			writeLine(orDefault(opts.rcptResponse, "250 OK"))
+		case upper == "DATA":
+			note("DATA")
+			resp := orDefault(opts.dataResponse, "354 Start mail input")
+			writeLine(resp)
+			inData = strings.HasPrefix(resp, "354")
+		case upper == "QUIT":
+			note("QUIT")
+			writeLine("221 Bye")
+			return
+		default:
+			writeLine("500 unrecognized command")
+		}
+	}
 }
 
 // unreachableAddr binds a port and immediately releases it, so subsequent dials
@@ -131,7 +160,7 @@ func TestSend_PlainSuccess(t *testing.T) {
 	host, port, closeFn := fakeSMTPServer(t, fakeSMTPOptions{})
 	defer closeFn()
 
-	cfg := Config{Host: host, Port: port, From: "notify@example.com"} // UseTLS=false, no username
+	cfg := Config{Host: host, Port: port, From: "notify@example.com", TLSMode: TLSDisabled} // no username
 	msg := []byte("Subject: hi\r\n\r\nbody\r\n")
 	if err := Send(context.Background(), cfg, []string{"ops@example.com"}, msg); err != nil {
 		t.Fatalf("Send over plaintext relay: %v", err)
@@ -168,30 +197,30 @@ func TestSendStartTLS_Rejected_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestSend_TLSDialFallbackFails exercises the UseTLS branch when both the
+// TestSend_TLSDialFallbackFails exercises the TLSRequired branch when both the
 // implicit TLS dial and the STARTTLS fallback dial fail to connect at all
 // (port bound then released, so the relay is entirely unreachable).
 func TestSend_TLSDialFallbackFails(t *testing.T) {
 	h, port := unreachableAddr(t)
 
-	cfg := Config{Host: h, Port: port, From: "notify@example.com", UseTLS: true}
+	cfg := Config{Host: h, Port: port, From: "notify@example.com", TLSMode: TLSRequired}
 	if err := Send(context.Background(), cfg, []string{"ops@example.com"}, []byte("x")); err == nil {
 		t.Fatal("expected an error dialing an unreachable TLS relay")
 	}
 }
 
-// TestSend_NeverAttemptsSTARTTLSWhenUseTLSFalse is the regression test for a
-// distinct bug: when UseTLS=false, the relay may still advertise STARTTLS
+// TestSend_NeverAttemptsSTARTTLSWhenTLSDisabled is the regression test for a
+// distinct bug: under TLSDisabled, the relay may still advertise STARTTLS
 // (common even for internal/unauthenticated relays), but Send must never
 // attempt the upgrade — unlike net/smtp.SendMail, which opportunistically
 // upgrades whenever the extension is offered and would fail the handshake
 // against a relay with a self-signed or otherwise untrusted certificate,
 // aborting a send the operator explicitly configured as plaintext.
-func TestSend_NeverAttemptsSTARTTLSWhenUseTLSFalse(t *testing.T) {
+func TestSend_NeverAttemptsSTARTTLSWhenTLSDisabled(t *testing.T) {
 	host, port, closeFn := fakeSMTPServer(t, fakeSMTPOptions{advertiseSTARTTLS: true})
 	defer closeFn()
 
-	cfg := Config{Host: host, Port: port, From: "notify@example.com"} // UseTLS=false
+	cfg := Config{Host: host, Port: port, From: "notify@example.com", TLSMode: TLSDisabled}
 	err := Send(context.Background(), cfg, []string{"ops@example.com"}, []byte("Subject: hi\r\n\r\nbody\r\n"))
 	if err != nil {
 		t.Fatalf("Send returned error: %v", err)
@@ -223,12 +252,12 @@ func TestAuthFor_PlainAuthWhenUsernameSet(t *testing.T) {
 // from one that delivered the mail, and the caller (an alerting path in both
 // consuming apps) would report success for mail nobody received.
 
-// TestSend_PlainDialFails covers the UseTLS=false dial-failure branch: an
+// TestSend_PlainDialFails covers the TLSDisabled dial-failure branch: an
 // unreachable relay must be reported, not silently treated as delivered.
 func TestSend_PlainDialFails(t *testing.T) {
 	host, port := unreachableAddr(t)
 
-	cfg := Config{Host: host, Port: port, From: "notify@example.com"} // UseTLS=false
+	cfg := Config{Host: host, Port: port, From: "notify@example.com", TLSMode: TLSDisabled}
 	err := Send(context.Background(), cfg, []string{"ops@example.com"}, []byte("x"))
 	if err == nil {
 		t.Fatal("expected an error dialing an unreachable plaintext relay, got nil")
@@ -245,7 +274,7 @@ func TestSend_PlainHandshakeFails(t *testing.T) {
 	host, port, closeFn := fakeSMTPServer(t, fakeSMTPOptions{dropOnConnect: true})
 	defer closeFn()
 
-	cfg := Config{Host: host, Port: port, From: "notify@example.com"}
+	cfg := Config{Host: host, Port: port, From: "notify@example.com", TLSMode: TLSDisabled}
 	err := Send(context.Background(), cfg, []string{"ops@example.com"}, []byte("x"))
 	if err == nil {
 		t.Fatal("expected an error when the relay drops the connection before greeting, got nil")
@@ -265,7 +294,7 @@ func TestSend_PlainAppliesContextDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cfg := Config{Host: host, Port: port, From: "notify@example.com"}
+	cfg := Config{Host: host, Port: port, From: "notify@example.com", TLSMode: TLSDisabled}
 	if err := Send(ctx, cfg, []string{"ops@example.com"}, []byte("Subject: hi\r\n\r\nbody\r\n")); err != nil {
 		t.Fatalf("Send with a context deadline: %v", err)
 	}
@@ -314,11 +343,12 @@ func TestSendStartTLS_AppliesContextDeadline(t *testing.T) {
 // TestSend_AuthFailureSurfaces covers finish's authentication branch: rejected
 // credentials must fail the send rather than proceeding unauthenticated.
 //
-// The fake relay listens on 127.0.0.1, and net/smtp's PlainAuth permits sending
-// credentials over an unencrypted connection only to a localhost server — which
-// is what makes this branch reachable in a test without a trusted certificate.
-// (Against a non-localhost plaintext relay, PlainAuth fails closed instead;
-// that is the behavior documented on finish.)
+// The fake relay listens on 127.0.0.1, and BOTH Send's own check and
+// net/smtp's PlainAuth permit sending credentials over an unencrypted
+// connection only to a local relay — which is what makes this branch
+// reachable in a test without a trusted certificate. Against a non-local
+// plaintext relay Send refuses before dialling; see
+// TestSend_PlaintextWithCredentials_RefusedForRemoteRelay.
 func TestSend_AuthFailureSurfaces(t *testing.T) {
 	host, port, closeFn := fakeSMTPServer(t, fakeSMTPOptions{
 		authResponse: "535 5.7.8 authentication failed",
@@ -328,6 +358,7 @@ func TestSend_AuthFailureSurfaces(t *testing.T) {
 	cfg := Config{
 		Host: host, Port: port, From: "notify@example.com",
 		Username: "user", Password: "pass",
+		TLSMode: TLSDisabled,
 	}
 	err := Send(context.Background(), cfg, []string{"ops@example.com"}, []byte("x"))
 	if err == nil {
@@ -373,7 +404,7 @@ func TestSend_DeliveryFailuresSurface(t *testing.T) {
 			host, port, closeFn := fakeSMTPServer(t, tt.opts)
 			defer closeFn()
 
-			cfg := Config{Host: host, Port: port, From: "notify@example.com"}
+			cfg := Config{Host: host, Port: port, From: "notify@example.com", TLSMode: TLSDisabled}
 			err := Send(context.Background(), cfg, []string{"ops@example.com"},
 				[]byte("Subject: hi\r\n\r\nbody\r\n"))
 			if err == nil {

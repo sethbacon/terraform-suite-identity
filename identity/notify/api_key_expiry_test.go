@@ -158,7 +158,7 @@ func TestExpiryNotifier_Stop_DoesNotPanic(t *testing.T) {
 func TestExpiryNotifier_SendExpiryEmail_NoTLS_CoverBodyComposition(t *testing.T) {
 	cfg := newExpiryConfig(true, "127.0.0.1")
 	cfg.SMTP.Port = 1 // nothing listening on port 1
-	cfg.SMTP.UseTLS = false
+	cfg.SMTP.TLSMode = mailer.TLSDisabled
 
 	n := NewAPIKeyExpiryNotifier(nil, nil, newExpiryConfigProvider(cfg), testExpiryOpts)
 	expiresAt := time.Now().Add(5 * 24 * time.Hour)
@@ -170,8 +170,8 @@ func TestExpiryNotifier_SendExpiryEmail_NoTLS_CoverBodyComposition(t *testing.T)
 
 func TestExpiryNotifier_SendExpiryEmail_TLS_CoverSendTLS(t *testing.T) {
 	cfg := newExpiryConfig(true, "127.0.0.1")
-	cfg.SMTP.Port = 1      // nothing listening on port 1
-	cfg.SMTP.UseTLS = true // routes through sendTLS, which falls back to sendStartTLS on dial failure
+	cfg.SMTP.Port = 1                     // nothing listening on port 1
+	cfg.SMTP.TLSMode = mailer.TLSRequired // routes through sendTLS, which falls back to sendStartTLS on dial failure
 
 	n := NewAPIKeyExpiryNotifier(nil, nil, newExpiryConfigProvider(cfg), testExpiryOpts)
 	expiresAt := time.Now().Add(3 * 24 * time.Hour)
@@ -182,7 +182,7 @@ func TestExpiryNotifier_SendExpiryEmail_TLS_CoverSendTLS(t *testing.T) {
 func TestExpiryNotifier_SendExpiryEmail_AlreadyExpired(t *testing.T) {
 	cfg := newExpiryConfig(true, "127.0.0.1")
 	cfg.SMTP.Port = 1
-	cfg.SMTP.UseTLS = false
+	cfg.SMTP.TLSMode = mailer.TLSDisabled
 
 	n := NewAPIKeyExpiryNotifier(nil, nil, newExpiryConfigProvider(cfg), testExpiryOpts)
 	// expiresAt in the past → daysLeft clamps to 0

@@ -91,7 +91,7 @@ func TestSend_StalledRelay_TimesOutInsteadOfBlocking(t *testing.T) {
 			budget: 5 * time.Second,
 		},
 		{
-			name: "UseTLS, caller context has no deadline (TLS dial fails, STARTTLS path stalls)",
+			name: "TLSRequired, caller context has no deadline (TLS dial fails, STARTTLS path stalls)",
 			ctx:  func(*testing.T) context.Context { return context.Background() },
 			// The implicit-TLS dial handshakes against a silent server, so it
 			// consumes the fallback budget before sendStartTLS gets its own.
@@ -103,7 +103,7 @@ func TestSend_StalledRelay_TimesOutInsteadOfBlocking(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			shortSendTimeout(t, 300*time.Millisecond)
-			cfg := Config{Host: host, Port: port, From: "noreply@example.com", UseTLS: tc.useTLS}
+			cfg := Config{Host: host, Port: port, From: "noreply@example.com", TLSMode: TLSModeForUseTLS(tc.useTLS)}
 
 			done := make(chan error, 1)
 			start := time.Now()
@@ -153,7 +153,7 @@ func TestSend_CallerDeadlineIsNotWidened(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	cfg := Config{Host: host, Port: port, From: "noreply@example.com"}
+	cfg := Config{Host: host, Port: port, From: "noreply@example.com", TLSMode: TLSDisabled}
 	done := make(chan error, 1)
 	go func() {
 		done <- Send(ctx, cfg, []string{"ops@example.com"}, []byte("Subject: x\r\n\r\nbody\r\n"))
@@ -178,7 +178,7 @@ func TestSend_CancelledContextReturnsImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	cfg := Config{Host: host, Port: port, From: "noreply@example.com"}
+	cfg := Config{Host: host, Port: port, From: "noreply@example.com", TLSMode: TLSDisabled}
 	start := time.Now()
 	err := Send(ctx, cfg, []string{"ops@example.com"}, []byte("Subject: x\r\n\r\nbody\r\n"))
 	if err == nil {

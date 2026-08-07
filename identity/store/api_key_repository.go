@@ -399,6 +399,34 @@ func (r *APIKeyRepository) DeleteExpiredKeys(ctx context.Context) (int64, error)
 	return affectedRows(res, "expired api keys")
 }
 
+// maxPrefixCandidates bounds how many live keys one prefix lookup may match
+// before the prefix is treated as non-discriminating.
+//
+// auth.MaxAPIKeyPrefixLength guarantees at least auth.MinPrefixRandomChars
+// random characters inside every key_prefix this module MINTS, which spreads
+// keys over at least 64^2 = 4096 buckets; reaching 100 live keys in one bucket
+// therefore takes on the order of 400,000 live keys, and no correctly
+// configured deployment gets near it.
+//
+// The bound is not for those keys. It is for the ones already in the table:
+// key_prefix values persisted before that guarantee existed, when a prefix of
+// 9 bytes or more produced a discriminator containing NO random characters and
+// identical for every key the application had ever issued. Tightening the mint
+// path cannot retroactively fix a stored row, so this is what stops a
+// degenerate legacy prefix from still fanning one unauthenticated request out
+// across the whole table.
+const maxPrefixCandidates = 100
+
+// ErrPrefixNotDiscriminating reports that a key_prefix lookup matched more
+// live keys than maxPrefixCandidates, meaning the prefix is not narrowing the
+// candidate set enough to be used as an authentication discriminator.
+//
+// It is an operator-actionable condition, not a transient fault: the affected
+// keys were minted with an over-long prefix (see auth.MaxAPIKeyPrefixLength)
+// and must be re-issued. A host should DENY the request and alert, rather than
+// retry.
+var ErrPrefixNotDiscriminating = errors.New("store: api key prefix is not discriminating")
+
 // GetAPIKeysByPrefix retrieves the non-expired API keys matching a prefix
 // (for authentication).
 //
@@ -410,13 +438,34 @@ func (r *APIKeyRepository) DeleteExpiredKeys(ctx context.Context) (int64, error)
 //
 // This is the real authentication lookup: callers narrow the candidate set by
 // the indexed key_prefix, then bcrypt-compare the presented key against each
-// returned candidate's key_hash (see auth.ValidateAPIKey). The query itself
-// now excludes expired rows (expires_at IS NULL OR expires_at > NOW()) so
-// expiry enforcement lives at the shared-library level instead of depending
-// on every caller remembering to re-check ExpiresAt after the fact. Any
-// caller that additionally checks ExpiresAt on the returned keys is now
-// performing a harmless redundant second check.
+// returned candidate's key_hash (see auth.ValidateAPIKey). The query excludes
+// expired rows (expires_at IS NULL OR expires_at > NOW()) so expiry
+// enforcement lives at the shared-library level instead of depending on every
+// caller remembering to re-check ExpiresAt after the fact. Any caller that
+// additionally checks ExpiresAt on the returned keys is performing a harmless
+// redundant second check.
+//
+// # Bounded fan-out
+//
+// Every row this returns costs the caller one bcrypt comparison at
+// auth.BcryptCost, on the order of a quarter-second each, and key_prefix is
+// PUBLIC (it is shown in UIs to identify a key). An unauthenticated request
+// carrying nothing but the application's own prefix therefore selects the
+// amount of work the server does, which makes the size of this result set a
+// security property rather than a performance detail.
+//
+// So the query is bounded, and saturation is reported as
+// ErrPrefixNotDiscriminating rather than served truncated. Truncating would be
+// worse than either alternative: it would silently make authentication
+// DEPEND ON created_at ordering, so a legitimate key just outside the window
+// would fail to authenticate intermittently and for no visible reason, while
+// the caller still paid the full bcrypt bill. Failing here costs the caller
+// ZERO bcrypt comparisons — the fan-out is refused before any hashing starts —
+// and says exactly which prefix is at fault.
 func (r *APIKeyRepository) GetAPIKeysByPrefix(ctx context.Context, keyPrefix string) ([]*models.APIKey, error) {
+	// One row beyond the budget: enough to DETECT saturation, never enough to
+	// serve it. A plain `LIMIT maxPrefixCandidates` could not tell a table
+	// holding exactly the budget apart from one holding ten thousand.
 	query := `
 		SELECT id, user_id, organization_id, name, description, key_hash, key_prefix, scopes,
 		       expires_at, last_used_at, expiry_notification_sent_at, created_at
@@ -424,9 +473,10 @@ func (r *APIKeyRepository) GetAPIKeysByPrefix(ctx context.Context, keyPrefix str
 		WHERE key_prefix = $1
 		  AND (expires_at IS NULL OR expires_at > NOW())
 		ORDER BY created_at DESC
+		LIMIT $2
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, keyPrefix)
+	rows, err := r.db.QueryContext(ctx, query, keyPrefix, maxPrefixCandidates+1)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get api keys by prefix: %w", err)
 	}
@@ -440,8 +490,21 @@ func (r *APIKeyRepository) GetAPIKeysByPrefix(ctx context.Context, keyPrefix str
 		}
 		apiKeys = append(apiKeys, apiKey)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-	return apiKeys, rows.Err()
+	if len(apiKeys) > maxPrefixCandidates {
+		// Deliberately does NOT return the partial candidate set alongside the
+		// error: a caller writing the idiomatic `keys, err := ...; if err !=
+		// nil { deny }` must not be the only thing standing between a
+		// degenerate prefix and the bcrypt loop this refusal exists to
+		// prevent.
+		return nil, fmt.Errorf("api key prefix %q matched more than %d live keys, so it cannot narrow the candidate set for authentication; the affected keys were minted with a prefix long enough to crowd all randomness out of key_prefix (see auth.MaxAPIKeyPrefixLength) and must be re-issued: %w",
+			keyPrefix, maxPrefixCandidates, ErrPrefixNotDiscriminating)
+	}
+
+	return apiKeys, nil
 }
 
 // FindExpiringKeys returns API keys that will expire within warningDays days.

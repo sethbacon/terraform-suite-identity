@@ -742,6 +742,97 @@ its ordering is not optional:
    connection, and confirm with the name `VerifyChannelTable` returns.
 4. Keep `public.notification_channels` until step 3 is verified in production.
    Dropping it first turns a rollback into a restore.
+### 6. `mailer.Config.UseTLS` is now `TLSMode`, and its zero value encrypts
+
+**Compile error at every call site.** The field is gone, so nothing silently
+changes polarity.
+
+`mailer.Config` was the one type in this module whose zero value was the LESS
+secure choice. `mailer.Config{Host: h, Port: p, From: f}` — the minimal literal
+anyone writes from the field list — left `UseTLS` false, and `Send` then kept
+the connection in plaintext and never upgraded. Everything else here fails
+closed: `httpsafe.Guard`'s zero value is strict-deny, `oidc.Config` requires an
+HTTPS issuer unless `AllowInsecureIssuer` is set, `store.AuditScope`'s zero value
+denies everything, `suite.NewDiscoveryClient` refuses a plaintext sibling URL.
+
+| Before | After |
+| --- | --- |
+| `UseTLS: true` | `TLSMode: mailer.TLSRequired` (or omit the field — this is the zero value) |
+| `UseTLS: false` | `TLSMode: mailer.TLSDisabled` |
+| `cfg.UseTLS = b` | `cfg.TLSMode = mailer.TLSModeForUseTLS(b)` |
+
+`TLSModeForUseTLS` exists for the case both consumers actually have: a `use_tls`
+boolean in a YAML file, in a persisted JSON settings blob and in an admin API
+body, none of which can change shape. Use it rather than writing the conditional
+at each call site — the polarity is then in one tested place instead of several
+hand-written ones.
+
+**Transport behaviour is unchanged** for every configuration that named its
+choice. `TLSRequired` does exactly what `UseTLS: true` did (implicit TLS, falling
+back to STARTTLS on dial failure, never a silent unencrypted send) and
+`TLSDisabled` exactly what `UseTLS: false` did (plaintext, never opportunistically
+upgraded).
+
+One behaviour is genuinely new: `Send` now **refuses, before dialling**, to
+carry a password over a plaintext connection to a non-local relay
+(`TLSDisabled` plus a non-empty `Username`). `net/smtp`'s `PlainAuth` already
+refused this, so no configuration that worked before stops working — the
+refusal simply arrives earlier, names the setting at fault, and belongs to this
+package rather than to whichever auth mechanism `authFor` happens to return. A
+plaintext relay on `localhost`/`127.0.0.1`/`::1` is still permitted and now logs
+a warning.
+
+#### Check your JSON decode path
+
+Worth an explicit look while migrating. A `use_tls` key that is ABSENT from a
+persisted settings blob or a `PUT` body decodes into a plain Go `bool` as
+`false`, indistinguishable from an explicit `false` — so a startup path that
+assigns that bool over a config default of `true` downgrades the deployment to
+plaintext with nothing logged. Decode into a `*bool` and leave `TLSMode` at its
+zero value when the key is absent.
+
+### 7. `auth.MaxAPIKeyPrefixLength` is 7 (was 20)
+
+**Compile-safe; a runtime error only for callers minting keys with a prefix
+longer than 7 bytes.** Both shipped consumers use 3-byte prefixes (`"tfr"`,
+`"tsm"`) and are unaffected. **No existing key is invalidated** — the display
+prefix is still `fullKey[:DisplayPrefixLength]`, unchanged.
+
+The persisted `key_prefix` is the sole narrowing predicate of the authentication
+lookup, and each row it returns costs the host one bcrypt comparison at
+`BcryptCost`. Because the display prefix is the first 10 bytes of
+`"<prefix>_<randomPart>"`, a caller-supplied prefix of 9 bytes or more filled
+that window completely: `key_prefix` then contained no random characters at all
+and was byte-identical for every key the application ever issued. The prefix is
+public by design (it is shown in UIs), so anyone could present it and select
+every live key as a bcrypt candidate.
+
+The old cap of 20 was derived correctly from bcrypt's 72-byte input window; it
+simply predated anyone noticing that a second, tighter window also applied. Both
+limits are now enforced together by a compile-time assertion in
+`identity/auth/apikey.go`, so the cap cannot be raised back into the degenerate
+range without failing the build.
+
+If you mint keys with a longer prefix, shorten it. Existing keys keep
+authenticating, but see the next item before assuming that is the end of it.
+
+### 8. `GetAPIKeysByPrefix` is bounded and reports a non-discriminating prefix
+
+`APIKeyRepository.GetAPIKeysByPrefix` now caps its query and returns an error
+wrapping the new `store.ErrPrefixNotDiscriminating` when one prefix matches more
+than 100 live keys, instead of returning the whole set.
+
+This is for rows already in your table. Tightening the cap above fixes keys
+minted from now on; it cannot retroactively fix a `key_prefix` persisted when a
+long prefix was permitted. The bound is what stops one of those from still
+fanning a single unauthenticated request across the entire table.
+
+A correctly configured deployment cannot reach it — with at least two random
+characters in every minted prefix, 100 keys in one bucket takes on the order of
+400,000 live keys. If you DO see this error, it is not load and will not pass:
+the affected keys were minted with an over-long prefix and must be re-issued.
+Treat it as deny-and-alert, not deny-and-retry. Note the refusal returns `nil`
+keys, so a caller that checks the error will not enter the bcrypt loop.
 
 ---
 
