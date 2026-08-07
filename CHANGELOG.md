@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.25.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.24.0...v0.25.0) (2026-08-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **mailer,auth,store:** mailer.Config.UseTLS is replaced by mailer.Config.TLSMode, whose zero value is TLSRequired. Every call site is a compile error; map `UseTLS: true` to `TLSMode: mailer.TLSRequired` (or omit it), `UseTLS: false` to `TLSMode: mailer.TLSDisabled`, and a boolean variable through `mailer.TLSModeForUseTLS(b)`. Transport behaviour is unchanged for any configuration that named its choice. auth.MaxAPIKeyPrefixLength drops from 20 to 7, so GenerateAPIKey now rejects a longer prefix; existing keys keep authenticating. store.APIKeyRepository.GetAPIKeysByPrefix now returns an error wrapping store.ErrPrefixNotDiscriminating instead of a candidate set when one prefix matches more than 100 live keys. See UPGRADING.md.
+* **egress:** this release requires a DEPLOYMENT-CONFIGURATION change, not only a code change. httpsafe's default policy denies loopback, RFC 1918 and link-local, and both consumers default security.egress.allowlist to empty — so routing OIDC discovery, JWKS and suite manifest fetches through the guard makes an identity provider or sibling app on an internal address unreachable until it is allow-listed. Any deployment with a self-hosted IdP, a cluster-internal sibling, or a local dev stack MUST set TFR_SECURITY_EGRESS_ALLOWLIST (registry) or TSM_SECURITY_EGRESS_ALLOWLIST (state manager) to a comma-separated list naming those hosts. Note the two differ: the registry's list WIDENS the deny-list, while the state manager's REPLACES its built-in private-range default, so a value set there must re-state 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 and fc00::/7. Deployments using only a public IdP need no change. AllowInsecureIssuer and DEV_MODE do NOT cover this: the scheme rule and the destination rule are separate. Compile-error changes: Guard.ValidateURL gains a ctx parameter; suite.NewDiscoveryClient and NewInsecureDiscoveryClient gain a guard parameter; Manifest.PublicURL changes type from string to UntrustedURL. See UPGRADING.md for the exact per-consumer and per-dev-stack values.
+* **schema:** migration 000007 changes what a DELETE on organizations or users does to rows a consumer already stores, and most of it produces no compile error. StreamAuditLogs gained al.actor_email as column 10 (between created_at and the joined user_email/user_name), so a caller scanning its rows must add that destination. A caller that depended on CreateAuditLog FAILING on an unresolvable user/organization id — nulling the actor columns and retrying — is on a path that no longer triggers, and must decide the disposition explicitly. Rows already re-homed by a past delete cannot be repaired by DDL and are a deploy-time inventory step; UPGRADING.md carries the queries.
+* **store:** store.AuditScope and its three constructors are renamed to store.OrgScope / OrgScopeOrganizations / OrgScopeOrganizationsAndUnowned / OrgScopeAllOrganizations, and 37 accessors on APIKeyRepository, OrganizationRepository and UserRepository gained a required trailing `scope store.OrgScope` parameter, so every call site is a compile error. APIKeyRepository.ListAll is renamed ListAPIKeys (the old name is a contradiction once scoped). APIKeyRepository.RevokeAPIKeysForUser is new. OrganizationRepository.RemoveAllMembershipsForUser now returns (OrgScope, error) instead of (int64, error) — the organizations it actually emptied, which is the credential sweep's scope. notify's userRepo interface changed with GetUserByID. Scope ids are now deduplicated AND sorted. On the users table a membership-less user is now DENIED by a plain organization scope; state the old behaviour with OrgScopeOrganizationsAndUnowned / .WithUnowned(). A consumer whose tests grep source for the literal "AuditScopeAllOrganizations" (state- manager's TestNoPlatformWideAuditScopeInHandlers) will keep passing while checking nothing until the literal is updated. See UPGRADING.md sections 6-7.
+* **api:** See UPGRADING.md for the full v0.25.0 migration.
+
+### Features
+
+* **identity:** assert which physical table an unqualified query hits ([#177](https://github.com/sethbacon/terraform-suite-identity/issues/177)) ([30b3622](https://github.com/sethbacon/terraform-suite-identity/commit/30b3622cc5f59fbaf0d293f8a7804b07b22906e5)), closes [#143](https://github.com/sethbacon/terraform-suite-identity/issues/143) [#141](https://github.com/sethbacon/terraform-suite-identity/issues/141)
+
+
+### Bug Fixes
+
+* **egress:** route every outbound request through the guard the module owns ([#178](https://github.com/sethbacon/terraform-suite-identity/issues/178)) ([27de27b](https://github.com/sethbacon/terraform-suite-identity/commit/27de27be43b64d26ac157f11ed93d096edad9a72))
+* **mailer,auth,store:** make the unsafe transport and lookup states unreachable by omission ([#179](https://github.com/sethbacon/terraform-suite-identity/issues/179)) ([33a5cfc](https://github.com/sethbacon/terraform-suite-identity/commit/33a5cfc3ec0c652a8fb00025a9757ff956aecaf8))
+* **schema:** a delete must not re-home a row into a tenancy state that means something else ([#176](https://github.com/sethbacon/terraform-suite-identity/issues/176)) ([eb4ecd5](https://github.com/sethbacon/terraform-suite-identity/commit/eb4ecd59c06b596e9ba74ed9ece25e369b0368cb))
+* **store:** apply the mandatory tenant scope to every organization-owned accessor ([#175](https://github.com/sethbacon/terraform-suite-identity/issues/175)) ([6d41d42](https://github.com/sethbacon/terraform-suite-identity/commit/6d41d42dda32d87c63af80a7f7d26c7119166bef))
+
+
+### Refactor
+
+* **api:** delete the deprecated trap surface and canonicalise the repository shape ([#174](https://github.com/sethbacon/terraform-suite-identity/issues/174)) ([669a0f3](https://github.com/sethbacon/terraform-suite-identity/commit/669a0f3ad477e8a0e9a40fe8a70086a82e27f05a))
+
 ## [0.24.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.23.0...v0.24.0) (2026-08-06)
 
 
