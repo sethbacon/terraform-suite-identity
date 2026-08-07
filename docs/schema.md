@@ -85,7 +85,7 @@ All tables live in the `identity` schema. UUID primary keys default to
 | `organization_members`  | Join of `users` ↔ `organizations` with an optional `role_template_id`. Unique per `(organization_id, user_id)`. |
 | `api_keys`              | Per-org (optionally per-user) API key. Stores `key_hash` + `key_prefix` (never the raw key), `scopes`, optional `expires_at`. |
 | `oidc_config`           | OIDC provider configuration: issuer, client id, encrypted client secret, redirect, scopes; multi-provider after migration 3 (`name`, `provider_type`, `extra_config`). |
-| `audit_logs`            | Append-only audit trail: `action`, optional `resource_type`/`resource_id`, `ip_address`, JSONB `metadata`. |
+| `audit_logs`            | Append-only audit trail: `action`, optional `resource_type`/`resource_id`, `ip_address`, JSONB `metadata`, plus `actor_email` (the acting user's address as it stood at write time). `user_id`/`organization_id` are historical values, **not** foreign keys — see "Delete behavior" below. |
 | `revoked_tokens`        | JWT revocation list keyed by `jti`, with `expires_at` so expired entries can be pruned. |
 | `org_quotas`            | Per-organization identity quotas (`max_members`, `max_api_keys`; `NULL` = unlimited). Identity-domain only. |
 | `system_settings`       | Key/value settings (e.g. `setup_completed`). |
@@ -160,9 +160,34 @@ and the two create axes with no owning organization to check against.
 - **Identity-only quotas.** `org_quotas` covers identity-domain resources
   (members, API keys). Consuming apps own their own domain quotas (sources,
   modules, …) in their own schemas — not here.
-- **Cascade behavior.** Memberships and API keys cascade-delete with their
-  organization; `api_keys.user_id` and the actor columns on `audit_logs`
-  `SET NULL` on user deletion so the audit trail survives the user.
+- **Delete behavior — a delete never re-homes a row.** Memberships and API keys
+  cascade-delete with their organization. Beyond that, each referencing column is
+  decided by what a `NULL` in it would *mean*, because on this schema `NULL` is
+  rarely inert (migration `000007`, issue #142):
+  - `audit_logs.user_id` / `audit_logs.organization_id` carry **no foreign key at
+    all**. An audit row is a historical record of who acted and for which
+    organization *at the time*, not a live reference, so deleting either parent
+    leaves the values in place. The history is retained and stays attributed; a
+    deleted organization's rows match no member's scope and are readable only
+    through the explicit `AuditScopeAllOrganizations()`. `NULL` therefore has one
+    meaning on each column — *the writer asserted no actor / no owning
+    organization* — and cannot be manufactured by a delete. (`SET NULL` would
+    re-home the row into the platform/unowned bucket that
+    `AuditScopeOrganizationsAndUnowned` deliberately admits; `CASCADE` would
+    destroy the evidence; `RESTRICT` would make the record's own subject
+    undeletable.)
+  - `audit_logs.actor_email` denormalises the actor's address at write time, so
+    the trail stays resolvable to a person after the `users` row is gone.
+  - `api_keys.user_id` is `ON DELETE CASCADE`. A credential is live authority,
+    not a record: it must not outlive its principal, and it must never change
+    authority *class* on the way out — a `NULL` `user_id` is the
+    organization-service-credential shape, which consuming apps exempt from
+    membership checks.
+  - `organization_members.role_template_id` keeps `ON DELETE SET NULL`. `NULL`
+    there means *no scopes at all* (the membership projections `COALESCE`
+    `rt.scopes` to `'[]'`), which is strictly less authority and is exactly what
+    `UpdateMemberRoleTemplate(nil)` sets deliberately, so the manufactured state
+    carries no second meaning.
 - **The default org is seeded.** Migration 1 inserts a `default` organization, the
   four system role templates, and `setup_completed=false`; migration 2 adds
   `org_quotas` and reconciles those templates to **identity-core scopes only**
@@ -186,12 +211,14 @@ new sequential pair instead.
 | `000005` | `000005_oidc_config_single_active` | Enforces **at most one active OIDC config** at the database level. First deactivates every active row except the most recently updated one (`UPDATE … SET is_active = false … WHERE is_active AND id NOT IN (… ORDER BY updated_at DESC LIMIT 1)`), so the constraint can be created on existing data; then adds the partial unique index `idx_oidc_config_single_active ON identity.oidc_config (is_active) WHERE is_active`. This is the invariant `GetActiveOIDCConfig`/`ActivateOIDCConfig` rely on, previously enforced only in application code. |
 | `000006` | `000006_hot_path_indexes` | Adds indexes for the query shapes the module now forces on every caller. The tenant scope (`AuditScope`, renamed `OrgScope` in v0.25.0) became a required parameter in v0.21.0, so every audit read carries an `organization_id` predicate that had no supporting index: this adds the composite `(organization_id, created_at DESC)` covering both the list/count and export-stream shapes. Also indexes `organization_members(user_id)` (previously only the trailing column of a unique, so unseekable — every membership resolution on the auth path depends on it), `api_keys(user_id)` and `api_keys(organization_id)`, and the two unindexed referencing columns whose parents the module deletes: `organization_members(role_template_id)` (SET NULL) and `revoked_tokens(user_id)` (CASCADE). Index-only and fully reversible. |
 
-The current version is `000006`.
+| `000007` | `000007_delete_does_not_rehome_rows` | Stops a `DELETE` from moving a surviving row into a state that already means something else (issue #142). Drops the foreign keys on `audit_logs.user_id` and `audit_logs.organization_id` — those columns are a historical record, not live references, and every `ON DELETE` action available to a foreign key is wrong for one (see "Delete behavior" above). Changes `api_keys.user_id` from `SET NULL` to **`ON DELETE CASCADE`**, so deleting a user revokes their personal keys instead of promoting them into the org-service-credential shape. Adds `audit_logs.actor_email` (denormalised actor address, stamped by `CreateAuditLog`) and backfills it for every row whose user still exists. `organization_members.role_template_id` is deliberately untouched. |
+
+The current version is `000007`.
 
 ### Where the "additive" rule has been broken, and why
 
 Migrations must stay additive per
-[CONTRIBUTING.md](../CONTRIBUTING.md#database-migrations). Four of the five above are
+[CONTRIBUTING.md](../CONTRIBUTING.md#database-migrations). Five of the six above are
 documented exceptions rather than precedents. Stating them explicitly matters: a reader
 planning an upgrade needs to know which migrations can lock a table or reject data that
 was previously valid.
@@ -202,6 +229,7 @@ was previously valid.
 | `000003` | In-place `ALTER COLUMN … TYPE` on `role_templates.scopes`, `api_keys.scopes` and `oidc_config.scopes`. Takes a table lock and rewrites the column. | Those tables hold **only seed data until an app cuts over**. This precondition is not verifiable from inside this repository — it depends on consumer state. Verify it against every consumer before releasing a change like this, and prefer expand-and-contract (new column → backfill → swap) if any consumer may hold real data. |
 | `000004` | Three `DROP COLUMN IF EXISTS`. | The dropped `is_active` columns were audited as never read or written by any consumer, so no row ever held a non-default value. |
 | `000005` | A data `UPDATE` that deactivates rows, plus a `UNIQUE` index that can reject previously-valid data. | Only one OIDC config is ever meant to be active; the `UPDATE` exists precisely so the index can be created on a database that already violates the invariant. Losing "active" on the older rows is the intended repair, not collateral damage. |
+| `000007` | Drops two foreign keys, replaces a third with a stricter `ON DELETE` action, and thereby changes what a `DELETE` on `organizations`/`users` does to rows a consumer is holding. | The old behaviour was the defect: the `SET NULL` actions moved surviving rows into states (`unowned` audit row, org service credential) that already meant something else, and no reader could tell the manufactured state from the deliberate one. The migration cannot repair rows already in that state — see [UPGRADING.md](../UPGRADING.md) for the inventory queries and the two consumer-side changes it requires. |
 
 ### Down migrations
 
@@ -210,12 +238,18 @@ deliberately **leaves the (now-empty) `identity` schema in place** — see the d
 on `RunMigrations` in `identity/db.go`, which spells out the same thing — because another
 app may still be attached to it.
 
-Two downs are **best-effort rather than exact reversals**, and both self-label as such:
+Three downs are **best-effort rather than exact reversals**, and all three self-label as
+such:
 
 - `000003`'s `TEXT[]`↔`JSONB` column-type round-trip is not guaranteed to restore the
   original values byte-for-byte.
 - `000005` drops the unique index but does **not** resurrect the `is_active` values its
   up-migration cleared.
+- `000007` must null every `audit_logs.user_id` / `organization_id` whose parent row was
+  deleted while it was applied — the old foreign keys cannot be re-created otherwise —
+  so rolling it back re-opens the leak for exactly the history it was retaining, and
+  drops the `actor_email` addresses of users who no longer exist. Roll forward if you
+  can; the down migration carries the inventory query for deciding.
 
 `000002` and `000004` do reverse exactly (`000004`'s `ADD COLUMN … DEFAULT true` restores
 the original shape precisely, since no row could ever have held a non-default value).

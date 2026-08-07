@@ -831,7 +831,6 @@ func TestNotFoundClass_ExecResultDiscardersAreEnumerated(t *testing.T) {
 	// zero-row case becomes reachable must stop discarding its result.
 	allowed := map[string]string{
 		"CreateUser":                 "plain INSERT; a unique violation surfaces as an error, so zero rows cannot happen",
-		"CreateAuditLog":             "plain INSERT",
 		"CreateRoleTemplate":         "plain INSERT",
 		"CreateOIDCConfig":           "plain INSERT (both the plain and transactional paths)",
 		"RevokeToken":                "INSERT ... ON CONFLICT DO NOTHING; zero rows means already revoked, an idempotent success",

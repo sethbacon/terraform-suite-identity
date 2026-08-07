@@ -21,6 +21,34 @@ import (
 // the assertion is that the NAMES the migration creates are the names the
 // planner is then observed to choose, so deriving both sides from the same
 // source would make it circular.
+// hotPathIndexMigration is the migration these indexes belong to. Named so the
+// rollback below unwinds to a VERSION rather than by a step count, which is what
+// tied this suite to "000006 is the newest migration".
+const hotPathIndexMigration = 6
+
+// rollBackTo unwinds migrations one step at a time until the applied version is
+// target.
+func rollBackTo(t *testing.T, db *sql.DB, target uint) {
+	t.Helper()
+
+	for {
+		version, dirty, err := identity.GetMigrationVersion(db)
+		if err != nil {
+			t.Fatalf("GetMigrationVersion failed: %v", err)
+		}
+		if dirty {
+			t.Fatalf("migration state is dirty at version %d; a partially applied migration "+
+				"cannot be stepped through", version)
+		}
+		if version <= target {
+			return
+		}
+		if err := identity.RunMigrationSteps(db, -1); err != nil {
+			t.Fatalf("RunMigrationSteps(-1) from version %d failed: %v", version, err)
+		}
+	}
+}
+
 var hotPathIndexes = map[string]string{
 	"idx_identity_audit_logs_org_created_at":             "audit_logs",
 	"idx_identity_organization_members_user_id":          "organization_members",
@@ -67,9 +95,12 @@ func TestIntegrationHotPathIndexes(t *testing.T) {
 	})
 
 	t.Run("down migration removes exactly these indexes", func(t *testing.T) {
-		if err := identity.RunMigrationSteps(db, -1); err != nil {
-			t.Fatalf("RunMigrationSteps(-1) failed: %v", err)
-		}
+		// Unwind to just below 000006 rather than taking a fixed single step:
+		// RunMigrationSteps(-1) meant "roll back 000006" only while 000006 was
+		// the newest migration, so this subtest broke the moment 000007 was
+		// added — a test coupled to the migration COUNT instead of to the
+		// migration it is about.
+		rollBackTo(t, db, hotPathIndexMigration-1)
 		assertHotPathIndexesPresent(t, db, false)
 
 		// The indexes migration 000001 created must survive 000006's rollback:
@@ -331,6 +362,12 @@ func TestIntegrationHotPathIndexCascades(t *testing.T) {
 		column string
 	}
 	refs := []ref{
+		// Since v0.25.0 audit_logs carries no foreign key at all (issue #142:
+		// the column is a historical record, not a live reference), so this
+		// entry is no longer about a cascade — the index is still required,
+		// because it is what serves the mandatory AuditScope predicate on the
+		// largest table in the schema, and losing it would be the same outage
+		// by a different route.
 		{"audit_logs", "organization_id"},
 		{"organization_members", "user_id"},
 		{"organization_members", "role_template_id"},
@@ -364,9 +401,9 @@ func TestIntegrationHotPathIndexCascades(t *testing.T) {
 	}
 
 	// Prove it end to end rather than only structurally: an organization delete
-	// cascades through api_keys and nulls audit_logs.organization_id without
-	// error, and a user delete cascades through organization_members and
-	// revoked_tokens.
+	// cascades through api_keys and leaves audit_logs.organization_id in place
+	// (see delete_tenancy_integration_test.go for why it must), and a user
+	// delete cascades through organization_members, revoked_tokens and api_keys.
 	orgID := scanUUID(t, db, `INSERT INTO identity.organizations (name) VALUES ('cascade-org') RETURNING id`)
 	userID := scanUUID(t, db, `INSERT INTO identity.users (email, name) VALUES ('cascade@example.test', 'c') RETURNING id`)
 	mustExec(t, db, fmt.Sprintf(

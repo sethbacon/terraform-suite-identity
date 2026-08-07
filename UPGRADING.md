@@ -22,6 +22,14 @@ before, with two exceptions called out under "Behaviour that changed with the
 deletion". Sections 6–7 change what accessors RETURN for a caller whose tenancy
 does not cover the target — that is the fix, and it is the part to read
 carefully.
+**BREAKING. Ships migration `000007`.** Sections 1–5 are the rename/deletion
+half: each of those changes is a compile error at the call site, and nothing
+about them changes behaviour except the deletions themselves. Two exceptions are
+called out under "Behaviour that changed with the deletion" below — read those.
+
+**Section 6 is different, and is the one to read first.** It changes what a
+`DELETE` on `organizations` or `users` does to rows your application is already
+storing, and most of it will **not** produce a compile error.
 
 ### Why the deprecated methods were deleted rather than re-marked
 
@@ -352,6 +360,123 @@ Replace per-key `RevokeAPIKey` loops in deprovisioning with the single
 `RevokeAPIKeysForUser` call. A caller that wants the old count reads
 `len(removed.OrganizationIDs())`; one that wants to log WHICH organizations were
 touched now can, which the old `int64` never allowed.
+### 6. Migration `000007` — a `DELETE` no longer re-homes the rows it leaves behind
+
+This is the behavioural half of the release (issue #142). Three referencing
+columns were `ON DELETE SET NULL`, and on all three `NULL` was already a value
+the readers *interpret* rather than an inert "the parent went away" marker:
+
+| Column | What `NULL` already meant | What a parent delete therefore did |
+| --- | --- | --- |
+| `audit_logs.organization_id` | the platform/unowned bucket, which `AuditScopeOrganizationsAndUnowned` widens a read to admit **on purpose** | published a deleted organization's entire audit history — actions, resource ids, IP addresses, JSONB metadata — to every other tenant's admins |
+| `audit_logs.user_id` | "no actor" (a system action) | erased attribution at the moment — account removal — when the trail's non-repudiation value is what is being relied on |
+| `api_keys.user_id` | "organization **service** credential", which the registry's namespace authorizer exempts from any membership check | promoted a deleted user's personal keys into unattributable, permanently valid organization credentials |
+
+`organization_members.role_template_id` keeps `SET NULL`: there `NULL` means *no
+scopes at all*, strictly less authority and exactly what
+`UpdateMemberRoleTemplate(nil)` sets deliberately.
+
+#### What the migration does
+
+- **Drops** the foreign keys on `audit_logs.user_id` and
+  `audit_logs.organization_id`. Those columns are a historical record of who
+  acted and for which organization *at the time*, not live references. Every
+  `ON DELETE` action a foreign key can offer is wrong for one — `SET NULL`
+  re-homes, `CASCADE` destroys the evidence, `RESTRICT` makes the record's own
+  subject undeletable — so the values stay and the constraint goes. A deleted
+  organization's rows keep its id, match no member's scope, and remain readable
+  only through the explicit `AuditScopeAllOrganizations()`. **No read semantics
+  change.**
+- **Changes** `api_keys.user_id` to `ON DELETE CASCADE`. A credential must not
+  outlive its principal, and must never change authority *class* on the way out.
+- **Adds** `audit_logs.actor_email` and backfills it, so attribution survives the
+  `users` row.
+
+#### Required: two consumer-side code changes
+
+1. **`StreamAuditLogs` projects one more column.** The export axis hands you raw
+   `*sql.Rows` to scan yourself, and `al.actor_email` is now **column 10**,
+   between `created_at` and the joined `user_email`/`user_name`. Add the
+   destination in that position or the scan fails with
+   `sql: expected 12 destination arguments in Scan, not 11`:
+
+   ```go
+   rows.Scan(
+       &entry.ID, &entry.UserID, &entry.OrganizationID, &entry.Action,
+       &entry.ResourceType, &entry.ResourceID, &metadataJSON, &entry.IPAddress,
+       &entry.CreatedAt,
+       &entry.ActorEmail, // new in v0.25.0
+       &entry.UserEmail, &entry.UserName,
+   )
+   ```
+
+   `ListAuditLogs` and `GetAuditLog` scan internally and need no change; they
+   populate the new `models.AuditLog.ActorEmail` field for you.
+
+2. **Do not depend on `CreateAuditLog` failing to detect an unresolvable id.**
+   A caller that wrote an audit entry, caught the foreign-key error, nulled the
+   actor columns and retried is now on a path that no longer triggers: the
+   insert succeeds and the id is stored as written. Decide explicitly instead —
+   either resolve the id first and pass `nil` when it does not exist locally, or
+   accept that the entry stays stamped and is therefore readable only with
+   `AuditScopeAllOrganizations()`. Set `AuditLog.ActorEmail` yourself for an
+   actor this database holds no `users` row for.
+
+   (`terraform-state-manager`'s `/audit/ingest` handler has exactly this shape.)
+
+#### Recommended: sweep credentials before deleting a user, still
+
+`ON DELETE CASCADE` on `api_keys.user_id` is a **backstop**, not a replacement
+for the sweep. It cannot revoke a JWT whose scopes were embedded at login, and it
+runs after the fact. Keep sweeping first; the database now fails closed if the
+sweep is skipped, fails, or is bypassed by raw SQL.
+
+#### Deploy step: rows already in the manufactured state
+
+The migration **cannot repair history**. A row that was re-homed before you
+upgraded is indistinguishable from one written that way on purpose, so this is an
+inventory decision, not something DDL can make. Run both queries before or just
+after the deploy:
+
+```sql
+-- Audit rows with no owning organization. Expected only for entries your app
+-- writes unowned by design (terraform-state-manager's logins, state-file and
+-- source actions). Anything else is a formerly-owned row that a past
+-- organization delete moved into the platform bucket, and it is readable today
+-- by every admin whose scope includes unowned rows.
+SELECT date_trunc('day', created_at) AS day, action, count(*)
+  FROM identity.audit_logs
+ WHERE organization_id IS NULL
+ GROUP BY 1, 2
+ ORDER BY 1 DESC;
+
+-- API keys with no owning user. Expected only for organization service
+-- credentials you created that way. Anything else is a deleted user's personal
+-- key that is still authenticating.
+SELECT id, organization_id, name, key_prefix, created_at, last_used_at
+  FROM identity.api_keys
+ WHERE user_id IS NULL
+ ORDER BY created_at;
+```
+
+Rows in the first result that predate a known organization deletion should be
+deleted or moved out of the live table; rows in the second that are not a
+deliberate service credential should be revoked.
+
+#### Rollback
+
+`000007`'s down migration is **best-effort and lossy**, and self-labels as such.
+Re-creating the old foreign keys requires every value to resolve again, so it
+must first null every `audit_logs` row whose organization or user was deleted
+while `000007` was applied — re-opening the leak for exactly the history that was
+being retained — and it drops `actor_email`. Prefer rolling forward. To size the
+loss first:
+
+```sql
+SELECT count(*) FROM identity.audit_logs al
+ WHERE al.organization_id IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM identity.organizations o WHERE o.id = al.organization_id);
+```
 
 ---
 
