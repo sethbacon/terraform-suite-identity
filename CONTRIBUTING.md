@@ -324,11 +324,23 @@ will not be merged.
      the module and its dependencies.
    - **Conventional PR Title** (`pr-checks.yml`).
    - **Dependency review** (`pr-checks.yml`) — `fail-on-severity: moderate`.
+   - **Breaking-change footers survive the squash** (`pr-checks.yml`) — fails a PR
+     that declares more than one breaking change. See step 7.
 6. At least one approval is required. `@sethbacon` is the default reviewer/owner
    (`.github/CODEOWNERS`); changes under `.github/` and `identity/` require their
    explicit review.
-7. **Squash-merge** into `main` — the PR title becomes the commit message and
-   feeds release-please.
+7. **Squash-merge** into `main` — the PR title becomes the commit subject and every
+   commit body in the PR is concatenated beneath it, and that one commit feeds
+   release-please.
+
+   That concatenation is why a PR may declare **at most one breaking change**.
+   release-please keeps only the *first* `BREAKING CHANGE:` footer of a commit and
+   reads a `!` marker only from its header, so a second declaration anywhere in the
+   PR is dropped in silence — no changelog entry, no upgrade note, nothing failing
+   to say so. Splitting the footers across separate commits does not help; the
+   squash puts them back into one body. Either open one PR per breaking change, or
+   combine them into a single footer and write each one up in the upgrade guide.
+   The **Breaking-change footers survive the squash** check enforces this.
 
 ---
 
