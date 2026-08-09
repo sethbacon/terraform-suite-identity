@@ -1,0 +1,18 @@
+# zizmor configuration.
+#
+# An entry here is an ACCEPTED finding, not a silenced one: each names the rule,
+# the file, and why the obvious remediation is wrong or deferred. Anything not
+# listed fails the build, so a NEW finding of any kind is still caught.
+rules:
+  github-app:
+    ignore:
+      # zizmor's tip is to add `permission-<name>` inputs so the App token stops
+      # inheriting blanket installation permissions. That exact change has already
+      # been made in this suite and REVERTED: the App installation does not hold
+      # the permission being requested, so create-github-app-token returns 422 and
+      # release-please stops running altogether -- trading a scoping improvement
+      # for a broken release pipeline.
+      #
+      # Re-narrowing is worth doing, but it has to start by auditing what the
+      # installation actually grants, not by adding inputs and seeing what breaks.
+      - release-please.yml

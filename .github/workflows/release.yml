@@ -34,6 +34,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # full history to walk ancestry
+          persist-credentials: false
       - name: Check tagged commit is reachable from main
         run: |
           git fetch origin main
@@ -59,6 +60,7 @@ jobs:
         with:
           sparse-checkout: CHANGELOG.md
           sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - name: Publish the release-please draft (or create it if absent)
         run: |
