@@ -96,12 +96,21 @@ jobs:
           THRESHOLD = 75.0
           MODULE_PREFIX = "github.com/sethbacon/terraform-suite-identity/"
 
-          # Packages exempt from the per-package floor, each with the reason it
+          # FILES exempt from the per-package floor, each with the reason it
           # cannot be gated here. Adding an entry is a deliberate, reviewable act
           # (this file is CODEOWNER-gated); forgetting to add one is not, which
           # is why the default is "gated".
-          EXEMPT = {
-              "identity": (
+          #
+          # Keyed on FILE, not package (issue #66). The exemption exists for one
+          # file — the migration runner, which needs a live PostgreSQL — but
+          # exempting its PACKAGE also ungated everything else in the module
+          # root. That is the same control gap this gate was built to close, one
+          # level down: identity/schema_routing.go sits at 98% today, so nothing
+          # is currently hidden, but it is unmeasured by luck rather than by a
+          # rule, and the next file added to that package would be ungated
+          # silently.
+          EXEMPT_FILES = {
+              "identity/db.go": (
                   "migration runner (RunMigrations/GetMigrationVersion): requires a "
                   "live PostgreSQL, so it cannot be covered by this unit-test job. "
                   "It is exercised by the required 'Integration Tests (PostgreSQL)' "
@@ -111,6 +120,11 @@ jobs:
 
           covered = defaultdict(int)
           total = defaultdict(int)
+          # Tracked separately so an exempt file's statements never dilute the
+          # percentage its package is judged on.
+          exempt_covered = defaultdict(int)
+          exempt_stmts = defaultdict(int)
+          seen_files = set()
 
           with open("coverage.out") as f:
               next(f, None)  # skip the "mode: ..." header line
@@ -125,6 +139,12 @@ jobs:
                   if not file_path.startswith(MODULE_PREFIX):
                       continue
                   rel_path = file_path[len(MODULE_PREFIX):]
+                  seen_files.add(rel_path)
+                  if rel_path in EXEMPT_FILES:
+                      exempt_stmts[rel_path] += int(numstmt_str)
+                      if int(count_str) > 0:
+                          exempt_covered[rel_path] += int(numstmt_str)
+                      continue
                   pkg = rel_path.rsplit("/", 1)[0] if "/" in rel_path else rel_path
                   total[pkg] += int(numstmt_str)
                   if int(count_str) > 0:
@@ -135,25 +155,26 @@ jobs:
                     "the coverage gate would pass vacuously.")
               sys.exit(1)
 
-          # A stale exemption is itself an ungated package waiting to happen:
-          # if an exempt package is renamed or removed, the entry must not
-          # silently linger and pre-authorize a future package of that name.
-          stale = sorted(set(EXEMPT) - set(total))
+          # A stale exemption is itself an ungated file waiting to happen: if an
+          # exempt file is renamed or removed, the entry must not silently linger
+          # and pre-authorize a future file of that name.
+          stale = sorted(set(EXEMPT_FILES) - seen_files)
           if stale:
-              print("FAIL: EXEMPT lists package(s) not present in the coverage profile; "
+              print("FAIL: EXEMPT_FILES lists file(s) not present in the coverage profile; "
                     "remove the stale entr(y/ies) so they cannot silently pre-exempt "
-                    "a future package of the same name:")
-              for pkg in stale:
-                  print(f"  - {pkg}")
+                    "a future file of the same name:")
+              for f in stale:
+                  print(f"  - {f}")
               sys.exit(1)
+
+          for f in sorted(EXEMPT_FILES):
+              pct = exempt_covered[f] * 100.0 / exempt_stmts[f] if exempt_stmts[f] else 0.0
+              print(f"EXEMPT: {f} coverage {pct:.1f}% — {EXEMPT_FILES[f]}")
 
           failed = []
           for pkg in sorted(total):
               stmt_total = total[pkg]
               pct = covered.get(pkg, 0) * 100.0 / stmt_total
-              if pkg in EXEMPT:
-                  print(f"EXEMPT: {pkg} coverage {pct:.1f}% — {EXEMPT[pkg]}")
-                  continue
               if stmt_total == 0:
                   print(f"SKIP: {pkg} has no statements to cover")
                   continue
@@ -175,7 +196,9 @@ jobs:
               sys.exit(1)
 
           print()
-          print(f"All {len(total) - len(EXEMPT)} gated package(s) meet the "
+          # len(total) is already the gated set: exempt FILES are excluded as the
+          # profile is read, so they never create a package entry of their own.
+          print(f"All {len(total)} gated package(s) meet the "
                 f"{THRESHOLD:.0f}% per-package coverage floor.")
           PY
 
