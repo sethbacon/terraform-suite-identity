@@ -510,6 +510,11 @@ func (p *Provider) ExchangeAndVerify(ctx context.Context, code string, session C
 	if idToken.Nonce != session.Nonce {
 		return nil, nil, fmt.Errorf("ID token nonce does not match the expected value")
 	}
+	// After the nonce, because a replayed token should be rejected as a replay
+	// rather than reported as an audience problem.
+	if err := checkAuthorizedParty(idToken, p.config.ClientID); err != nil {
+		return nil, nil, err
+	}
 	return token, idToken, nil
 }
 
@@ -618,6 +623,69 @@ func (p *Provider) ExtractUserInfo(idToken *oidc.IDToken) (sub, email, name stri
 // it from the raw claims (rather than a typed field) means a type quirk cannot
 // break parsing of the surrounding claims. Absent or unrecognized values are
 // treated as false.
+// checkAuthorizedParty enforces the azp ("authorized party") rules of OpenID
+// Connect Core section 3.1.3.7, which the underlying library deliberately does
+// not.
+//
+// go-oidc's Verify checks only that our client_id appears in the audience, and
+// says so in its own source:
+//
+//	// This check DOES NOT ensure that the ClientID is the party to which the
+//	// ID Token was issued (i.e. Authorized party).
+//
+// Membership of the audience is weaker than being the party the token was
+// issued TO. On an IdP serving several clients, a token minted for client B
+// that merely lists our client_id among its audiences passes that check. azp
+// is the claim that distinguishes the two, so without this the registry
+// accepts an ID token intended for a different relying party.
+//
+// The rules, as the spec states them:
+//
+//   - If azp is present, it MUST be our client_id.
+//   - If there are multiple audiences, azp SHOULD be present — a multi-audience
+//     token with no azp names no single authorized party, so there is nothing
+//     to bind it to us. Treated as a rejection.
+//
+// A single-audience token with no azp is the ordinary case and stays valid;
+// tightening that would reject the majority of correct IdPs and get the check
+// turned off.
+func checkAuthorizedParty(idToken *oidc.IDToken, clientID string) error {
+	var claims map[string]json.RawMessage
+	if err := idToken.Claims(&claims); err != nil {
+		return fmt.Errorf("failed to read ID token claims: %w", err)
+	}
+	return checkAuthorizedPartyClaims(claims, idToken.Audience, clientID)
+}
+
+// checkAuthorizedPartyClaims is the adjudication itself, split out from the
+// token so it can be tested directly.
+//
+// oidc.IDToken keeps its claims in an unexported field reachable only through
+// Claims(), so a test outside go-oidc cannot build a token carrying an azp at
+// all. Splitting the decision from the decoding is what makes the rule
+// testable, rather than reachable only through a live IdP round trip that would
+// really be testing go-oidc.
+func checkAuthorizedPartyClaims(claims map[string]json.RawMessage, audience []string, clientID string) error {
+	raw, present := claims["azp"]
+	if present {
+		var azp string
+		if err := json.Unmarshal(raw, &azp); err != nil {
+			return fmt.Errorf("ID token azp claim is not a string")
+		}
+		if azp != clientID {
+			// The value is not echoed: it is attacker-influenced and would land
+			// in logs verbatim.
+			return fmt.Errorf("ID token azp names a different client; it was not issued to this registry")
+		}
+		return nil
+	}
+
+	if len(audience) > 1 {
+		return fmt.Errorf("ID token has %d audiences and no azp claim, so no authorized party is named", len(audience))
+	}
+	return nil
+}
+
 func boolClaim(idToken *oidc.IDToken, name string) bool {
 	var m map[string]json.RawMessage
 	if err := idToken.Claims(&m); err != nil {
