@@ -37,6 +37,8 @@ updates:
           # review too instead of riding the batched catch-all group.
           - "github.com/lib/pq"
           - "github.com/golang-migrate/migrate/*"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: github-actions
     directory: /
@@ -54,3 +56,5 @@ updates:
       github-actions-dependencies:
         patterns:
           - "*"
+    cooldown:
+      default-days: 7
