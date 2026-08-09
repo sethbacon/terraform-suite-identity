@@ -326,6 +326,11 @@ will not be merged.
    - **Dependency review** (`pr-checks.yml`) — `fail-on-severity: moderate`.
    - **Breaking-change footers survive the squash** (`pr-checks.yml`) — fails a PR
      that declares more than one breaking change. See step 7.
+   - **signature-replay / replay** (`signature-replay.yml`) — re-runs every
+     recorded defect-class signature across the whole suite and fails when a
+     class recorded as fixed matches again, or when a new instance appears that
+     no issue covers. Exit 2 means a signature could not RUN, which is a failure
+     and never a pass. Not a required check yet.
 6. At least one approval is required. `@sethbacon` is the default reviewer/owner
    (`.github/CODEOWNERS`); changes under `.github/` and `identity/` require their
    explicit review.
