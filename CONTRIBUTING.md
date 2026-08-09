@@ -186,6 +186,20 @@ preserve them:
   (`TestNotFoundClass_NoAccessorReturnsNilNil` and
   `TestNotFoundClass_ExecResultDiscardersAreEnumerated`), because the mistake
   changes no signature and would otherwise compile and pass silently.
+- **Identifier types are not uniform, and that is deliberate.** Some models type
+  an id as `uuid.UUID` (`models.RoleTemplate.ID`, `models.OIDCConfig.ID`) and
+  others as `string` or `*string` (`models.OrganizationMember.RoleTemplateID`,
+  and every id on `Organization`/`User`). They refer to the same columns, so the
+  inconsistency is real (issue #70) — but aligning them is a **breaking change**
+  to a module two backends pin, for an ergonomic gain and no security one, so it
+  has not been made.
+  What matters when adding a field: **match the model you are extending**, do not
+  "improve" it toward the other convention. A single model that mixes both is
+  worse than the module-wide split, because it puts the conversion inside one
+  struct where a reader expects consistency. If a future release does align
+  them, it is one breaking change on its own commit — release-please keeps only
+  the FIRST `BREAKING CHANGE:` footer per merged commit, so it must not ride
+  along with anything else.
 
 ---
 
