@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.26.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.25.0...v0.26.0) (2026-08-10)
+
+
+### Features
+
+* **crypto:** add a transition reader so adopting AAD is a two-deploy change ([#194](https://github.com/sethbacon/terraform-suite-identity/issues/194)) ([3564c49](https://github.com/sethbacon/terraform-suite-identity/commit/3564c4938ac556f8351f76c435b74ee7f5e35825)), closes [#153](https://github.com/sethbacon/terraform-suite-identity/issues/153)
+* **crypto:** bind sealed tokens to their storage slot with GCM AAD ([#193](https://github.com/sethbacon/terraform-suite-identity/issues/193)) ([941af5f](https://github.com/sethbacon/terraform-suite-identity/commit/941af5f5e3dc4d0d90f93decac84cf9d255c67fc)), closes [#153](https://github.com/sethbacon/terraform-suite-identity/issues/153)
+
+
+### Bug Fixes
+
+* **ci:** check out the two ADO extension repos the replay gate requires ([#188](https://github.com/sethbacon/terraform-suite-identity/issues/188)) ([fe7ff89](https://github.com/sethbacon/terraform-suite-identity/commit/fe7ff8982290bc532967508068f29220e6eccd06))
+* **ci:** key the coverage exemption on the file, not the whole package ([#190](https://github.com/sethbacon/terraform-suite-identity/issues/190)) ([97bc409](https://github.com/sethbacon/terraform-suite-identity/commit/97bc4090aae0b89b3236975b6e64bca764387ed9))
+* **ci:** repair the empty `with:` blocks that broke five workflows at startup ([#186](https://github.com/sethbacon/terraform-suite-identity/issues/186)) ([afbf72d](https://github.com/sethbacon/terraform-suite-identity/commit/afbf72d4469dfcf65009d22151aa79840d1f5356))
+* **oidc:** enforce the azp authorized-party rules the library leaves to us ([#189](https://github.com/sethbacon/terraform-suite-identity/issues/189)) ([d53ad1e](https://github.com/sethbacon/terraform-suite-identity/commit/d53ad1e9331d6c421c5f0a44e53d7b7a6bb35f4e))
+
+
+### Documentation
+
+* record the identifier-type split as a convention rather than a defect ([#191](https://github.com/sethbacon/terraform-suite-identity/issues/191)) ([214d424](https://github.com/sethbacon/terraform-suite-identity/commit/214d42486b63fd32773f16f37c19241e75ef012d))
+
 ## [0.25.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.24.0...v0.25.0) (2026-08-07)
 
 
