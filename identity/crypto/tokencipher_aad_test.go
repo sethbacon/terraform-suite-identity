@@ -267,3 +267,65 @@ func TestOpenWithContext_MismatchIsNotDistinguishableFromTampering(t *testing.T)
 		t.Errorf("error echoes the context values: %v", mismatchErr)
 	}
 }
+
+// OpenWithContextOrLegacy is the transition reader. It is what turns adopting
+// AAD into a two-deploy change instead of a four-deploy one, so its behaviour on
+// each input class is pinned.
+
+func TestOpenWithContextOrLegacy_ReadsBothFormsAndReportsWhich(t *testing.T) {
+	tc := newTestCipher(t)
+	ctx := []byte("notify_channel:chan-1:target")
+
+	legacy, err := tc.Seal("secret")
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	bound, err := tc.SealWithContext("secret", ctx)
+	if err != nil {
+		t.Fatalf("SealWithContext: %v", err)
+	}
+
+	pt, isBound, err := tc.OpenWithContextOrLegacy(legacy, ctx)
+	if err != nil || pt != "secret" {
+		t.Fatalf("legacy read = (%q, %v)", pt, err)
+	}
+	if isBound {
+		t.Error("a legacy ciphertext reported itself as bound; nothing would ever convert")
+	}
+
+	pt, isBound, err = tc.OpenWithContextOrLegacy(bound, ctx)
+	if err != nil || pt != "secret" {
+		t.Fatalf("bound read = (%q, %v)", pt, err)
+	}
+	if !isBound {
+		t.Error("a bound ciphertext reported itself as legacy; it would be re-converted forever")
+	}
+}
+
+// The fallback must not become a way to bypass the binding. A ciphertext bound
+// to ANOTHER context is not legacy — it must fail, not silently fall through to
+// the unbound read.
+func TestOpenWithContextOrLegacy_DoesNotAcceptAnotherRowsBoundCiphertext(t *testing.T) {
+	tc := newTestCipher(t)
+
+	sealed, err := tc.SealWithContext("secret", []byte("notify_channel:chan-1:target"))
+	if err != nil {
+		t.Fatalf("SealWithContext: %v", err)
+	}
+
+	_, _, err = tc.OpenWithContextOrLegacy(sealed, []byte("notify_channel:chan-2:target"))
+	if !errors.Is(err, ErrDecryptionFailed) {
+		t.Fatalf("a ciphertext bound to another row was accepted via the legacy fallback: %v", err)
+	}
+}
+
+// An unset column is not a migration candidate. Returning an error here would
+// fail every row that legitimately has no secret.
+func TestOpenWithContextOrLegacy_TreatsEmptyAsUnsetNotCorrupt(t *testing.T) {
+	tc := newTestCipher(t)
+
+	pt, bound, err := tc.OpenWithContextOrLegacy("", []byte("ctx"))
+	if err != nil || pt != "" || bound {
+		t.Fatalf("empty ciphertext = (%q, %v, %v); want (\"\", false, nil)", pt, bound, err)
+	}
+}
