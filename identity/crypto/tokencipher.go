@@ -114,12 +114,51 @@ func DeriveTokenCipher(passphrase string, salt []byte, iterations int) (*TokenCi
 	return NewTokenCipher(derivedKey)
 }
 
-// Seal encrypts plaintext and returns a base64-encoded ciphertext
+// Seal encrypts plaintext and returns a base64-encoded ciphertext.
+//
+// The resulting ciphertext carries NO binding to the row, column or purpose it
+// belongs to, so anyone with database write access can move a sealed value
+// between rows or between fields and GCM will authenticate it happily — for
+// example swapping one notification channel's encrypted target for another's.
+// Prefer SealWithContext for anything new; this remains for ciphertexts already
+// at rest (#153).
+//
+// An empty plaintext is returned as an empty string rather than a ciphertext,
+// which makes "explicitly blanked" indistinguishable from "never set" and leaves
+// it with no integrity protection. That behaviour is preserved deliberately —
+// callers and stored rows depend on the empty string meaning "unset", and
+// consumers derive flags such as HasTarget from exactly that comparison.
+// SealWithContext does not carry the special case forward.
 func (tc *TokenCipher) Seal(plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", nil
 	}
+	return tc.seal(plaintext, nil)
+}
 
+// SealWithContext encrypts plaintext and binds the ciphertext to context, which
+// is passed as GCM additional authenticated data. The context is NOT secret and
+// is NOT stored: the opener must reconstruct the identical bytes, and Open fails
+// if it cannot. That is the point — it is what stops a sealed value being lifted
+// from one row and replayed into another (#153).
+//
+// The context should name where the value lives, specifically enough that no two
+// storage slots share one. A row id plus column is the usual shape:
+//
+//	ctx := []byte("notify_channel:" + ch.ID + ":target")
+//	sealed, err := tc.SealWithContext(target, ctx)
+//
+// Deriving it from the same record it protects is what makes the binding hold;
+// a constant, or anything an attacker also controls, buys nothing.
+//
+// Unlike Seal, an empty plaintext is sealed like any other value, so a blanked
+// secret is distinguishable from an absent one and is integrity-protected.
+func (tc *TokenCipher) SealWithContext(plaintext string, context []byte) (string, error) {
+	return tc.seal(plaintext, context)
+}
+
+// seal is the single encryption path. additionalData is nil for the legacy Seal.
+func (tc *TokenCipher) seal(plaintext string, additionalData []byte) (string, error) {
 	blockCipher, err := aes.NewCipher(tc.masterKey)
 	if err != nil {
 		return "", err
@@ -135,7 +174,7 @@ func (tc *TokenCipher) Seal(plaintext string) (string, error) {
 		return "", err
 	}
 
-	sealed := aead.Seal(nonce, nonce, []byte(plaintext), nil)
+	sealed := aead.Seal(nonce, nonce, []byte(plaintext), additionalData)
 	return base64.URLEncoding.EncodeToString(sealed), nil
 }
 
@@ -147,14 +186,60 @@ func (tc *TokenCipher) Open(encodedCiphertext string) (string, error) {
 	if encodedCiphertext == "" {
 		return "", nil
 	}
+	return tc.open(encodedCiphertext, nil)
+}
 
+// OpenWithContext decrypts a ciphertext produced by SealWithContext, requiring
+// the identical context bytes. A mismatch fails as ErrDecryptionFailed — the
+// same result as a wrong key or tampered bytes, because to GCM it is the same
+// class of failure.
+//
+// There is no cross-compatibility between the two pairs, by construction: a
+// ciphertext from Seal does not open here, and one from SealWithContext does not
+// open with Open. That is what makes the binding meaningful, and it is why
+// adopting this on existing data needs ReSealWithContext rather than a
+// deploy-and-hope.
+//
+// The previous-key rotation fallback applies here exactly as it does to Open.
+func (tc *TokenCipher) OpenWithContext(encodedCiphertext string, context []byte) (string, error) {
+	if encodedCiphertext == "" {
+		return "", ErrCiphertextCorrupted
+	}
+	return tc.open(encodedCiphertext, context)
+}
+
+// ReSealWithContext converts a ciphertext written by Seal into one bound to
+// context, without the plaintext leaving this function.
+//
+// It exists so the migration is written once here rather than twice in the
+// consuming backends: the sealed values live in THEIR databases (the notify
+// channel target, SCM app credentials), the key only exists in the running
+// application, and no SQL migration can re-encrypt AES-GCM. Each consumer's
+// migration is therefore a read/convert/write loop over its own rows, and this
+// is the convert step.
+//
+// The read side uses the legacy no-AAD path including the previous-key fallback,
+// so rows written before a key rotation convert correctly too. Re-running it
+// over an already-converted row fails with ErrDecryptionFailed rather than
+// double-sealing, which makes a partially-completed migration safe to resume:
+// convert what fails, skip what succeeds under OpenWithContext.
+func (tc *TokenCipher) ReSealWithContext(encodedCiphertext string, context []byte) (string, error) {
+	plaintext, err := tc.Open(encodedCiphertext)
+	if err != nil {
+		return "", err
+	}
+	return tc.SealWithContext(plaintext, context)
+}
+
+// open is the single decryption path, including the rotation fallback.
+func (tc *TokenCipher) open(encodedCiphertext string, additionalData []byte) (string, error) {
 	ciphertext, err := base64.URLEncoding.DecodeString(encodedCiphertext)
 	if err != nil {
 		return "", ErrCiphertextCorrupted
 	}
 
 	// Try current key first
-	plaintext, err := tc.decryptWithKey(tc.masterKey, ciphertext)
+	plaintext, err := tc.decryptWithKey(tc.masterKey, ciphertext, additionalData)
 	if err == nil {
 		return plaintext, nil
 	}
@@ -162,7 +247,7 @@ func (tc *TokenCipher) Open(encodedCiphertext string) (string, error) {
 	// If we have a previous key and the error was an authentication failure,
 	// try the previous key (the ciphertext may have been encrypted before rotation).
 	if tc.previousKey != nil && errors.Is(err, ErrDecryptionFailed) {
-		plaintext, prevErr := tc.decryptWithKey(tc.previousKey, ciphertext)
+		plaintext, prevErr := tc.decryptWithKey(tc.previousKey, ciphertext, additionalData)
 		if prevErr == nil {
 			return plaintext, nil
 		}
@@ -172,7 +257,9 @@ func (tc *TokenCipher) Open(encodedCiphertext string) (string, error) {
 }
 
 // decryptWithKey performs AES-256-GCM decryption with the given key.
-func (tc *TokenCipher) decryptWithKey(key, ciphertext []byte) (string, error) {
+// additionalData must match what was supplied at Seal time; nil for the legacy
+// no-AAD path.
+func (tc *TokenCipher) decryptWithKey(key, ciphertext, additionalData []byte) (string, error) {
 	blockCipher, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -191,7 +278,7 @@ func (tc *TokenCipher) decryptWithKey(key, ciphertext []byte) (string, error) {
 	nonce := ciphertext[:nonceLen]
 	actualCiphertext := ciphertext[nonceLen:]
 
-	plaintext, err := aead.Open(nil, nonce, actualCiphertext, nil)
+	plaintext, err := aead.Open(nil, nonce, actualCiphertext, additionalData)
 	if err != nil {
 		return "", ErrDecryptionFailed
 	}
