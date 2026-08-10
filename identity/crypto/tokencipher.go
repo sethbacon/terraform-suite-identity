@@ -208,6 +208,57 @@ func (tc *TokenCipher) OpenWithContext(encodedCiphertext string, context []byte)
 	return tc.open(encodedCiphertext, context)
 }
 
+// OpenWithContextOrLegacy opens a ciphertext that may be either bound
+// (SealWithContext) or unbound (Seal), trying the bound form first, and reports
+// which it was.
+//
+// This is what makes adopting AAD a two-deploy change rather than a four-deploy
+// one. Without it a consumer is stuck: switching writes to SealWithContext
+// breaks reads of rows not yet converted, and converting rows first breaks the
+// still-running previous release — so it needs a read-both release, then a
+// backfill, then a write-switch, then a cleanup. With it, a consumer ships
+// read-both and write-bound together and rows convert as they are touched:
+//
+//	pt, bound, err := tc.OpenWithContextOrLegacy(row.Secret, ctx)
+//	if err != nil { return err }
+//	if !bound {
+//	    if sealed, err := tc.SealWithContext(pt, ctx); err == nil {
+//	        _ = store.UpdateSecret(row.ID, sealed) // opportunistic, best-effort
+//	    }
+//	}
+//
+// A backfill is then only needed for rows nothing reads, and is the same loop
+// built on ReSealWithContext.
+//
+// A ciphertext bound to a DIFFERENT context is not legacy and must not be
+// accepted: the bound read fails, the unbound read fails too (its AAD was not
+// nil), and the caller gets an error. The fallback widens which formats are
+// accepted, never which contexts.
+//
+// An empty ciphertext returns ("", false, nil), matching Open rather than
+// OpenWithContext — an unset column is not a migration candidate, and treating
+// it as corrupt would fail every row that legitimately holds no secret.
+//
+// This is a transition tool, not a permanent API. Leaving it in place after the
+// data is converted keeps accepting unbound ciphertexts, which is the property
+// being retired; callers should move to OpenWithContext once the backfill is
+// complete.
+func (tc *TokenCipher) OpenWithContextOrLegacy(encodedCiphertext string, context []byte) (string, bool, error) {
+	if encodedCiphertext == "" {
+		return "", false, nil
+	}
+
+	if plaintext, err := tc.open(encodedCiphertext, context); err == nil {
+		return plaintext, true, nil
+	}
+
+	plaintext, err := tc.open(encodedCiphertext, nil)
+	if err != nil {
+		return "", false, err
+	}
+	return plaintext, false, nil
+}
+
 // ReSealWithContext converts a ciphertext written by Seal into one bound to
 // context, without the plaintext leaving this function.
 //
