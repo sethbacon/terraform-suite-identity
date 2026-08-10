@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.26.0...v0.27.0) (2026-08-10)
+
+
+### Features
+
+* **notify:** bind the channel target ciphertext to its channel row ([#195](https://github.com/sethbacon/terraform-suite-identity/issues/195)) ([17c81c8](https://github.com/sethbacon/terraform-suite-identity/commit/17c81c808c9dbfce08eb7d65ebc9d279229a3a1f)), closes [#153](https://github.com/sethbacon/terraform-suite-identity/issues/153)
+
 ## [0.26.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.25.0...v0.26.0) (2026-08-10)
 
 
