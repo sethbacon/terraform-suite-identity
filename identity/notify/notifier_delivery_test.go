@@ -263,3 +263,58 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// #153 — the channel target is now bound to its channel row. decryptTarget must
+// accept both forms during the transition, and must NOT accept a target bound to
+// a different channel.
+func TestNotifier_decryptTarget_AcceptsBoundAndLegacyForms(t *testing.T) {
+	n, _, tc := newTestNotifier(t)
+
+	legacy, err := tc.Seal("https://hooks.example.com/legacy")
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	bound, err := tc.SealWithContext("https://hooks.example.com/bound", TargetContext("chan-1"))
+	if err != nil {
+		t.Fatalf("SealWithContext: %v", err)
+	}
+
+	// A row not yet converted still delivers.
+	got, err := n.decryptTarget(&NotificationChannel{ID: "chan-1", EncryptedTarget: legacy})
+	if err != nil || got != "https://hooks.example.com/legacy" {
+		t.Fatalf("legacy target = (%q, %v); unconverted rows must keep delivering", got, err)
+	}
+
+	// A converted row delivers.
+	got, err = n.decryptTarget(&NotificationChannel{ID: "chan-1", EncryptedTarget: bound})
+	if err != nil || got != "https://hooks.example.com/bound" {
+		t.Fatalf("bound target = (%q, %v)", got, err)
+	}
+}
+
+// The attack the binding exists to stop: copy a sealed target out of one channel
+// row and into another. Under the legacy scheme this delivered happily.
+func TestNotifier_decryptTarget_RejectsATargetBoundToAnotherChannel(t *testing.T) {
+	n, _, tc := newTestNotifier(t)
+
+	sealed, err := tc.SealWithContext("https://hooks.example.com/victim", TargetContext("chan-1"))
+	if err != nil {
+		t.Fatalf("SealWithContext: %v", err)
+	}
+
+	if _, err := n.decryptTarget(&NotificationChannel{ID: "chan-2", EncryptedTarget: sealed}); err == nil {
+		t.Fatal("a target moved from chan-1 to chan-2 decrypted; the row binding is not enforced")
+	}
+}
+
+// TargetContext is the single definition both halves use -- the host seals with
+// it, this package opens with it. Pinning the format is the point: a change here
+// silently breaks every already-bound ciphertext at delivery time.
+func TestTargetContext_IsRowScopedAndStable(t *testing.T) {
+	if got := string(TargetContext("chan-1")); got != "identity/notify:notification_channel:chan-1:encrypted_target" {
+		t.Errorf("TargetContext(chan-1) = %q; changing this format breaks every stored bound target", got)
+	}
+	if string(TargetContext("a")) == string(TargetContext("b")) {
+		t.Error("TargetContext is not row-scoped; every channel would share one context and the binding would be vacuous")
+	}
+}
