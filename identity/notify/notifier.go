@@ -178,7 +178,13 @@ func (n *Notifier) decryptTarget(ch *NotificationChannel) (string, error) {
 	if n.tokenCipher == nil {
 		return "", fmt.Errorf("notifications: encryption key not configured")
 	}
-	pt, err := n.tokenCipher.Open(ch.EncryptedTarget)
+	// Accepts both the context-bound form (TargetContext, written by a host on
+	// the current release) and the unbound legacy form, so delivery keeps
+	// working for rows not yet converted (#153). A ciphertext bound to a
+	// DIFFERENT channel fails here rather than falling through to the legacy
+	// read — that is the binding doing its job, and it is what stops a target
+	// being moved between channel rows by anyone with database write access.
+	pt, _, err := n.tokenCipher.OpenWithContextOrLegacy(ch.EncryptedTarget, TargetContext(ch.ID))
 	if err != nil {
 		return "", fmt.Errorf("decrypt channel target: %w", err)
 	}

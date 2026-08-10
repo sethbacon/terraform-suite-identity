@@ -15,6 +15,31 @@ import (
 	"time"
 )
 
+// TargetContext returns the additional-authenticated-data context that binds a
+// channel's encrypted target to that channel row (#153).
+//
+// Pass it to crypto.TokenCipher.SealWithContext when writing EncryptedTarget and
+// to OpenWithContext / OpenWithContextOrLegacy when reading. Binding the
+// ciphertext to the row id is what stops a target being lifted out of one
+// channel and written into another by anyone with database write access — GCM
+// authenticates the move otherwise, because nothing in the ciphertext says where
+// it belongs.
+//
+// This function is exported, and is the ONLY definition, on purpose. The write
+// happens in the host application and the read happens in this package, so the
+// two halves live in different repositories; a host deriving its own equivalent
+// string would work right up until one side's format changed, and then every
+// channel target would fail to decrypt at delivery time. Hosts must call this
+// rather than construct the value.
+//
+// Changing the returned format is a breaking change for stored data: every
+// already-bound ciphertext stops opening. If it ever has to change, it needs the
+// same treatment the original adoption gets — a transition read that accepts
+// both, then a backfill.
+func TargetContext(channelID string) []byte {
+	return []byte("identity/notify:notification_channel:" + channelID + ":encrypted_target")
+}
+
 // NotificationChannel is a destination for alert events: an admin-configured
 // webhook/Slack/Teams URL, or an ad-hoc email recipient list. The target is
 // held encrypted (EncryptedTarget) and never serialized to API callers;
