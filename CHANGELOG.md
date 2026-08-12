@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.27.1...v0.27.2) (2026-08-12)
+
+
+### Bug Fixes
+
+* **ci:** spend the replay credential on the one private checkout only ([#199](https://github.com/sethbacon/terraform-suite-identity/issues/199)) ([afce19c](https://github.com/sethbacon/terraform-suite-identity/commit/afce19c97469672143b559f7a66a84e672b6b9be))
+
 ## [0.27.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.27.0...v0.27.1) (2026-08-12)
 
 
