@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.27.0...v0.27.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **ci:** point the suite-ui checkout at its new owner ([#197](https://github.com/sethbacon/terraform-suite-identity/issues/197)) ([1ec3533](https://github.com/sethbacon/terraform-suite-identity/commit/1ec3533c502cecbe6474610b316974d4121ccee7))
+
 ## [0.27.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.26.0...v0.27.0) (2026-08-10)
 
 
