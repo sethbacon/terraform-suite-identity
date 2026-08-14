@@ -36,10 +36,10 @@ is not acceptable.
 ### Prerequisites
 
 - Go 1.25 or later — the module sets `go 1.25.0` in `go.mod` as its language floor.
-  `go.mod` also pins `toolchain go1.26.5`, and CI resolves its Go version from
+  `go.mod` also pins `toolchain go1.26.6`, and CI resolves its Go version from
   `go.mod` (`actions/setup-go` with `go-version-file`), so **CI builds and tests
-  with 1.26.5**. The `go` command downloads that toolchain automatically; if you
-  have set `GOTOOLCHAIN=local`, you need 1.26.5 installed locally to match CI.
+  with 1.26.6**. The `go` command downloads that toolchain automatically; if you
+  have set `GOTOOLCHAIN=local`, you need 1.26.6 installed locally to match CI.
 - A POSIX-ish shell for the `go` toolchain. No database is required for the unit
   test suite — the data layer is tested entirely with [`go-sqlmock`](https://github.com/DATA-DOG/go-sqlmock).
   The one live-PostgreSQL test file is behind a `//go:build integration` tag, so a
