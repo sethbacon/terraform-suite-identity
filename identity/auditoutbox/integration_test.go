@@ -444,10 +444,15 @@ func TestIntegrationRelayDeliversTheIntent(t *testing.T) {
 		t.Errorf("actor_email = %q, want the address captured at intent time", actorEmail)
 	}
 	// The audit trail must say when the event HAPPENED, not when it was
-	// delivered. Compared at microsecond resolution, which is all TIMESTAMPTZ
-	// stores.
-	if !occurred.UTC().Equal(intent.OccurredAt.UTC().Truncate(time.Microsecond)) {
-		t.Errorf("created_at = %v, want the intent's OccurredAt %v", occurred, intent.OccurredAt)
+	// delivered. TIMESTAMPTZ stores microseconds and PostgreSQL ROUNDS to them,
+	// so the comparison has to round too: truncating fails roughly half the
+	// time, whenever the sub-microsecond digits round up. It did exactly that
+	// on main after v0.28.0 -- stored 689835us against a truncated 689834us --
+	// having passed on the PR only because that run's nanoseconds rounded down.
+	wantOccurred := intent.OccurredAt.UTC().Round(time.Microsecond)
+	if !occurred.UTC().Equal(wantOccurred) {
+		t.Errorf("created_at = %v, want the intent's OccurredAt rounded to microseconds %v (raw %v)",
+			occurred.UTC(), wantOccurred, intent.OccurredAt.UTC())
 	}
 	if delay := time.Since(occurred); delay < 0 {
 		t.Errorf("created_at %v is in the future; the delivery time leaked into the record", occurred)
