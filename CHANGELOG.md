@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.28.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.27.2...v0.28.0) (2026-08-14)
+
+
+### Features
+
+* **auditoutbox:** transactional audit outbox as reusable mechanism ([#210](https://github.com/sethbacon/terraform-suite-identity/issues/210)) ([db1ce94](https://github.com/sethbacon/terraform-suite-identity/commit/db1ce943a96b62326d73a88ac20f9960c0a1f86d)), closes [#206](https://github.com/sethbacon/terraform-suite-identity/issues/206)
+* **platformadmin:** platform-admin carrier as reusable, app-parameterised mechanism ([#207](https://github.com/sethbacon/terraform-suite-identity/issues/207)) ([610ac41](https://github.com/sethbacon/terraform-suite-identity/commit/610ac410a018d9a8001a010d23669167e3adc867)), closes [#206](https://github.com/sethbacon/terraform-suite-identity/issues/206)
+
+
+### Bug Fixes
+
+* **deps:** raise the toolchain to go1.26.6 for four stdlib advisories ([#209](https://github.com/sethbacon/terraform-suite-identity/issues/209)) ([aae762a](https://github.com/sethbacon/terraform-suite-identity/commit/aae762a75ec13efe26e6cbc08c5c9ef3f6e4d67c))
+
 ## [0.27.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.27.1...v0.27.2) (2026-08-12)
 
 
