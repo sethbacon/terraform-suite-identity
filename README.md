@@ -30,6 +30,7 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 | `identity/mailer`    | An SMTP transport hardened against opportunistic-TLS downgrade, used to deliver notifications. TLS is the zero value (`TLSMode`); plaintext must be named. |
 | `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. |
 | `identity/platformadmin` | The platform-admin **carrier**: who administers **one app**, resolved per request rather than claimed in a token. `Carrier` reads and writes a grant table the app owns (`New(db, "registry.platform_admins")`), `SessionScopes` elevates a live session, `KeyScopes` guarantees an API key never inherits it, and `Revoke` refuses to remove the last exercisable administrator. Ships `TableDDL` and `VerifyTable`. See [docs/platform-admin.md](docs/platform-admin.md). |
+| `identity/auditoutbox` | The transactional audit outbox: an audit **intent** written in the same transaction as the privileged mutation it describes, a `Relay` that delivers it to the app's audit table at least once, and idempotently. Ships the DDL for both the outbox table and the **deferred constraint trigger** that refuses an unaudited commit (`OutboxDDL`, `TriggerSpec.DDL`), plus `Guard`, a source scan that fails the build when a mutation path takes no `IntentWriter`. Every table name is the app's. |
 
 The `notification_channels` table `identity/notify` reads is **owned by the consuming
 app**, not created by this module's migrations. The shape is not prose you transcribe:
@@ -50,6 +51,76 @@ independent floor locks, derived from the table name. Apply
 and call **`carrier.VerifyTable(ctx)`** at startup. See
 [docs/platform-admin.md](docs/platform-admin.md) for the table shape, the mandatory audit
 and floor arguments, and why the table carries no foreign keys to `identity.*`.
+
+## Transactional audit outbox
+
+`identity/auditoutbox` exists for one property: **no privileged mutation may commit
+without its audit record.**
+
+The failure it removes is the one both apps could reach today. A grant is written on the
+app's connection; the audit entry is written on the identity connection, which may be
+another schema or another database. They cannot share a transaction, so the second write
+is attempted afterwards — and when it fails, the code logs an error and reports the
+mutation as a success anyway. The highest privilege in the product changes hands with no
+record of it.
+
+The outbox removes the second write from the request path. The audit **intent** goes into
+the app's own outbox table, in the mutation's own transaction, so the two commit together
+or neither does. A `Relay` delivers intents afterwards, at least once; because the
+intent's `EventID` becomes the destination row's `id` and the insert is
+`ON CONFLICT (id) DO NOTHING`, at-least-once transport is exactly-once in effect.
+
+**The tables are yours.** This module creates none of them and hardcodes no name — under
+the identity model in issue #206, `audit_logs` is per-app. You pass your own qualified
+names and apply the rendered DDL from your own migration set:
+
+```go
+up, err := auditoutbox.OutboxDDL("registry.audit_outbox")           // table + indexes + assert function
+trigger, err := auditoutbox.TriggerSpec{                            // the deferred constraint trigger
+    Outbox:        "registry.audit_outbox",
+    Table:         "registry.platform_admins",  // the table whose mutations must be audited
+    SubjectColumn: "user_id",                   // matched against the intent's ResourceID
+    ResourceType:  "platform_admin",
+    OnInsert:      "platform_admin.granted",
+    OnDelete:      "platform_admin.revoked",
+}.DDL()
+```
+
+`OutboxDropDDL` and `TriggerSpec.DropDDL` render the down migrations — **drop the trigger
+before the outbox table it reads.** The destination table is not rendered: it is your
+existing `audit_logs`, and the only requirement is that `id` is the primary key or carries
+a UNIQUE index. Everything else the sink discovers by probing, so a destination without
+`actor_email` receives the record without it rather than rejecting every delivery.
+
+Wiring, in three parts:
+
+```go
+outbox, err := auditoutbox.New(appDB, "registry.audit_outbox")   // the connection your mutations run on
+sink, err   := auditoutbox.NewTableSink(appDB, "registry.audit_logs")
+relay := auditoutbox.NewRelay(outbox, sink, nil, auditoutbox.RelayConfig{
+    Observer: auditoutbox.Observer{Backlog: publishBacklogMetrics},
+})
+go func() { _ = relay.Start(ctx) }()   // refuses to start if it has nowhere to drain to
+```
+
+Call `outbox.Verify(ctx)` and `sink.Verify(ctx)` once at startup and log what they return:
+both report the schema-qualified name the connection actually resolved, which is the only
+way an operator can see where audit records are really being written.
+
+Privileged repositories take an `auditoutbox.IntentWriter` as a **mandatory** parameter and
+begin with `RequireIntentWriter(w)`; the handler supplies `outbox.Writer(intent)`. Add
+`auditoutbox.Guard{Tables: []string{"platform_admins"}}.ScanDir(".")` to that package's
+tests, so a mutation path written next year without a writer fails the build. Between the
+guard, the mandatory parameter and the constraint trigger, the property is enforced at
+build time, at call time and at commit time.
+
+**With `identity/platformadmin`.** The carrier is the privileged mutation this exists to
+protect: its `Grant`/`Revoke` already take a mandatory `platformadmin.AuditIntentWriter`,
+so the handover is `platformadmin.AuditIntentWriter(outbox.Writer(intent))`, and the
+`TriggerSpec` above is built from `platformadmin.AuditActionGranted`,
+`AuditActionRevoked` and `AuditResourceType` rather than from retyped literals — the
+trigger matches the action verbatim, so a second spelling is a failed `COMMIT`. Both the
+conversion and the shared vocabulary are asserted by this module's own tests.
 
 ## Canonical identity model
 

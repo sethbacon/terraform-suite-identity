@@ -170,6 +170,14 @@ func TestReadmePackageTableListsEveryPackage(t *testing.T) {
 		if name == "internal" {
 			return filepath.SkipDir
 		}
+		// testdata is excluded for the same reason internal/ is, and more
+		// strongly: the go tool ignores it entirely, so nothing under it is a
+		// package at all — it is never built, never importable, and cannot be
+		// part of a documented surface. identity/auditoutbox keeps the fixture
+		// packages its source-scan guard parses there.
+		if name == "testdata" {
+			return filepath.SkipDir
+		}
 		// A directory is a package if it holds at least one non-test .go file.
 		entries, err := os.ReadDir(path)
 		if err != nil {

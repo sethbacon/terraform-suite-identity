@@ -161,6 +161,37 @@ All tables live in the `identity` schema. UUID primary keys default to
 > hazard for **its** queries that `VerifySchemaRouting` closes for this module's; resolve
 > those from a connection whose `search_path` reaches the table you mean.
 
+> **Not created here either: the audit outbox and its constraint trigger.**
+> `identity/auditoutbox` ships the transactional audit outbox as **mechanism**, and no
+> migration in this module creates a single object for it. The outbox has to sit beside
+> the mutation it audits — on the app's connection, in the app's schema — and under the
+> identity model ([issue #206](https://github.com/sethbacon/terraform-suite-identity/issues/206))
+> `audit_logs` becomes per-app as well: each app records the actions taken in it. A
+> migration here would create tables in the wrong database as often as not.
+>
+> So the app owns the objects and this module owns their shape, rendered rather than
+> transcribed. **`auditoutbox.OutboxDDL(table)`** emits the outbox table, its three
+> partial indexes and the same-transaction assertion function;
+> **`auditoutbox.TriggerSpec{…}.DDL()`** emits the `DEFERRABLE INITIALLY DEFERRED`
+> constraint trigger that refuses, at COMMIT, any mutation of a guarded table whose
+> transaction did not also write a matching intent. `OutboxDropDDL` and
+> `TriggerSpec.DropDDL` are the down migrations — **drop the trigger before the outbox
+> table it reads**, or every mutation fails at commit with a missing relation instead of a
+> clean refusal. This module's integration tests execute the rendered statements and then
+> drive the whole delivery path against the result, so the DDL cannot drift from the code
+> that uses it.
+>
+> Nothing is rendered for the destination `audit_logs`: it is the app's existing table.
+> The only requirement is that `id` is the primary key or carries a UNIQUE index, which is
+> what makes an at-least-once redelivery a no-op rather than a duplicate entry. The
+> sink discovers the rest of the shape by probing the connection, so a destination that
+> predates `actor_email` (identity migration `000007`) receives the record without it
+> instead of rejecting every delivery — the failure
+> [registry #864](https://github.com/sethbacon/terraform-registry-backend/issues/864)
+> describes. Call `Outbox.Verify` and `TableSink.Verify` at startup and log the
+> schema-qualified names they return, for the same reason `VerifyChannelTable`'s name is
+> worth logging.
+
 ### Which tables are organization-owned, and how that is enforced
 
 Four tables carry (or are) an organization identity, and every accessor that
