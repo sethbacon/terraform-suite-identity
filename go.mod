@@ -6,7 +6,7 @@ go 1.25.0
 // privacy leak affecting Go before 1.25.12 and the 1.26.x line before 1.26.5).
 // go command and CI (actions/setup-go with go-version-file) both honor this
 // directive and auto-select/install it.
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
