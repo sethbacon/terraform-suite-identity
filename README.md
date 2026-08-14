@@ -162,7 +162,7 @@ with **four documented exceptions** — a seed-data `UPDATE` (`000002`), in-plac
 [docs/schema.md](docs/schema.md).
 
 Requires **Go 1.25** or newer as the language floor (`go 1.25.0` in `go.mod`). `go.mod`
-also pins `toolchain go1.26.5`, which is the version CI builds and tests with; the `go`
+also pins `toolchain go1.26.6`, which is the version CI builds and tests with; the `go`
 command downloads it automatically, so a local Go 1.25 works unless you have set
 `GOTOOLCHAIN=local`.
 
