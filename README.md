@@ -29,6 +29,7 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 | `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. Ships `ChannelTableDDL` (the canonical table definition, for the app's own migration set) and `VerifyChannelTable` (the startup shape assertion). |
 | `identity/mailer`    | An SMTP transport hardened against opportunistic-TLS downgrade, used to deliver notifications. TLS is the zero value (`TLSMode`); plaintext must be named. |
 | `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. |
+| `identity/platformadmin` | The platform-admin **carrier**: who administers **one app**, resolved per request rather than claimed in a token. `Carrier` reads and writes a grant table the app owns (`New(db, "registry.platform_admins")`), `SessionScopes` elevates a live session, `KeyScopes` guarantees an API key never inherits it, and `Revoke` refuses to remove the last exercisable administrator. Ships `TableDDL` and `VerifyTable`. See [docs/platform-admin.md](docs/platform-admin.md). |
 
 The `notification_channels` table `identity/notify` reads is **owned by the consuming
 app**, not created by this module's migrations. The shape is not prose you transcribe:
@@ -39,6 +40,16 @@ columns, types and nullability the statements require and returns the schema-qua
 the repository will actually read. See the [schema reference](docs/schema.md#tables) for why
 the module ships no migration for it, and [UPGRADING.md](UPGRADING.md) for the consumer
 steps.
+
+The `platform_admins` table `identity/platformadmin` reads is **app-owned for a different
+reason**: it is not shared identity at all. Who administers an application is a per-app
+authorization fact, so each app keeps its own table in its own schema and two apps sharing
+one identity store keep two independent administrator populations — including two
+independent floor locks, derived from the table name. Apply
+**`platformadmin.TableDDL("<your schema>.platform_admins")`** from your own migration set
+and call **`carrier.VerifyTable(ctx)`** at startup. See
+[docs/platform-admin.md](docs/platform-admin.md) for the table shape, the mandatory audit
+and floor arguments, and why the table carries no foreign keys to `identity.*`.
 
 ## Canonical identity model
 
