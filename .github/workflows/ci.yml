@@ -317,7 +317,16 @@ jobs:
         # at runtime, so a pinned binary still reports newly disclosed
         # advisories. Dependabot does not bump this pin (it is not a module
         # dependency); refresh it deliberately.
+        #
+        # Findings are triaged rather than gated on directly: govulncheck exits
+        # non-zero for ANY reachable vulnerability, including one with no
+        # released fix, and gating on those pins the check red until upstream
+        # ships no matter what the PR changed. scripts/govulncheck_triage.py
+        # fails only on advisories that publish a fixed version, and warns on
+        # the rest. In JSON mode govulncheck itself exits 0 when it finds
+        # something, so a non-zero here is a real scanner failure.
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           export PATH="$PATH:$(go env GOPATH)/bin"
-          govulncheck ./...
+          govulncheck -format json ./... > govulncheck-results.json
+          python3 scripts/govulncheck_triage.py govulncheck-results.json
