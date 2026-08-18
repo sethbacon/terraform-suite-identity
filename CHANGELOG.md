@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.28.0...v0.28.1) (2026-08-18)
+
+
+### Security
+
+* triage govulncheck findings instead of gating on unfixable ones ([#214](https://github.com/sethbacon/terraform-suite-identity/issues/214)) ([525cf40](https://github.com/sethbacon/terraform-suite-identity/commit/525cf40cfc00ae496eae5c0e3e6d930267218597))
+
 ## [0.28.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.27.2...v0.28.0) (2026-08-14)
 
 
