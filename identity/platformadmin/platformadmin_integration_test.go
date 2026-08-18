@@ -48,7 +48,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
 )
 
 // carrierTable is schema-qualified deliberately: it exercises the parameterised
@@ -87,7 +89,7 @@ func carrierTestDB(t *testing.T) *sql.DB {
 	}
 	name := base + "_platformadmin"
 
-	admin, err := sql.Open("postgres", dsn)
+	admin, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("failed to open the administrative connection: %v", err)
 	}
@@ -95,9 +97,9 @@ func carrierTestDB(t *testing.T) *sql.DB {
 	if err := admin.Ping(); err != nil {
 		t.Skipf("Postgres not reachable at TEST_DATABASE_URL: %v", err)
 	}
-	if _, err := admin.Exec(`CREATE DATABASE ` + pq.QuoteIdentifier(name)); err != nil {
+	if _, err := admin.Exec(`CREATE DATABASE ` + pgquote.Identifier(name)); err != nil {
 		// 42P04 duplicate_database: a previous run already created it.
-		var pgErr *pq.Error
+		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "42P04" {
 			t.Fatalf("failed to create the %q test database (the role needs CREATEDB): %v", name, err)
 		}
@@ -105,7 +107,7 @@ func carrierTestDB(t *testing.T) *sql.DB {
 
 	target := *parsed
 	target.Path = "/" + name
-	db, err := sql.Open("postgres", target.String())
+	db, err := sql.Open("pgx", target.String())
 	if err != nil {
 		t.Fatalf("failed to open %q: %v", name, err)
 	}

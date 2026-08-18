@@ -27,7 +27,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/lib/pq"
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
 )
 
 // ErrInvalidTable is the sentinel every table-name rejection wraps. A caller
@@ -111,9 +111,9 @@ func (t table) String() string {
 // table legitimately named `user` or `order` from parsing as a keyword.
 func (t table) sql() string {
 	if t.schema == "" {
-		return pq.QuoteIdentifier(t.name)
+		return pgquote.Identifier(t.name)
 	}
-	return pq.QuoteIdentifier(t.schema) + "." + pq.QuoteIdentifier(t.name)
+	return pgquote.Identifier(t.schema) + "." + pgquote.Identifier(t.name)
 }
 
 // derive returns a sibling object name in this table's schema — the generated

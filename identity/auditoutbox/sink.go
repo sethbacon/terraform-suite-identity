@@ -46,7 +46,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
 )
 
 // ErrOutboxShape is the sentinel an outbox-table shape failure wraps.
@@ -171,7 +172,7 @@ func (s *TableSink) Deliver(ctx context.Context, intent Intent) error {
 		// this process was running. Discard the plan so the next attempt
 		// re-probes and can actually succeed, instead of failing identically
 		// until a restart.
-		var pgErr *pq.Error
+		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "42703" {
 			s.invalidate()
 		}
@@ -226,7 +227,7 @@ func (s *TableSink) plan(ctx context.Context) (string, []func(Intent) (interface
 			}
 			continue
 		}
-		names = append(names, pq.QuoteIdentifier(column.name))
+		names = append(names, pgquote.Identifier(column.name))
 		placeholders = append(placeholders, "$"+strconv.Itoa(len(names)))
 		extract = append(extract, column.value)
 	}

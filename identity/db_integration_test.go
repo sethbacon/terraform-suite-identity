@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgtype"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // Migration versions this test pins deliberately, because it asserts on the
@@ -75,7 +76,7 @@ func TestIntegrationRunMigrations(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("failed to open database connection: %v", err)
 	}
@@ -521,7 +522,7 @@ func assertTextArrayScopes(t *testing.T, db *sql.DB, query string, want []string
 	t.Helper()
 
 	var got []string
-	if err := db.QueryRow(query).Scan(pq.Array(&got)); err != nil {
+	if err := db.QueryRow(query).Scan(pgtype.NewMap().SQLScanner(&got)); err != nil {
 		t.Fatalf("query %q failed: %v", query, err)
 	}
 
@@ -583,7 +584,7 @@ func TestIntegrationRunMigrationsReleasesPooledConnections(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("failed to open database connection: %v", err)
 	}

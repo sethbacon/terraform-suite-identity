@@ -6,11 +6,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
-
-	"github.com/lib/pq"
 
 	"github.com/sethbacon/terraform-suite-identity/identity"
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
@@ -270,15 +267,15 @@ func TestIntegrationUserDeleteDoesNotRehomeItsRows(t *testing.T) {
 	// NULL). The service key is the control: it must survive untouched, because
 	// the point is that the two shapes stop being confusable, not that NULL
 	// user_id becomes illegal.
-	personal := scanUUID(t, db, fmt.Sprintf(
+	personal := scanUUID(t, db,
 		`INSERT INTO identity.api_keys (organization_id, user_id, name, key_hash, key_prefix)
-		 VALUES (%s, %s, 'personal', 'h1', 'p1') RETURNING id`,
-		pq.QuoteLiteral(org), pq.QuoteLiteral(user)))
-	service := scanUUID(t, db, fmt.Sprintf(
+		 VALUES ($1, $2, 'personal', 'h1', 'p1') RETURNING id`,
+		org, user)
+	service := scanUUID(t, db,
 		`INSERT INTO identity.api_keys (organization_id, user_id, name, key_hash, key_prefix)
-		 VALUES (%s, NULL, 'service', 'h2', 'p2') RETURNING id`, pq.QuoteLiteral(org)))
+		 VALUES ($1, NULL, 'service', 'h2', 'p2') RETURNING id`, org)
 
-	mustExec(t, db, fmt.Sprintf(`DELETE FROM identity.users WHERE id = %s`, pq.QuoteLiteral(user)))
+	mustExec(t, db, `DELETE FROM identity.users WHERE id = $1`, user)
 
 	t.Run("audit attribution survives the actor", func(t *testing.T) {
 		var actor *string
@@ -385,7 +382,7 @@ func TestIntegrationRoleTemplateDeleteLeavesTheMemberFailClosed(t *testing.T) {
 		t.Fatalf("fixture did not grant the template's scopes: %v", scopes)
 	}
 
-	mustExec(t, db, fmt.Sprintf(`DELETE FROM identity.role_templates WHERE id = %s`, pq.QuoteLiteral(tmpl)))
+	mustExec(t, db, `DELETE FROM identity.role_templates WHERE id = $1`, tmpl)
 
 	scopes, err = orgs.GetUserScopesForOrg(ctx, user, org)
 	if err != nil {
@@ -428,8 +425,8 @@ func TestIntegrationDeleteRehomingRollbackHandlesRetainedHistory(t *testing.T) {
 		`INSERT INTO identity.users (email, name) VALUES ('rollback@example.test', 'R') RETURNING id`)
 	seedAudit(t, db, &org, &user, "rollback.subject")
 
-	mustExec(t, db, fmt.Sprintf(`DELETE FROM identity.organizations WHERE id = %s`, pq.QuoteLiteral(org)))
-	mustExec(t, db, fmt.Sprintf(`DELETE FROM identity.users WHERE id = %s`, pq.QuoteLiteral(user)))
+	mustExec(t, db, `DELETE FROM identity.organizations WHERE id = $1`, org)
+	mustExec(t, db, `DELETE FROM identity.users WHERE id = $1`, user)
 
 	// Both columns now hold ids that resolve to nothing — the state the down
 	// migration has to repair before it can restore the constraints.

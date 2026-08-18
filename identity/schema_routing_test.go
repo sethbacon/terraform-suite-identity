@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgxparam"
 )
 
 var errRouting = errors.New("connection reset by peer")
@@ -37,7 +39,7 @@ func expectRouting(mock sqlmock.Sqlmock, searchPath string, rows *sqlmock.Rows) 
 
 func newRoutingDB(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := sqlmock.New(sqlmock.ValueConverterOption(pgxparam.Converter{}))
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

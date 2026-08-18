@@ -4,12 +4,9 @@ package store
 
 import (
 	"database/sql"
-	"fmt"
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/lib/pq"
 
 	"github.com/sethbacon/terraform-suite-identity/identity"
 )
@@ -288,7 +285,7 @@ func assertAuditExportPlan(t *testing.T, db *sql.DB) {
 		ORDER BY al.created_at ASC`
 
 	plan := explain(t, db, query,
-		"1970-01-01T00:00:00Z", "2999-01-01T00:00:00Z", pq.Array([]string{coldOrg}))
+		"1970-01-01T00:00:00Z", "2999-01-01T00:00:00Z", []string{coldOrg})
 	assertPlanUsesIndex(t, "the scoped audit export stream",
 		"idx_identity_audit_logs_org_created_at", plan)
 }
@@ -315,7 +312,7 @@ func assertMembershipPlans(t *testing.T, db *sql.DB) {
 	// loadMembershipsForUsers batches the same predicate as `= ANY($1)`.
 	plan = explain(t, db, `
 		SELECT om.user_id, om.organization_id FROM organization_members om
-		WHERE om.user_id = ANY($1)`, pq.Array([]string{userID}))
+		WHERE om.user_id = ANY($1)`, []string{userID})
 	assertPlanUsesIndex(t, "loadMembershipsForUsers", "idx_identity_organization_members_user_id", plan)
 
 	// GetUserOrganizations joins on the same column.
@@ -406,21 +403,21 @@ func TestIntegrationHotPathIndexCascades(t *testing.T) {
 	// delete cascades through organization_members, revoked_tokens and api_keys.
 	orgID := scanUUID(t, db, `INSERT INTO identity.organizations (name) VALUES ('cascade-org') RETURNING id`)
 	userID := scanUUID(t, db, `INSERT INTO identity.users (email, name) VALUES ('cascade@example.test', 'c') RETURNING id`)
-	mustExec(t, db, fmt.Sprintf(
-		`INSERT INTO identity.organization_members (organization_id, user_id) VALUES (%s, %s)`,
-		pq.QuoteLiteral(orgID), pq.QuoteLiteral(userID)))
-	mustExec(t, db, fmt.Sprintf(
+	mustExec(t, db,
+		`INSERT INTO identity.organization_members (organization_id, user_id) VALUES ($1, $2)`,
+		orgID, userID)
+	mustExec(t, db,
 		`INSERT INTO identity.api_keys (organization_id, user_id, name, key_hash, key_prefix)
-		 VALUES (%s, %s, 'k', 'h', 'p')`, pq.QuoteLiteral(orgID), pq.QuoteLiteral(userID)))
-	mustExec(t, db, fmt.Sprintf(
-		`INSERT INTO identity.audit_logs (organization_id, user_id, action) VALUES (%s, %s, 'a')`,
-		pq.QuoteLiteral(orgID), pq.QuoteLiteral(userID)))
-	mustExec(t, db, fmt.Sprintf(
+		 VALUES ($1, $2, 'k', 'h', 'p')`, orgID, userID)
+	mustExec(t, db,
+		`INSERT INTO identity.audit_logs (organization_id, user_id, action) VALUES ($1, $2, 'a')`,
+		orgID, userID)
+	mustExec(t, db,
 		`INSERT INTO identity.revoked_tokens (jti, user_id, expires_at)
-		 VALUES (gen_random_uuid(), %s, NOW() + INTERVAL '1 hour')`, pq.QuoteLiteral(userID)))
+		 VALUES (gen_random_uuid(), $1, NOW() + INTERVAL '1 hour')`, userID)
 
-	mustExec(t, db, fmt.Sprintf(`DELETE FROM identity.organizations WHERE id = %s`, pq.QuoteLiteral(orgID)))
-	mustExec(t, db, fmt.Sprintf(`DELETE FROM identity.users WHERE id = %s`, pq.QuoteLiteral(userID)))
+	mustExec(t, db, `DELETE FROM identity.organizations WHERE id = $1`, orgID)
+	mustExec(t, db, `DELETE FROM identity.users WHERE id = $1`, userID)
 
 	var remaining int
 	if err := db.QueryRow(`SELECT count(*) FROM identity.revoked_tokens`).Scan(&remaining); err != nil {

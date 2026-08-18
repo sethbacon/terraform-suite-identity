@@ -69,8 +69,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lib/pq"
-
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
 	"github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
@@ -287,7 +286,7 @@ func quoteTable(table string) (string, error) {
 			return "", fmt.Errorf("%w: %q in table name %q is %d bytes, over Postgres's %d-byte limit",
 				ErrNotConfigured, p, table, len(p), maxIdentifierLen)
 		}
-		quoted = append(quoted, pq.QuoteIdentifier(p))
+		quoted = append(quoted, pgquote.Identifier(p))
 	}
 	return strings.Join(quoted, "."), nil
 }

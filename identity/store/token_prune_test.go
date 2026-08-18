@@ -223,7 +223,7 @@ func TestClaimPruneSlot_ExactlyOneConcurrentWinner(t *testing.T) {
 func TestRevokeToken_ConcurrentRevocationsAreRaceFree(t *testing.T) {
 	const goroutines = 16
 
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

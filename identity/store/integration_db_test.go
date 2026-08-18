@@ -10,9 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/sethbacon/terraform-suite-identity/identity"
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
 )
 
 // Shared setup for this package's PostgreSQL-backed tests.
@@ -36,7 +38,7 @@ func identityTestDB(t *testing.T) *sql.DB {
 
 	target := storeTestDSN(t, dsn)
 
-	admin, err := sql.Open("postgres", dsn)
+	admin, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("failed to open the administrative connection: %v", err)
 	}
@@ -44,16 +46,16 @@ func identityTestDB(t *testing.T) *sql.DB {
 	if err := admin.Ping(); err != nil {
 		t.Fatalf("failed to reach the database at TEST_DATABASE_URL: %v", err)
 	}
-	if _, err := admin.Exec(`CREATE DATABASE ` + pq.QuoteIdentifier(target.name)); err != nil {
+	if _, err := admin.Exec(`CREATE DATABASE ` + pgquote.Identifier(target.name)); err != nil {
 		// 42P04 duplicate_database: a previous run already created it.
-		var pgErr *pq.Error
+		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "42P04" {
 			t.Fatalf("failed to create the %q test database (the role needs CREATEDB): %v",
 				target.name, err)
 		}
 	}
 
-	db, err := sql.Open("postgres", target.dsn)
+	db, err := sql.Open("pgx", target.dsn)
 	if err != nil {
 		t.Fatalf("failed to open %q: %v", target.name, err)
 	}
@@ -143,10 +145,10 @@ func assertPlanUsesIndex(t *testing.T, what, index, plan string) {
 		"Plan was:\n%s", what, index, plan)
 }
 
-func mustExec(t *testing.T, db *sql.DB, statement string) {
+func mustExec(t *testing.T, db *sql.DB, statement string, args ...interface{}) {
 	t.Helper()
 
-	if _, err := db.Exec(statement); err != nil {
+	if _, err := db.Exec(statement, args...); err != nil {
 		t.Fatalf("statement failed: %v\n%s", err, statement)
 	}
 }
