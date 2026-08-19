@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.28.1...v0.29.0) (2026-08-19)
+
+
+### ci
+
+* allow the deps and security PR title types the release config expects ([#218](https://github.com/sethbacon/terraform-suite-identity/issues/218)) ([07bed04](https://github.com/sethbacon/terraform-suite-identity/commit/07bed04e1072d7f7e8d7533a695c57197a19dd3b))
+
 ## [0.28.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.28.0...v0.28.1) (2026-08-18)
 
 
