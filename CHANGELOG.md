@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.29.0...v0.30.0) (2026-08-19)
+
+
+### Features
+
+* **pgxparam:** export the mock value converter consumers need ([#221](https://github.com/sethbacon/terraform-suite-identity/issues/221)) ([992beec](https://github.com/sethbacon/terraform-suite-identity/commit/992beec788bf82f457211fa5c08dd6550c2e5307))
+
 ## [0.29.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.28.1...v0.29.0) (2026-08-19)
 
 
