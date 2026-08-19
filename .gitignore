@@ -8,3 +8,6 @@ gosec-results.json
 .vscode/
 *.swp
 .DS_Store
+
+# Node (CI tooling only, under .github/; the lockfile itself is tracked)
+node_modules/
