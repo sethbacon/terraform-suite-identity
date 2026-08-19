@@ -213,11 +213,21 @@ func TestReadmePackageTableListsEveryPackage(t *testing.T) {
 		// cell is the import path in backticks. A passing prose reference
 		// elsewhere in the README is not the inventory a reader scans.
 		row := regexp.MustCompile(`(?m)^\|\s*` + "`" + regexp.QuoteMeta(p) + "`" + `\s*\|`)
-		if !row.MatchString(readme) {
+		switch n := len(row.FindAllString(readme, -1)); {
+		case n == 0:
 			t.Errorf("package %s is importable by consumers but has no row in README.md's "+
 				"package table (a prose mention elsewhere does not count).\n"+
 				"Add a row whose first cell is the backticked import path, plus a usage "+
 				"example if it has a public API.", p)
+		case n > 1:
+			// Two concurrent PRs each added a row for identity/mailer and
+			// identity/notify five minutes apart, and neither noticed the other.
+			// The duplicates disagreed, so the table said two different things
+			// about the same package for twelve days.
+			t.Errorf("package %s has %d rows in README.md's package table; a reader "+
+				"scanning the inventory cannot tell which is current.\n"+
+				"Keep one, and prefer whichever description is still true of the "+
+				"code rather than whichever landed last.", p, n)
 		}
 	}
 }
