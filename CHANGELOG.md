@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.30.0...v0.30.1) (2026-08-19)
+
+
+### Documentation
+
+* one row per package in the README table, and a guard that keeps it that way ([#223](https://github.com/sethbacon/terraform-suite-identity/issues/223)) ([4b83476](https://github.com/sethbacon/terraform-suite-identity/commit/4b83476cf654117b9adfd04a5b5e07806f2f44a9))
+
 ## [0.30.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.29.0...v0.30.0) (2026-08-19)
 
 
