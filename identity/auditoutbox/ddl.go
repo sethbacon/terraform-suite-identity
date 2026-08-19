@@ -36,7 +36,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lib/pq"
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
 )
 
 // assertIntentSuffix and requireIntentSuffix name the generated functions.
@@ -83,7 +83,7 @@ func OutboxDDL(outboxTable string) (string, error) {
 	}
 
 	name := t.sql()
-	return `-- Rendered by identity/auditoutbox.OutboxDDL(` + pq.QuoteLiteral(t.String()) + `).
+	return `-- Rendered by identity/auditoutbox.OutboxDDL(` + pgquote.Literal(t.String()) + `).
 -- The transactional audit outbox: an audit INTENT written in the same
 -- transaction as the privileged mutation it describes, delivered afterwards.
 CREATE TABLE IF NOT EXISTS ` + name + ` (
@@ -116,16 +116,16 @@ CREATE TABLE IF NOT EXISTS ` + name + ` (
 
 -- The relay's claim scan. Partial, on the undelivered rows only, so it stays
 -- small no matter how much delivered history has yet to be pruned.
-CREATE INDEX IF NOT EXISTS ` + pq.QuoteIdentifier(pendingIdx.name) + `
+CREATE INDEX IF NOT EXISTS ` + pgquote.Identifier(pendingIdx.name) + `
     ON ` + name + ` (occurred_at, event_id) WHERE delivered_at IS NULL;
 
 -- The pruner's scan over delivered history.
-CREATE INDEX IF NOT EXISTS ` + pq.QuoteIdentifier(deliveredIdx.name) + `
+CREATE INDEX IF NOT EXISTS ` + pgquote.Identifier(deliveredIdx.name) + `
     ON ` + name + ` (delivered_at) WHERE delivered_at IS NOT NULL;
 
 -- The trigger's same-transaction lookup. Every commit that touches a guarded
 -- table runs it, so it is not optional.
-CREATE INDEX IF NOT EXISTS ` + pq.QuoteIdentifier(txidIdx.name) + `
+CREATE INDEX IF NOT EXISTS ` + pgquote.Identifier(txidIdx.name) + `
     ON ` + name + ` (txid, resource_type, resource_id);
 
 -- Raises unless the CURRENT transaction has already written an intent naming
@@ -221,13 +221,13 @@ func (s TriggerSpec) DDL() (string, error) {
 
 	var events []string
 	var branches []string
-	subject := pq.QuoteIdentifier(s.SubjectColumn)
-	resource := pq.QuoteLiteral(s.ResourceType)
+	subject := pgquote.Identifier(s.SubjectColumn)
+	resource := pgquote.Literal(s.ResourceType)
 
 	if s.OnInsert != "" {
 		events = append(events, "INSERT")
 		branches = append(branches, `    IF TG_OP = 'INSERT' THEN
-        PERFORM `+assert.sql()+`(NEW.`+subject+`::text, `+resource+`, `+pq.QuoteLiteral(s.OnInsert)+`);
+        PERFORM `+assert.sql()+`(NEW.`+subject+`::text, `+resource+`, `+pgquote.Literal(s.OnInsert)+`);
     END IF;
 `)
 	}
@@ -237,9 +237,9 @@ func (s TriggerSpec) DDL() (string, error) {
 		// otherwise the row could be moved to a different principal under one
 		// record.
 		branches = append(branches, `    IF TG_OP = 'UPDATE' THEN
-        PERFORM `+assert.sql()+`(OLD.`+subject+`::text, `+resource+`, `+pq.QuoteLiteral(s.OnUpdate)+`);
+        PERFORM `+assert.sql()+`(OLD.`+subject+`::text, `+resource+`, `+pgquote.Literal(s.OnUpdate)+`);
         IF NEW.`+subject+` IS DISTINCT FROM OLD.`+subject+` THEN
-            PERFORM `+assert.sql()+`(NEW.`+subject+`::text, `+resource+`, `+pq.QuoteLiteral(s.OnUpdate)+`);
+            PERFORM `+assert.sql()+`(NEW.`+subject+`::text, `+resource+`, `+pgquote.Literal(s.OnUpdate)+`);
         END IF;
     END IF;
 `)
@@ -247,7 +247,7 @@ func (s TriggerSpec) DDL() (string, error) {
 	if s.OnDelete != "" {
 		events = append(events, "DELETE")
 		branches = append(branches, `    IF TG_OP = 'DELETE' THEN
-        PERFORM `+assert.sql()+`(OLD.`+subject+`::text, `+resource+`, `+pq.QuoteLiteral(s.OnDelete)+`);
+        PERFORM `+assert.sql()+`(OLD.`+subject+`::text, `+resource+`, `+pgquote.Literal(s.OnDelete)+`);
     END IF;
 `)
 	}
@@ -264,8 +264,8 @@ $$ LANGUAGE plpgsql;
 -- DEFERRABLE INITIALLY DEFERRED: the check runs at COMMIT, so the mutation and
 -- its intent may be written in either order within the transaction, and the
 -- failure aborts the commit rather than one statement.
-DROP TRIGGER IF EXISTS ` + pq.QuoteIdentifier(fn.name) + ` ON ` + guarded.sql() + `;
-CREATE CONSTRAINT TRIGGER ` + pq.QuoteIdentifier(fn.name) + `
+DROP TRIGGER IF EXISTS ` + pgquote.Identifier(fn.name) + ` ON ` + guarded.sql() + `;
+CREATE CONSTRAINT TRIGGER ` + pgquote.Identifier(fn.name) + `
     AFTER ` + strings.Join(events, " OR ") + ` ON ` + guarded.sql() + `
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION ` + fn.sql() + `();
@@ -280,7 +280,7 @@ func (s TriggerSpec) DropDDL() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return `DROP TRIGGER IF EXISTS ` + pq.QuoteIdentifier(fn.name) + ` ON ` + guarded.sql() + `;
+	return `DROP TRIGGER IF EXISTS ` + pgquote.Identifier(fn.name) + ` ON ` + guarded.sql() + `;
 DROP FUNCTION IF EXISTS ` + fn.sql() + `();
 `, nil
 }

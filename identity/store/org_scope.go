@@ -52,8 +52,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/lib/pq"
-
 	"github.com/sethbacon/terraform-suite-identity/identity/auth"
 )
 
@@ -254,9 +252,9 @@ func (s OrgScope) SQL(column string, paramIndex int) (string, []interface{}) {
 	}
 	if s.unowned {
 		return fmt.Sprintf("(%s = ANY($%d) OR %s IS NULL)", column, paramIndex, column),
-			[]interface{}{pq.Array(s.orgIDs)}
+			[]interface{}{s.orgIDs}
 	}
-	return fmt.Sprintf("%s = ANY($%d)", column, paramIndex), []interface{}{pq.Array(s.orgIDs)}
+	return fmt.Sprintf("%s = ANY($%d)", column, paramIndex), []interface{}{s.orgIDs}
 }
 
 // membershipSQL returns the boolean expression that constrains a USERS-table row
@@ -299,7 +297,7 @@ func (s OrgScope) membershipSQL(userColumn string, paramIndex int) (string, []in
 	inScope := fmt.Sprintf(
 		"EXISTS (SELECT 1 FROM organization_members osm WHERE osm.user_id = %s AND osm.organization_id = ANY($%d))",
 		userColumn, paramIndex)
-	args := []interface{}{pq.Array(s.orgIDs)}
+	args := []interface{}{s.orgIDs}
 	if s.unowned {
 		return "(" + inScope + " OR " + notAMember + ")", args
 	}

@@ -125,7 +125,7 @@ func TestGetUserWithOrgRolesAndGetUserMembershipsIssueIdenticalSQL(t *testing.T)
 	// Each method must issue exactly userMembershipByUserQuery: the expectation
 	// below is the whitespace-normalized constant, quoted so sqlmock's regexp
 	// matcher compares it literally rather than as a loose pattern.
-	db1, mock1, _ := sqlmock.New()
+	db1, mock1, _ := newSQLMock()
 	defer db1.Close()
 	mock1.ExpectQuery(`SELECT id, email, name, oidc_sub`).
 		WillReturnRows(sqlmock.NewRows(membershipTestUserCols).
@@ -140,7 +140,7 @@ func TestGetUserWithOrgRolesAndGetUserMembershipsIssueIdenticalSQL(t *testing.T)
 		t.Errorf("GetUserWithOrgRoles did not issue userMembershipByUserQuery: %v", err)
 	}
 
-	db2, mock2, _ := sqlmock.New()
+	db2, mock2, _ := newSQLMock()
 	defer db2.Close()
 	mock2.ExpectQuery(regexp.QuoteMeta(whitespace(userMembershipByUserQuery))).
 		WithArgs("u1").
@@ -174,7 +174,7 @@ func TestMembershipScanErrorWording(t *testing.T) {
 			name: "UserRepository.GetUserWithOrgRoles",
 			want: "failed to scan membership: ",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`SELECT id, email, name, oidc_sub`).
 					WillReturnRows(sqlmock.NewRows(membershipTestUserCols).
@@ -190,7 +190,7 @@ func TestMembershipScanErrorWording(t *testing.T) {
 			name: "UserRepository.loadMembershipsForUsers (via ListUsersWithMemberships)",
 			want: "failed to scan membership: ",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`SELECT COUNT\(\*\) FROM users`).
 					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -208,7 +208,7 @@ func TestMembershipScanErrorWording(t *testing.T) {
 			name: "OrganizationRepository.GetUserMemberships",
 			want: "failed to scan membership: ",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(userMembershipCols).
@@ -221,7 +221,7 @@ func TestMembershipScanErrorWording(t *testing.T) {
 			name: "OrganizationRepository.GetMemberWithRole",
 			want: "failed to get member: ",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols).
@@ -234,7 +234,7 @@ func TestMembershipScanErrorWording(t *testing.T) {
 			name: "OrganizationRepository.ListMembersWithUsers",
 			want: "failed to scan member: ",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols).
@@ -276,7 +276,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 		{
 			name: "UserRepository.GetUserWithOrgRoles",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`SELECT id, email, name, oidc_sub`).
 					WillReturnRows(sqlmock.NewRows(membershipTestUserCols).
@@ -291,7 +291,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 		{
 			name: "UserRepository.loadMembershipsForUsers (via SearchWithMemberships)",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`FROM users`).
 					WillReturnRows(sqlmock.NewRows(membershipTestUserCols).
@@ -306,7 +306,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 		{
 			name: "OrganizationRepository.GetUserMemberships",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(userMembershipCols).
@@ -318,7 +318,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 		{
 			name: "OrganizationRepository.GetMemberWithRole (must NOT double-wrap)",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols).
@@ -330,7 +330,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 		{
 			name: "OrganizationRepository.ListMembersWithUsers",
 			run: func(t *testing.T) error {
-				db, mock, _ := sqlmock.New()
+				db, mock, _ := newSQLMock()
 				defer db.Close()
 				mock.ExpectQuery(`FROM organization_members`).
 					WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols).
@@ -360,7 +360,7 @@ func TestMembershipScopesParseErrorWording(t *testing.T) {
 // returns its Scan error unwrapped, so it is asserted directly rather than left
 // to the helper's doc comment.
 func TestGetMemberWithRoleNoRowsConvention(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, _ := newSQLMock()
 	defer db.Close()
 	mock.ExpectQuery(`FROM organization_members`).
 		WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols))
@@ -381,7 +381,7 @@ func TestGetMemberWithRoleNoRowsConvention(t *testing.T) {
 // of the same contract, so a change to the helper is caught even if no caller
 // happens to exercise it.
 func TestScanOrgMemberWithUserReturnsErrNoRowsUnwrapped(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, _ := newSQLMock()
 	defer db.Close()
 	mock.ExpectQuery(`SELECT`).WillReturnRows(sqlmock.NewRows(orgMembersWithUserCols))
 
@@ -416,7 +416,7 @@ func TestUnmarshalRoleTemplateScopesEmptyIsNotAnError(t *testing.T) {
 // om.user_id column is what attaches each row to its user, and it is the only
 // use of scanUserMembership's variadic leading-destination parameter.
 func TestLoadMembershipsForUsersAttributesRowsToTheRightUser(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, _ := newSQLMock()
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM users`).

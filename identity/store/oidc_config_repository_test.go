@@ -17,7 +17,7 @@ var errOIDCDB = errors.New("oidc db error")
 
 func newOIDCConfigRepo(t *testing.T) (*OIDCConfigRepository, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

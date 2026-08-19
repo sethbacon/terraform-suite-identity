@@ -20,7 +20,7 @@ var sampleRoleScopes = []byte(`["admin","users:read"]`)
 
 func newRoleTemplateRepo(t *testing.T) (*RoleTemplateRepository, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

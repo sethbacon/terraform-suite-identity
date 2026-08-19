@@ -11,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
 )
 
 // These tests run against their OWN database, derived from TEST_DATABASE_URL by
@@ -40,7 +42,7 @@ func routingTestDB(t *testing.T) (name, baseDSN string) {
 	}
 	name = base + routingTestSuffix
 
-	admin, err := sql.Open("postgres", dsn)
+	admin, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("failed to open the administrative connection: %v", err)
 	}
@@ -48,8 +50,8 @@ func routingTestDB(t *testing.T) (name, baseDSN string) {
 	if err := admin.Ping(); err != nil {
 		t.Fatalf("failed to reach the database at TEST_DATABASE_URL: %v", err)
 	}
-	if _, err := admin.Exec(`CREATE DATABASE ` + pq.QuoteIdentifier(name)); err != nil {
-		var pgErr *pq.Error
+	if _, err := admin.Exec(`CREATE DATABASE ` + pgquote.Identifier(name)); err != nil {
+		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "42P04" { // duplicate_database
 			t.Fatalf("failed to create the %q test database (the role needs CREATEDB): %v", name, err)
 		}
@@ -75,7 +77,7 @@ func routingConn(t *testing.T, baseDSN, searchPath string) *sql.DB {
 		q.Set("search_path", searchPath)
 		parsed.RawQuery = q.Encode()
 	}
-	db, err := sql.Open("postgres", parsed.String())
+	db, err := sql.Open("pgx", parsed.String())
 	if err != nil {
 		t.Fatalf("failed to open the test database: %v", err)
 	}

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 )
 
@@ -28,7 +28,7 @@ func NewUserRepository(db *sql.DB) *UserRepository {
 // isUniqueViolation reports whether err is a Postgres unique-constraint
 // violation (SQLSTATE 23505).
 func isUniqueViolation(err error) bool {
-	var pqErr *pq.Error
+	var pqErr *pgconn.PgError
 	return errors.As(err, &pqErr) && pqErr.Code == "23505"
 }
 
@@ -668,7 +668,7 @@ func (r *UserRepository) loadMembershipsForUsers(ctx context.Context, users []*m
 	// of GetUserWithOrgRoles' second statement, and an unscoped bulk form beside
 	// a scoped single form is how a fix half-lands.
 	// See membership.go for the shared query constant and scan helper.
-	query, args := andScope(userMembershipByUserIDsQuery, scope, "om.organization_id", []interface{}{pq.Array(userIDs)})
+	query, args := andScope(userMembershipByUserIDsQuery, scope, "om.organization_id", []interface{}{userIDs})
 	rows, err := r.db.QueryContext(ctx, query+userMembershipBulkOrderBy, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load memberships for users: %w", err)

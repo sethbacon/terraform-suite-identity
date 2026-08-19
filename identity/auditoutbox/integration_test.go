@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
 )
 
 // The evidence, against a real PostgreSQL rather than a mock.
@@ -116,7 +118,7 @@ func outboxTestDB(t *testing.T, destinationDDL string) (*sql.DB, string) {
 	}
 	name := base + "_auditoutbox"
 
-	admin, err := sql.Open("postgres", raw)
+	admin, err := sql.Open("pgx", raw)
 	if err != nil {
 		t.Fatalf("failed to open the administrative connection: %v", err)
 	}
@@ -124,8 +126,8 @@ func outboxTestDB(t *testing.T, destinationDDL string) (*sql.DB, string) {
 	if err := admin.Ping(); err != nil {
 		t.Fatalf("failed to reach the database at TEST_DATABASE_URL: %v", err)
 	}
-	if _, err := admin.Exec(`CREATE DATABASE ` + pq.QuoteIdentifier(name)); err != nil {
-		var pgErr *pq.Error
+	if _, err := admin.Exec(`CREATE DATABASE ` + pgquote.Identifier(name)); err != nil {
+		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "42P04" { // duplicate_database
 			t.Fatalf("failed to create the %q test database (the role needs CREATEDB): %v", name, err)
 		}
@@ -135,7 +137,7 @@ func outboxTestDB(t *testing.T, destinationDDL string) (*sql.DB, string) {
 	target.Path = "/" + name
 	dsn := target.String()
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("failed to open %q: %v", name, err)
 	}
@@ -272,7 +274,7 @@ func TestIntegrationUnauditedMutationCannotCommit(t *testing.T) {
 	if !strings.Contains(err.Error(), "no audit intent in this transaction") {
 		t.Fatalf("commit failed with %v, want the audit-intent refusal", err)
 	}
-	var pgErr *pq.Error
+	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
 		t.Errorf("refusal carried SQLSTATE %v, want 23514 (check_violation)", err)
 	}
@@ -523,7 +525,7 @@ func TestIntegrationRelayCrashMidFlightLosesNothingAndDuplicatesNothing(t *testi
 
 	// A single-connection pool for the relay, so the backend to terminate is
 	// known exactly rather than guessed at from pg_stat_activity.
-	relayPool, err := sql.Open("postgres", dsn)
+	relayPool, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open(relay pool): %v", err)
 	}
@@ -751,7 +753,7 @@ func TestIntegrationSinkDeliversAgainstAPre000007Destination(t *testing.T) {
 
 	// The premise's other half: the unconditional write really does fail here.
 	_, err := db.Exec(`INSERT INTO app.activity_log (id, action, actor_email) VALUES ($1, 'x', 'y')`, newUUID(t))
-	var pgErr *pq.Error
+	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "42703" {
 		t.Fatalf("writing actor_email to this destination returned %v, want 42703 undefined_column — "+
 			"without that this test is not covering the failure it claims to", err)
@@ -797,7 +799,7 @@ func TestIntegrationVerifyReportsWhereUnqualifiedNamesResolve(t *testing.T) {
 	query.Set("search_path", testSchema)
 	routed.RawQuery = query.Encode()
 
-	db, err := sql.Open("postgres", routed.String())
+	db, err := sql.Open("pgx", routed.String())
 	if err != nil {
 		t.Fatal(err)
 	}

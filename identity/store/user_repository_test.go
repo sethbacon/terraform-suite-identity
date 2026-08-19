@@ -8,7 +8,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sethbacon/terraform-suite-identity/identity/models"
 )
 
@@ -27,7 +27,7 @@ func emptyUserRow() *sqlmock.Rows {
 
 func newUserRepo(t *testing.T) (*UserRepository, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestGetOrCreateUserFromOIDC_NewUser_ConcurrentCreateLostViaUniqueViolation(
 	// rather than a suppressed (0 rows affected) conflict. Must be treated the
 	// same way: fall back to the winner's row instead of propagating the error.
 	mock.ExpectExec("INSERT INTO users").
-		WillReturnError(&pq.Error{Code: "23505", Message: "duplicate key value violates unique constraint"})
+		WillReturnError(&pgconn.PgError{Code: "23505", Message: "duplicate key value violates unique constraint"})
 	winnerSub := "sub-race2"
 	mock.ExpectQuery("SELECT.*FROM users.*WHERE oidc_sub").
 		WithArgs("sub-race2").

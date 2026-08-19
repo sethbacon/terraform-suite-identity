@@ -43,8 +43,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/lib/pq"
 )
 
 // SchemaName is the Postgres schema this module's migrations create and
@@ -177,7 +175,7 @@ func ResolveRouting(ctx context.Context, db *sql.DB, tables ...string) (Routing,
 		return Routing{}, fmt.Errorf("%w: failed to read search_path: %w", ErrSchemaRouting, err)
 	}
 
-	rows, err := conn.QueryContext(ctx, resolveRoutingQuery, pq.Array(tables))
+	rows, err := conn.QueryContext(ctx, resolveRoutingQuery, tables)
 	if err != nil {
 		return Routing{}, fmt.Errorf("%w: failed to resolve table names: %w", ErrSchemaRouting, err)
 	}

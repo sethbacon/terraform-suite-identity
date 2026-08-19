@@ -10,7 +10,7 @@ import (
 
 func newTokenRepo(t *testing.T) (*TokenRepository, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

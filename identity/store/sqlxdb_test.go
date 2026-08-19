@@ -2,8 +2,6 @@ package store
 
 import (
 	"testing"
-
-	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
 // TestNewSqlxDBUsesThePostgresBindvarDialect pins the driver name handed to
@@ -25,7 +23,7 @@ import (
 // dialect is a property of this package rather than of whatever each caller
 // happened to pass.
 func TestNewSqlxDBUsesThePostgresBindvarDialect(t *testing.T) {
-	db, _, err := sqlmock.New()
+	db, _, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -46,7 +44,7 @@ func TestNewSqlxDBUsesThePostgresBindvarDialect(t *testing.T) {
 // second one: the wrapped handle must be backed by the very *sql.DB it was
 // given, since this package never owns (and never closes) the caller's pool.
 func TestNewSqlxDBSharesTheCallersPool(t *testing.T) {
-	db, _, err := sqlmock.New()
+	db, _, err := newSQLMock()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}

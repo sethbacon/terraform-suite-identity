@@ -9,7 +9,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The two destination shapes this package must work against, both real.
@@ -266,7 +266,7 @@ func TestAnUndefinedColumnInvalidatesTheCachedPlan(t *testing.T) {
 
 	expectDescribe(mock, "registry", wideAuditLogs)
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO "registry"."audit_logs"`)).
-		WillReturnError(&pq.Error{Code: "42703", Message: `column "actor_email" of relation "audit_logs" does not exist`})
+		WillReturnError(&pgconn.PgError{Code: "42703", Message: `column "actor_email" of relation "audit_logs" does not exist`})
 	if err := s.Deliver(context.Background(), intent); err == nil {
 		t.Fatal("Deliver succeeded against a destination that rejected the column")
 	}
@@ -291,7 +291,7 @@ func TestAnOrdinaryDeliveryFailureKeepsThePlan(t *testing.T) {
 	s, mock := newSink(t)
 	expectDescribe(mock, "registry", wideAuditLogs)
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO "registry"."audit_logs"`)).
-		WillReturnError(&pq.Error{Code: "40001", Message: "could not serialize access"})
+		WillReturnError(&pgconn.PgError{Code: "40001", Message: "could not serialize access"})
 	if err := s.Deliver(context.Background(), sampleIntent()); err == nil {
 		t.Fatal("Deliver succeeded against a failing destination")
 	}

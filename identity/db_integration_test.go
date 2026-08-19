@@ -7,13 +7,43 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgtype"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+// migrationTestDSN points the connection at a query mode that survives the
+// schema changing underneath it.
+//
+// pgx caches a prepared statement per connection by default, so re-executing a
+// query whose result type has changed fails once with SQLSTATE 0A000, "cached
+// plan must not change result type". That is precisely what this suite does on
+// purpose: it asserts a column's contents, steps the migration back down, and
+// then asserts the same column through the same SQL text with the type
+// reversed. pgx returns the error rather than retrying by design — it cannot
+// know whether a retry is safe inside a transaction or a batch — and lib/pq,
+// which kept no such cache, never raised it.
+//
+// describe_exec re-describes each statement instead of caching it, and is the
+// one mode pgx documents as safe when the schema is modified. Unlike exec it
+// keeps the binary format, so it changes nothing else about how values encode.
+func migrationTestDSN(t *testing.T, dsn string) string {
+	t.Helper()
+
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("TEST_DATABASE_URL %q is not a URL: %v", dsn, err)
+	}
+	q := parsed.Query()
+	q.Set("default_query_exec_mode", "describe_exec")
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
+}
 
 // Migration versions this test pins deliberately, because it asserts on the
 // specific DDL those migrations perform. These are NOT "the latest version" --
@@ -75,7 +105,7 @@ func TestIntegrationRunMigrations(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", migrationTestDSN(t, dsn))
 	if err != nil {
 		t.Fatalf("failed to open database connection: %v", err)
 	}
@@ -521,7 +551,7 @@ func assertTextArrayScopes(t *testing.T, db *sql.DB, query string, want []string
 	t.Helper()
 
 	var got []string
-	if err := db.QueryRow(query).Scan(pq.Array(&got)); err != nil {
+	if err := db.QueryRow(query).Scan(pgtype.NewMap().SQLScanner(&got)); err != nil {
 		t.Fatalf("query %q failed: %v", query, err)
 	}
 
@@ -583,7 +613,7 @@ func TestIntegrationRunMigrationsReleasesPooledConnections(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL integration test")
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", migrationTestDSN(t, dsn))
 	if err != nil {
 		t.Fatalf("failed to open database connection: %v", err)
 	}
