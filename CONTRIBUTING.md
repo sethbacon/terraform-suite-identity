@@ -340,6 +340,12 @@ will not be merged.
    - **Dependency review** (`pr-checks.yml`) — `fail-on-severity: moderate`.
    - **Breaking-change footers survive the squash** (`pr-checks.yml`) — fails a PR
      that declares more than one breaking change. See step 7.
+   - **release-please can read the merged commit** (`pr-checks.yml`) — rebuilds the
+     commit this PR would squash into `main` and parses it with the parser
+     release-please itself uses. A message that parser rejects is dropped in
+     silence: no changelog entry, no version bump, no `BREAKING CHANGE:` footer,
+     and no later run recovers it. The usual cause is a body line that *starts*
+     with `name(`, whose brackets must then be flat and closed.
    - **signature-replay / replay** (`signature-replay.yml`) — re-runs every
      recorded defect-class signature across the whole suite and fails when a
      class recorded as fixed matches again, or when a new instance appears that
