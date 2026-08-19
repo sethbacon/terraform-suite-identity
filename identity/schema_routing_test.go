@@ -9,7 +9,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
-	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgxparam"
+	"github.com/sethbacon/terraform-suite-identity/identity/pgxparam"
 )
 
 var errRouting = errors.New("connection reset by peer")
