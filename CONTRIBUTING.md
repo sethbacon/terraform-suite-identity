@@ -339,7 +339,12 @@ will not be merged.
    - **Conventional PR Title** (`pr-checks.yml`).
    - **Dependency review** (`pr-checks.yml`) — `fail-on-severity: moderate`.
    - **Breaking-change footers survive the squash** (`pr-checks.yml`) — fails a PR
-     that declares more than one breaking change. See step 7.
+     that declares more than one breaking change. See step 7. The check is a bash
+     script embedded in the workflow, so `identity/breaking_change_footers_test.go`
+     extracts that script out of `pr-checks.yml` and runs it against fixture
+     commit histories under **Tests & Quality** — including one served by a `gh`
+     that exits non-zero, which proves it fails closed on a commit list it cannot
+     read rather than counting zero declarations and reporting green.
    - **release-please can read the merged commit** (`pr-checks.yml`) — rebuilds the
      commit this PR would squash into `main` and parses it with the parser
      release-please itself uses. A message that parser rejects is dropped in
