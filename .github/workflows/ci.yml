@@ -20,9 +20,19 @@ jobs:
   test:
     name: Tests & Quality
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
+      # hardening-exception: egress-audit — this job downloads Go modules and tools
+      #   from the module proxy, transfers artifacts through the Actions API, and
+      #   clones this repository; harden-runner has never run in this repository, so
+      #   no endpoint baseline exists and a block policy written without one fails
+      #   closed on its first run; audit is what produces that list
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -211,6 +221,7 @@ jobs:
   integration-test:
     name: Integration Tests (PostgreSQL)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     services:
@@ -226,6 +237,15 @@ jobs:
           --health-cmd pg_isready --health-interval 10s --health-timeout 5s
           --health-retries 5
     steps:
+      # hardening-exception: egress-audit — this job downloads Go modules and tools
+      #   from the module proxy and clones this repository; harden-runner has never
+      #   run in this repository, so no endpoint baseline exists and a block policy
+      #   written without one fails closed on its first run; audit is what produces
+      #   that list
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -268,9 +288,19 @@ jobs:
   gosec:
     name: Security Scan (gosec)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
+      # hardening-exception: egress-audit — this job downloads Go modules and tools
+      #   from the module proxy and clones this repository; harden-runner has never
+      #   run in this repository, so no endpoint baseline exists and a block policy
+      #   written without one fails closed on its first run; audit is what produces
+      #   that list
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -281,20 +311,37 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Split out so the install can be retried: `go install` reaches the module
+      # proxy for the tool and its whole dependency tree, and one transient read
+      # failed a required check in a sibling repository.
+      - name: Install gosec
+        uses: 4cloudguru/shared-workflows/.github/actions/go-install@bc0eaaec5d6f5cf632ef862ff7475da928e32466 # v1.2.0
+        with:
+          package: github.com/securego/gosec/v2/cmd/gosec@v2.26.1
+
       - name: Run gosec
         # The module is small; fail on any finding. Suppress accepted risks inline
         # with // #nosec <rule> -- <justification> if they arise.
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
           export PATH="$PATH:$(go env GOPATH)/bin"
           gosec ./...
 
   govulncheck:
     name: Vulnerability Scan (govulncheck)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
+      # hardening-exception: egress-audit — this job downloads the Go vulnerability
+      #   database and the govulncheck tool, downloads Go modules and tools from the
+      #   module proxy, and clones this repository; harden-runner has never run in
+      #   this repository, so no endpoint baseline exists and a block policy written
+      #   without one fails closed on its first run; audit is what produces that list
+      - name: Harden the runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -304,6 +351,11 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      - name: Install govulncheck
+        uses: 4cloudguru/shared-workflows/.github/actions/go-install@bc0eaaec5d6f5cf632ef862ff7475da928e32466 # v1.2.0
+        with:
+          package: golang.org/x/vuln/cmd/govulncheck@v1.6.0
 
       - name: Run govulncheck
         # Reachability-aware scan of the Go vulnerability database against the
@@ -326,7 +378,6 @@ jobs:
         # the rest. In JSON mode govulncheck itself exits 0 when it finds
         # something, so a non-zero here is a real scanner failure.
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           export PATH="$PATH:$(go env GOPATH)/bin"
           govulncheck -format json ./... > govulncheck-results.json
           python3 scripts/govulncheck_triage.py govulncheck-results.json
