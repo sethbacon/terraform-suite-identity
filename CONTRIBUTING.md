@@ -340,7 +340,7 @@ will not be merged.
    - **Dependency review** (`pr-checks.yml`) — `fail-on-severity: moderate`.
    - **Breaking-change footers survive the squash** (`pr-checks.yml`) — fails a PR
      that declares more than one breaking change. See step 7. The check is a bash
-     script embedded in the workflow, so `identity/breaking_change_footers_test.go`
+     script embedded in the workflow, so `4cloudguru/shared-workflows`' `tests/test-breaking-change-footers.js`
      extracts that script out of `pr-checks.yml` and runs it against fixture
      commit histories under **Tests & Quality** — including one served by a `gh`
      that exits non-zero, which proves it fails closed on a commit list it cannot
