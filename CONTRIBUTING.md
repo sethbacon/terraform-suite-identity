@@ -351,11 +351,13 @@ will not be merged.
      silence: no changelog entry, no version bump, no `BREAKING CHANGE:` footer,
      and no later run recovers it. The usual cause is a body line that *starts*
      with `name(`, whose brackets must then be flat and closed.
-   - **signature-replay / replay** (`signature-replay.yml`) — re-runs every
+   - **replay / replay** (`signature-replay.yml`) — re-runs every
      recorded defect-class signature across the whole suite and fails when a
      class recorded as fixed matches again, or when a new instance appears that
      no issue covers. Exit 2 means a signature could not RUN, which is a failure
-     and never a pass. Not a required check yet.
+     and never a pass. It IS a required check on `main`, and reports as
+     `replay / replay` because the workflow now calls a shared definition and a
+     reusable workflow reports as `<caller-job-id> / <called-job-name>`.
 6. At least one approval is required. `@sethbacon` is the default reviewer/owner
    (`.github/CODEOWNERS`); changes under `.github/` and `identity/` require their
    explicit review.
