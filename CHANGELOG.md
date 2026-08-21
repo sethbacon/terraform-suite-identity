@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.30.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.30.1...v0.30.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* **ci:** refuse to run signature-replay when Dependabot edited the workflow ([#228](https://github.com/sethbacon/terraform-suite-identity/issues/228)) ([359fd23](https://github.com/sethbacon/terraform-suite-identity/commit/359fd23750af07b6dd4400cbb10fc0fd3627c3e3))
+
+
+### Documentation
+
+* **security:** record the shared-workflow trust relationship, and fix what it invalidated ([#239](https://github.com/sethbacon/terraform-suite-identity/issues/239)) ([243afbe](https://github.com/sethbacon/terraform-suite-identity/commit/243afbefc1e30bdba92be733c31294c3d02db8e2))
+
 ## [0.30.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.30.0...v0.30.1) (2026-08-19)
 
 
