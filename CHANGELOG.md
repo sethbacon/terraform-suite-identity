@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.32.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.31.0...v0.32.0) (2026-08-21)
+
+
+### Features
+
+* **tenantscope:** resolve a request's organizations here, once, instead of twice ([#248](https://github.com/sethbacon/terraform-suite-identity/issues/248)) ([5546f69](https://github.com/sethbacon/terraform-suite-identity/commit/5546f6997dd423232168908d2ef7c6d9c3b5b07f))
+* **tenantscope:** resolve the single organization a write belongs to ([#250](https://github.com/sethbacon/terraform-suite-identity/issues/250)) ([e092670](https://github.com/sethbacon/terraform-suite-identity/commit/e0926708bc23088453f483cb4a38fab6740a57cc))
+
 ## [0.31.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.30.2...v0.31.0) (2026-08-21)
 
 
