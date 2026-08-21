@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.30.2...v0.31.0) (2026-08-21)
+
+
+### Features
+
+* **notify:** optional organization scope for the channel DAO ([#243](https://github.com/sethbacon/terraform-suite-identity/issues/243)) ([10f1873](https://github.com/sethbacon/terraform-suite-identity/commit/10f18730c167bbc4ba140c2e692d2a8dd04e94b7))
+
 ## [0.30.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.30.1...v0.30.2) (2026-08-21)
 
 
