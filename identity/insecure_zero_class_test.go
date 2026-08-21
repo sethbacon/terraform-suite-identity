@@ -84,6 +84,19 @@ var boolFields = map[string]struct {
 	meaning zeroMeaning
 	why     string
 }{
+	"tenantscope.Scope.PlatformAdmin": {zeroSafe,
+		"false means the scope reaches only the organizations it names. Every failure path in " +
+			"Resolve returns the zero Scope, so a resolver that could not answer selects nothing."},
+	"tenantscope.Resolver.AdminsApplyToAPIKeys": {zeroSafe,
+		"false keeps a minted credential from inheriting its owner's platform authority. The name " +
+			"is the opt-IN, so the default is the narrow reading and widening it is a word a " +
+			"reviewer sees in the diff."},
+	"tenantscope.Resolver.KeyBindsOrganization": {zeroSafe,
+		"false ignores the organization named on an API key and resolves the owner's memberships " +
+			"instead. Enabling it TRUSTS that column, which is only correct where it is written " +
+			"from the acting organization rather than defaulted; terraform-state-manager defaults " +
+			"it, so off is the answer that does not place every key in one organization."},
+
 	"oidc.Config.AllowInsecureIssuer": {zeroSafe,
 		"false requires an HTTPS issuer. The name is the opt-OUT, so the default is the strict " +
 			"one and relaxing it is a word a reviewer sees in the diff. This is the shape " +
