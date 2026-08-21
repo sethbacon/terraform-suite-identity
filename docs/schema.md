@@ -152,6 +152,20 @@ All tables live in the `identity` schema. UUID primary keys default to
 > the schema-qualified name it resolved to — log it; that name is what makes a re-point
 > visible. See [UPGRADING.md](../UPGRADING.md) for the consumer-side steps and their order.
 >
+> **`organization_id` on that table is optional, and deliberately so.** The two consumers do
+> not agree about it and both are right: terraform-state-manager partitions notification
+> channels by organization (a channel's `encrypted_target` is a webhook URL anyone holding it
+> can post to, so cross-tenant enumeration is a real leak), while terraform-registry's
+> channels are platform-level destinations for `module_published` and `cve_detected`. A
+> predicate baked into the statements would therefore fail the second consumer at
+> `column "organization_id" does not exist`, so the column is absent from `ChannelTableDDL`
+> and absent from what `VerifyChannelTable` requires — a guard test keeps it out of both.
+> An app that does partition them adds the column itself, asserts it with
+> `notify.VerifyChannelOrganizationColumn(ctx, db)`, and opts in per call with
+> `notify.WithOrgScope(scope)`. The optionality is only about whether the COLUMN exists:
+> once a scope is passed, it is an `identity/store` `OrgScope` and keeps every fail-closed
+> semantic that type has, including a zero value that selects nothing.
+>
 > Two tables in the list above are created by the migrations but have **no Go accessor in
 > this module**: `org_quotas` and `system_settings`. They exist so both apps agree on the
 > shape; each app queries them from its own data layer — and therefore on its own

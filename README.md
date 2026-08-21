@@ -26,7 +26,7 @@ shared schema or keep identity in its own schema (see [Schema routing](#schema-r
 | `identity/crypto`    | `TokenCipher`: AES-256-GCM authenticated encryption for capability-bearing secrets stored at rest (OAuth tokens, webhook destination URLs, **OIDC client secrets**). Key rotation via `NewTokenCipherWithPrevious`; `DeriveTokenCipher`/`GenerateKey`/`GenerateSalt` for key material. The module never owns a key — you supply one. |
 | `identity/httpsafe`  | An SSRF-safe HTTP client: outbound requests from library code (and from a host that wants the same guard) are restricted so a user-supplied destination cannot be steered at link-local, loopback or private-range addresses. |
 | `identity/mailer`    | An SMTP transport hardened against opportunistic-TLS downgrade, used to deliver notifications. TLS is the zero value (`TLSMode`); plaintext must be named. |
-| `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. Ships `ChannelTableDDL` (the canonical table definition, for the app's own migration set) and `VerifyChannelTable` (the startup shape assertion). |
+| `identity/notify`    | Notification fan-out: `ChannelRepository` over an app-owned `notification_channels` table (encrypted destination targets, decrypted via `identity/crypto`), the `Notifier`, and the API-key-expiry notifier. Ships `ChannelTableDDL` (the canonical table definition, for the app's own migration set) and `VerifyChannelTable` (the startup shape assertion). Every row-selecting statement takes an **optional** `WithOrgScope`, for an app that partitions channels by organization; the default is the unscoped statement, so an app whose table has no `organization_id` is unaffected. |
 | `identity/platformadmin` | The platform-admin **carrier**: who administers **one app**, resolved per request rather than claimed in a token. `Carrier` reads and writes a grant table the app owns (`New(db, "registry.platform_admins")`), `SessionScopes` elevates a live session, `KeyScopes` guarantees an API key never inherits it, and `Revoke` refuses to remove the last exercisable administrator. Ships `TableDDL` and `VerifyTable`. See [docs/platform-admin.md](docs/platform-admin.md). |
 | `identity/auditoutbox` | The transactional audit outbox: an audit **intent** written in the same transaction as the privileged mutation it describes, a `Relay` that delivers it to the app's audit table at least once, and idempotently. Ships the DDL for both the outbox table and the **deferred constraint trigger** that refuses an unaudited commit (`OutboxDDL`, `TriggerSpec.DDL`), plus `Guard`, a source scan that fails the build when a mutation path takes no `IntentWriter`. Every table name is the app's. |
 | `identity/pgxparam` | Test support for consumers: a `driver.ValueConverter` that lets a `sqlmock` database accept the arguments this module binds. The tenant predicate binds a bare `[]string` for `= ANY($n)`, which pgx and lib/pq both encode themselves and sqlmock's default converter rejects — build the mock with `sqlmock.ValueConverterOption(pgxparam.Converter{})` and it does not. |
@@ -40,6 +40,16 @@ columns, types and nullability the statements require and returns the schema-qua
 the repository will actually read. See the [schema reference](docs/schema.md#tables) for why
 the module ships no migration for it, and [UPGRADING.md](UPGRADING.md) for the consumer
 steps.
+
+An **`organization_id` column on that table is optional**, and the two consumers differ:
+terraform-state-manager partitions notification channels by organization, terraform-registry
+treats them as platform-level. So the column is not in `ChannelTableDDL` and not asserted by
+`VerifyChannelTable`. An app that does partition them adds the column from its own migration
+set, calls **`notify.VerifyChannelOrganizationColumn(ctx, db)`** at startup, and passes
+**`notify.WithOrgScope(scope)`** — an `identity/store` `OrgScope`, with all of its fail-closed
+semantics intact — to `List`, `GetByID`, `ListEnabledForEvent`, `Update`, `Delete` and
+`RecordDelivery`. Passing nothing is the statement this module has always emitted, so an app
+that does not partition them changes nothing and needs no column.
 
 The `platform_admins` table `identity/platformadmin` reads is **app-owned for a different
 reason**: it is not shared identity at all. Who administers an application is a per-app
