@@ -10,6 +10,12 @@
 // channelColumnRequirements (what VerifyChannelTable asserts at startup), both
 // executed by this package's own tests. See schema.go for the shape and for why
 // no migration here creates the table.
+//
+// Every row-selecting statement here takes an optional ChannelQueryOption, so a
+// consumer whose table carries an organization_id can restrict it to a tenant.
+// The default — no options — is the unscoped statement this package has always
+// emitted. channel_scope.go explains why that optionality is right here and
+// wrong in identity/store.
 package notify
 
 import (
@@ -67,6 +73,14 @@ func scanChannel(scanner interface{ Scan(dest ...any) error }) (*NotificationCha
 }
 
 // Create inserts a new channel and returns it (with the target redacted).
+//
+// It takes no ChannelQueryOption: a scope is a predicate over rows that already
+// exist, and an INSERT selects none. A consumer that partitions this table
+// assigns the owning organization with a column DEFAULT in its own migration
+// (terraform-state-manager's 000033 does exactly that), which keeps the owner a
+// property of the schema rather than of whichever caller happened to insert the
+// row. Writing it from here would mean this package deciding the owner for a
+// column it does not require and cannot see.
 func (r *ChannelRepository) Create(ctx context.Context, ch *NotificationChannel) (*NotificationChannel, error) {
 	eventsJSON, err := json.Marshal(ch.Events)
 	if err != nil {
@@ -85,9 +99,13 @@ func (r *ChannelRepository) Create(ctx context.Context, ch *NotificationChannel)
 	return saved, nil
 }
 
-// List returns all channels without the encrypted target (for the admin UI).
-func (r *ChannelRepository) List(ctx context.Context) ([]NotificationChannel, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+channelColumns+` FROM notification_channels ORDER BY created_at DESC`)
+// List returns all channels without the encrypted target (for the admin UI),
+// restricted to the organizations of any WithOrgScope option supplied.
+func (r *ChannelRepository) List(ctx context.Context, opts ...ChannelQueryOption) ([]NotificationChannel, error) {
+	query, args := newChannelFilter(opts).splice(
+		`SELECT `+channelColumns+` FROM notification_channels`, " WHERE ", nil)
+	query += ` ORDER BY created_at DESC`
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -111,8 +129,14 @@ func (r *ChannelRepository) List(ctx context.Context) ([]NotificationChannel, er
 // DAO reports not-found with the identity store's sentinel rather than one of
 // its own: a consuming app wires both packages and must not have to remember
 // which of two spellings of "not found" a given repository speaks.
-func (r *ChannelRepository) GetByID(ctx context.Context, id string) (*NotificationChannel, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT `+channelColumns+` FROM notification_channels WHERE id = $1`, id)
+// A channel outside a supplied WithOrgScope is reported as not-found rather than
+// as forbidden, which is the same answer identity/store's scoped by-id reads
+// give: distinguishing the two would confirm the existence of another tenant's
+// channel to a caller who may not read it.
+func (r *ChannelRepository) GetByID(ctx context.Context, id string, opts ...ChannelQueryOption) (*NotificationChannel, error) {
+	query, args := newChannelFilter(opts).splice(
+		`SELECT `+channelColumns+` FROM notification_channels WHERE id = $1`, " AND ", []any{id})
+	row := r.db.QueryRowContext(ctx, query, args...)
 	ch, err := scanChannel(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("notification channel by id: %w", store.ErrNotFound)
@@ -130,7 +154,13 @@ func (r *ChannelRepository) GetByID(ctx context.Context, id string) (*Notificati
 // Returns an error wrapping store.ErrNotFound when the channel does not exist —
 // the RETURNING clause yields no row, which is the same "matched nothing" the
 // by-id mutators in identity/store report.
-func (r *ChannelRepository) Update(ctx context.Context, id, name, typ string, events []string, enabled bool, encryptedTarget string) (*NotificationChannel, error) {
+// A WithOrgScope option constrains WHICH row the id may match, so a caller
+// scoped to one organization cannot edit another's channel. It is applied for
+// the reason org_scope.go gives for applying the predicate to every access axis
+// of a table at once: a boundary that a list read enforces and a by-id mutation
+// does not is not a boundary, and the defect class it closes is exactly "one
+// query learned the predicate and its siblings did not".
+func (r *ChannelRepository) Update(ctx context.Context, id, name, typ string, events []string, enabled bool, encryptedTarget string, opts ...ChannelQueryOption) (*NotificationChannel, error) {
 	eventsJSON, err := json.Marshal(events)
 	if err != nil {
 		return nil, err
@@ -139,13 +169,14 @@ func (r *ChannelRepository) Update(ctx context.Context, id, name, typ string, ev
 	if encryptedTarget != "" {
 		targetArg = encryptedTarget
 	}
-	row := r.db.QueryRowContext(ctx, `
+	query, args := newChannelFilter(opts).splice(`
 		UPDATE notification_channels
 		SET name=$2, type=$3, events=$4, enabled=$5,
 		    encrypted_target=COALESCE($6, encrypted_target), updated_at=now()
-		WHERE id=$1
-		RETURNING `+channelColumns,
-		id, name, typ, eventsJSON, enabled, targetArg)
+		WHERE id=$1`, " AND ", []any{id, name, typ, eventsJSON, enabled, targetArg})
+	query += `
+		RETURNING ` + channelColumns
+	row := r.db.QueryRowContext(ctx, query, args...)
 	ch, err := scanChannel(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("notification channel by id: %w", store.ErrNotFound)
@@ -161,8 +192,13 @@ func (r *ChannelRepository) Update(ctx context.Context, id, name, typ string, ev
 //
 // Returns an error wrapping store.ErrNotFound when no channel has that ID, so
 // an admin UI cannot report a channel deleted that it did not delete.
-func (r *ChannelRepository) Delete(ctx context.Context, id string) error {
-	res, err := r.db.ExecContext(ctx, `DELETE FROM notification_channels WHERE id = $1`, id)
+// A WithOrgScope option constrains which row the id may match; a delete outside
+// the scope matches nothing and so reports store.ErrNotFound, which is both the
+// non-disclosing answer and the true one.
+func (r *ChannelRepository) Delete(ctx context.Context, id string, opts ...ChannelQueryOption) error {
+	query, args := newChannelFilter(opts).splice(
+		`DELETE FROM notification_channels WHERE id = $1`, " AND ", []any{id})
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -186,10 +222,16 @@ func requireChannelRow(res sql.Result) error {
 // ListEnabledForEvent returns enabled channels subscribed to eventType (a
 // channel with no events subscribes to all). Includes the encrypted target
 // for sending.
-func (r *ChannelRepository) ListEnabledForEvent(ctx context.Context, eventType string) ([]NotificationChannel, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+channelColumns+`
+//
+// A WithOrgScope option restricts delivery to that tenant's channels. An event
+// raised inside one organization must not fan out to another organization's
+// webhook, so a consumer that partitions this table scopes the SEND path too and
+// not only the admin UI that lists it.
+func (r *ChannelRepository) ListEnabledForEvent(ctx context.Context, eventType string, opts ...ChannelQueryOption) ([]NotificationChannel, error) {
+	query, args := newChannelFilter(opts).splice(`SELECT `+channelColumns+`
 		FROM notification_channels
-		WHERE enabled AND (jsonb_array_length(events) = 0 OR events @> to_jsonb($1::text))`, eventType)
+		WHERE enabled AND (jsonb_array_length(events) = 0 OR events @> to_jsonb($1::text))`, " AND ", []any{eventType})
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -212,10 +254,13 @@ func (r *ChannelRepository) ListEnabledForEvent(ctx context.Context, eventType s
 // caller and delivery has already happened, so there is nothing to roll back)
 // rather than dropping it, which is exactly the difference between a delivery
 // record that is missing for a known reason and one that is silently absent.
-func (r *ChannelRepository) RecordDelivery(ctx context.Context, id, status, errMsg string, sentAt time.Time) error {
-	res, err := r.db.ExecContext(ctx,
+// A WithOrgScope option constrains which row the id may match, keeping this
+// statement on the same axis as the read that selected the channel to send to.
+func (r *ChannelRepository) RecordDelivery(ctx context.Context, id, status, errMsg string, sentAt time.Time, opts ...ChannelQueryOption) error {
+	query, args := newChannelFilter(opts).splice(
 		`UPDATE notification_channels SET last_status=$2, last_error=NULLIF($3,''), last_sent_at=$4, updated_at=now() WHERE id=$1`,
-		id, status, errMsg, sentAt)
+		" AND ", []any{id, status, errMsg, sentAt})
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
