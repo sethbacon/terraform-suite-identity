@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
 	"github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
@@ -74,23 +75,46 @@ func scanChannel(scanner interface{ Scan(dest ...any) error }) (*NotificationCha
 
 // Create inserts a new channel and returns it (with the target redacted).
 //
-// It takes no ChannelQueryOption: a scope is a predicate over rows that already
-// exist, and an INSERT selects none. A consumer that partitions this table
-// assigns the owning organization with a column DEFAULT in its own migration
-// (terraform-state-manager's 000033 does exactly that), which keeps the owner a
-// property of the schema rather than of whichever caller happened to insert the
-// row. Writing it from here would mean this package deciding the owner for a
-// column it does not require and cannot see.
-func (r *ChannelRepository) Create(ctx context.Context, ch *NotificationChannel) (*NotificationChannel, error) {
+// It takes no ChannelQueryOption -- a scope is a predicate over rows that already
+// exist, and an INSERT selects none -- but it does take ChannelWriteOptions,
+// which supply VALUES rather than predicates. WithOwningOrganization is the one
+// that matters for a partitioned consumer, and channel_owner.go explains why the
+// column DEFAULT this used to defer to is a backfill answer rather than a tenant
+// answer.
+//
+// With no options the statement is byte-for-byte the one this package has always
+// emitted, so a consumer that does not partition keeps its DEFAULT.
+func (r *ChannelRepository) Create(ctx context.Context, ch *NotificationChannel, opts ...ChannelWriteOption) (*NotificationChannel, error) {
 	eventsJSON, err := json.Marshal(ch.Events)
 	if err != nil {
 		return nil, err
 	}
+	write, err := newChannelWrite(opts)
+	if err != nil {
+		return nil, err
+	}
+	names, values := write.columns()
+	columns := "name, type, encrypted_target, events, enabled"
+	placeholders := "$1, $2, $3, $4, $5"
+	args := []any{ch.Name, ch.Type, ch.EncryptedTarget, eventsJSON, ch.Enabled}
+	for i, name := range names {
+		// pgquote.Identifier per this module's policy: an identifier is never
+		// parameterisable, so it is interpolated, so it is quoted in one place
+		// rather than open-coded per call site (see identity/internal/pgquote).
+		// The names are already a closed literal set -- channel_owner_columns_test.go
+		// guards that -- so this is the second lock, not the only one.
+		columns += ", " + pgquote.Identifier(name)
+		// ::uuid so the driver's text parameter lands in a uuid column. The
+		// placeholder number is derived, never interpolated from caller input --
+		// `name` comes from this package's own option constructors.
+		placeholders += fmt.Sprintf(", $%d::uuid", len(args)+1)
+		args = append(args, values[i])
+	}
 	row := r.db.QueryRowContext(ctx, `
-		INSERT INTO notification_channels (name, type, encrypted_target, events, enabled)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO notification_channels (`+columns+`)
+		VALUES (`+placeholders+`)
 		RETURNING `+channelColumns,
-		ch.Name, ch.Type, ch.EncryptedTarget, eventsJSON, ch.Enabled)
+		args...)
 	saved, err := scanChannel(row)
 	if err != nil {
 		return nil, err
