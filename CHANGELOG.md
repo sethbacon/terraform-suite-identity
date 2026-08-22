@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.32.0...v0.33.0) (2026-08-22)
+
+
+### Features
+
+* **notify:** let a consumer name the organization that owns a channel ([#251](https://github.com/sethbacon/terraform-suite-identity/issues/251)) ([2097b1c](https://github.com/sethbacon/terraform-suite-identity/commit/2097b1ca56d02e716bf63f4f2da76ec66f25d87b))
+
 ## [0.32.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.31.0...v0.32.0) (2026-08-21)
 
 
