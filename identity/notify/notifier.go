@@ -98,7 +98,24 @@ func NewNotifier(repo *ChannelRepository, smtp SMTPProvider, tokenCipher *crypto
 // Best-effort: a failing channel is logged and recorded but never blocks the
 // others. Safe to call in a goroutine; pass a context with its own deadline.
 // A nil Notifier (channels not wired up, e.g. in tests) is a no-op.
-func (n *Notifier) Notify(ctx context.Context, ev Event) {
+// Notify fans an event out to the channels that subscribe to it.
+//
+// # Pass a scope, or every tenant hears every event
+//
+// The opts are forwarded to ListEnabledForEvent, and a consumer whose
+// notification_channels table is partitioned MUST pass WithOrgScope for the
+// organization that raised the event. Without one this selects every enabled
+// channel in the table, so in a multi-tenant deployment one organization's
+// drift alerts are POSTed to another organization's webhooks -- data leaving the
+// deployment addressed to the wrong party, which is a different and worse thing
+// than an in-app disclosure.
+//
+// It is variadic rather than required because a single-tenant consumer has
+// nothing to pass and its statement is unchanged. That makes the unscoped call
+// the QUIET one, so the doc has to be the loud part: see
+// VerifyChannelOrganizationColumn for the assertion a partitioned consumer
+// should make at boot.
+func (n *Notifier) Notify(ctx context.Context, ev Event, opts ...ChannelQueryOption) {
 	if n == nil {
 		return
 	}
@@ -109,7 +126,7 @@ func (n *Notifier) Notify(ctx context.Context, ev Event) {
 		n.logger.Error("notification channels are not configured", "event", ev.Type)
 		return
 	}
-	channels, err := n.repo.ListEnabledForEvent(ctx, ev.Type)
+	channels, err := n.repo.ListEnabledForEvent(ctx, ev.Type, opts...)
 	if err != nil {
 		n.logger.Error("failed to load notification channels", "event", ev.Type, "error", err)
 		return
