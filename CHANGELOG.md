@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.33.0...v0.34.0) (2026-08-23)
+
+
+### Features
+
+* **notify:** let Notify carry the scope of the organization that raised the event ([#253](https://github.com/sethbacon/terraform-suite-identity/issues/253)) ([cb3da95](https://github.com/sethbacon/terraform-suite-identity/commit/cb3da9551748df2fee68cedd25c5c4fdebe44da7))
+
 ## [0.33.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.32.0...v0.33.0) (2026-08-22)
 
 
