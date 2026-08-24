@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.34.0...v0.35.0) (2026-08-24)
+
+
+### Features
+
+* **store:** let the audit retention sweep honour legal holds ([#257](https://github.com/sethbacon/terraform-suite-identity/issues/257)) ([ebbad5f](https://github.com/sethbacon/terraform-suite-identity/commit/ebbad5f09689db35158122581d26b68e1104abdb))
+
 ## [0.34.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.33.0...v0.34.0) (2026-08-23)
 
 
