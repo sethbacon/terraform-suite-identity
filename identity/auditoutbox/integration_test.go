@@ -446,15 +446,30 @@ func TestIntegrationRelayDeliversTheIntent(t *testing.T) {
 		t.Errorf("actor_email = %q, want the address captured at intent time", actorEmail)
 	}
 	// The audit trail must say when the event HAPPENED, not when it was
-	// delivered. TIMESTAMPTZ stores microseconds and PostgreSQL ROUNDS to them,
-	// so the comparison has to round too: truncating fails roughly half the
-	// time, whenever the sub-microsecond digits round up. It did exactly that
-	// on main after v0.28.0 -- stored 689835us against a truncated 689834us --
-	// having passed on the PR only because that run's nanoseconds rounded down.
-	wantOccurred := intent.OccurredAt.UTC().Round(time.Microsecond)
-	if !occurred.UTC().Equal(wantOccurred) {
-		t.Errorf("created_at = %v, want the intent's OccurredAt rounded to microseconds %v (raw %v)",
-			occurred.UTC(), wantOccurred, intent.OccurredAt.UTC())
+	// delivered.
+	//
+	// TIMESTAMPTZ holds microseconds, and OccurredAt carries nanoseconds, so the
+	// remainder has to go SOMEWHERE on the way in. Two previous versions of this
+	// assertion each bet on a direction and each failed about half the time:
+	//
+	//   truncating both sides failed when the round-trip rounded UP
+	//     -- stored 689835us against a truncated 689834us (after v0.28.0)
+	//   rounding both sides then failed when it did NOT
+	//     -- stored ...973416 against a rounded ...973417, raw ...973416552
+	//
+	// The second is what put this test on main red while every other run passed:
+	// it depends on which way one run's nanoseconds happened to fall, so it is a
+	// coin flip wearing an equality check. Betting the other way just moves which
+	// half fails.
+	//
+	// The invariant was never which way the digits fell. It is that the recorded
+	// time is the EVENT time rather than the DELIVERY time, and those differ by
+	// milliseconds at least -- a microsecond of storage precision cannot confuse
+	// them. So assert the distance and let the sub-microsecond remainder land
+	// wherever the driver puts it.
+	if skew := occurred.UTC().Sub(intent.OccurredAt.UTC()); skew < -time.Microsecond || skew > time.Microsecond {
+		t.Errorf("created_at = %v, want the intent's OccurredAt %v within a microsecond of storage precision (skew %v, raw %v)",
+			occurred.UTC(), intent.OccurredAt.UTC(), skew, intent.OccurredAt.UTC())
 	}
 	if delay := time.Since(occurred); delay < 0 {
 		t.Errorf("created_at %v is in the future; the delivery time leaked into the record", occurred)
