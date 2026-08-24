@@ -127,8 +127,11 @@ func (f auditSweepFilter) exemption() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// #nosec G201 -- quoted is validated against identifierPattern and escaped
-	// by pgquote.Identifier; the column names are compile-time constants.
+	// Not a #nosec: gosec does not flag this Sprintf, because the string is
+	// returned rather than handed to a database call here. Recorded anyway —
+	// quoted is validated against auditIdentifierPattern and escaped by
+	// pgquote.Identifier, and the column names are compile-time constants, so
+	// nothing caller-controlled reaches the SQL.
 	return fmt.Sprintf(`
 			  AND NOT EXISTS (
 			      SELECT 1 FROM %s h
@@ -162,7 +165,9 @@ func LegalHoldTableDDL(table string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// #nosec G201 -- both identifiers are validated and escaped above.
+	// Both identifiers are validated and escaped above. Not a #nosec for the
+	// same reason as exemption's: this renders DDL for a caller's migration and
+	// executes nothing.
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
     id           UUID PRIMARY KEY,
     name         TEXT NOT NULL,
@@ -206,7 +211,10 @@ func VerifyLegalHoldTable(ctx context.Context, db *sql.DB, table string) error {
 	// Exec whose result nobody reads — for a statement meant to change rows
 	// that is how a no-op passes for work. Here there is no result to read at
 	// all; the answer is entirely in whether the statement planned.
-	// #nosec G201 -- quoted is validated and escaped; columns are constants.
+	// #nosec G201 -- this Sprintf DOES reach a database call, which is why it
+	// is the one suppression in this file that gosec exercises. quoted is
+	// validated against auditIdentifierPattern and escaped by
+	// pgquote.Identifier; the three column names are compile-time constants.
 	probe := fmt.Sprintf(`SELECT %s, %s, %s FROM %s WHERE false`,
 		LegalHoldActiveColumn, LegalHoldStartDateColumn, LegalHoldEndDateColumn, quoted)
 	rows, err := db.QueryContext(ctx, probe)

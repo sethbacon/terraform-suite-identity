@@ -339,8 +339,11 @@ func (r *AuditRepository) DeleteAuditLogsBefore(ctx context.Context, cutoff time
 	if err != nil {
 		return 0, err
 	}
-	// #nosec G201 -- exemption is rendered from validated, escaped identifiers
-	// and compile-time column constants; cutoff and batchSize remain bound.
+	// #nosec G202 -- exemption is not caller data. It is rendered by
+	// auditSweepFilter.exemption from a table name validated against
+	// identifierPattern and escaped by pgquote.Identifier, plus three
+	// compile-time column constants; an unquotable name is returned as the
+	// error above rather than pasted in. cutoff and batchSize stay bound.
 	query := `
 		DELETE FROM audit_logs
 		WHERE id IN (
