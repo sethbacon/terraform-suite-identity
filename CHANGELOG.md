@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.35.0...v0.35.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **test:** stop asserting which way a sub-microsecond remainder falls ([#262](https://github.com/sethbacon/terraform-suite-identity/issues/262)) ([1950552](https://github.com/sethbacon/terraform-suite-identity/commit/195055225c3cc06849833a0053b766914686860d))
+
 ## [0.35.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.34.0...v0.35.0) (2026-08-24)
 
 
