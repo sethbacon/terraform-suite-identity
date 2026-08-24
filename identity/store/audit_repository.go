@@ -327,11 +327,25 @@ func (r *AuditRepository) GetAuditLog(ctx context.Context, logID string, scope O
 
 // DeleteAuditLogsBefore deletes audit logs older than cutoff in one batch.
 // Returns the number of rows deleted.
-func (r *AuditRepository) DeleteAuditLogsBefore(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
+//
+// With store.WithLegalHolds(table) the batch excludes any row covered by an
+// active hold in that table, so an investigation's evidence survives retention.
+// Without it the statement is byte-identical to the one this method has always
+// emitted — see audit_sweep.go for why the exemption is an option rather than
+// part of the statement, and why a consumer without the table must not be
+// handed a predicate that references it.
+func (r *AuditRepository) DeleteAuditLogsBefore(ctx context.Context, cutoff time.Time, batchSize int, opts ...AuditSweepOption) (int64, error) {
+	exemption, err := newAuditSweepFilter(opts).exemption()
+	if err != nil {
+		return 0, err
+	}
+	// #nosec G201 -- exemption is rendered from validated, escaped identifiers
+	// and compile-time column constants; cutoff and batchSize remain bound.
 	query := `
 		DELETE FROM audit_logs
 		WHERE id IN (
-			SELECT id FROM audit_logs WHERE created_at < $1 ORDER BY created_at ASC LIMIT $2
+			SELECT id FROM audit_logs WHERE created_at < $1` + exemption + `
+			ORDER BY created_at ASC LIMIT $2
 		)
 	`
 	result, err := r.db.ExecContext(ctx, query, cutoff, batchSize)
