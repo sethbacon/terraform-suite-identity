@@ -37,12 +37,23 @@
 //
 // # Usage
 //
+//	// once, at startup -- a Manager is process-scoped, not per-login
 //	states, err := oauthstate.NewManager(oauthstate.NewMemoryStore(0, 0))
+//	defer states.Close() // stops the memory store's janitor goroutine
+//
 //	// login: purpose names the flow AND the resource it is bound to
 //	state, err := states.Issue(ctx, "scm:"+providerID, payload, oauthstate.DefaultTTL)
 //	// callback: the same purpose must be reconstructed from the callback's own
 //	// route/context — never from the state
 //	payload, err := states.Consume(ctx, "scm:"+providerID, r.FormValue("state"))
+//
+// # Lifetime
+//
+// Construct one Manager for the process and hold it, the way you would a
+// database handle. NewMemoryStore starts a background janitor, so a Manager
+// built per login flow leaks a goroutine and a time.Ticker per login rather
+// than per process, and they accumulate for the life of the server. Call Close
+// when the process is shutting down; it delegates to the Store.
 //
 // For an OIDC login, prefer oidc.Provider.BeginAuthSession /
 // oidc.Provider.CompleteAuthSession, which drive this package for you and also
@@ -166,6 +177,11 @@ type Store interface {
 // concretely rather than as an interface, on purpose: an interface here would
 // let an application substitute its own minting and reintroduce the
 // self-describing state this package exists to prevent.
+//
+// A Manager is process-scoped: build one at startup and share it, and Close it
+// on shutdown. It is the handle an application holds, so the lifetime is stated
+// here as well as on NewMemoryStore -- which is one level below where a reader
+// holding a Manager is looking.
 type Manager struct {
 	store Store
 }
