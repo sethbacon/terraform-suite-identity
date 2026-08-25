@@ -73,6 +73,29 @@ func scanChannel(scanner interface{ Scan(dest ...any) error }) (*NotificationCha
 	return &ch, nil
 }
 
+// marshalEvents renders the event filter for the jsonb events column.
+//
+// json.Marshal produces the JSON scalar `null` for a NIL slice and `[]` for an
+// empty one, and the column takes whichever it is given. That distinction is
+// invisible in Go -- Events is an ordinary slice field whose zero value is nil,
+// so a caller that simply omits it writes the scalar -- and it is fatal on read:
+// ListEnabledForEvent applies jsonb_array_length(events), which errors on a
+// scalar and fails the ENTIRE statement rather than skipping the offending row.
+// One channel created with nil events therefore stops every notification in the
+// deployment, including the perfectly valid channels that should have matched.
+//
+// Normalising in one place, at the single write boundary, is what keeps this out
+// of the column: there are two writers today and the defect class is precisely
+// "one of them learned the rule and its sibling did not". scanChannel already
+// normalises nil to []string{} coming back, so this makes the two directions
+// agree rather than introducing a new convention.
+func marshalEvents(events []string) ([]byte, error) {
+	if events == nil {
+		events = []string{}
+	}
+	return json.Marshal(events)
+}
+
 // Create inserts a new channel and returns it (with the target redacted).
 //
 // It takes no ChannelQueryOption -- a scope is a predicate over rows that already
@@ -85,7 +108,7 @@ func scanChannel(scanner interface{ Scan(dest ...any) error }) (*NotificationCha
 // With no options the statement is byte-for-byte the one this package has always
 // emitted, so a consumer that does not partition keeps its DEFAULT.
 func (r *ChannelRepository) Create(ctx context.Context, ch *NotificationChannel, opts ...ChannelWriteOption) (*NotificationChannel, error) {
-	eventsJSON, err := json.Marshal(ch.Events)
+	eventsJSON, err := marshalEvents(ch.Events)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +208,7 @@ func (r *ChannelRepository) GetByID(ctx context.Context, id string, opts ...Chan
 // does not is not a boundary, and the defect class it closes is exactly "one
 // query learned the predicate and its siblings did not".
 func (r *ChannelRepository) Update(ctx context.Context, id, name, typ string, events []string, enabled bool, encryptedTarget string, opts ...ChannelQueryOption) (*NotificationChannel, error) {
-	eventsJSON, err := json.Marshal(events)
+	eventsJSON, err := marshalEvents(events)
 	if err != nil {
 		return nil, err
 	}
