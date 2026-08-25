@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.35.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.35.1...v0.35.2) (2026-08-25)
+
+
+### Bug Fixes
+
+* **notify:** normalise nil Events to [] so one channel cannot stop every send ([#265](https://github.com/sethbacon/terraform-suite-identity/issues/265)) ([650b3da](https://github.com/sethbacon/terraform-suite-identity/commit/650b3dae190fcc6d61c96ef603646300b774f7d5)), closes [#245](https://github.com/sethbacon/terraform-suite-identity/issues/245)
+
+
+### Documentation
+
+* **oauthstate:** state the Manager lifetime, and test that Close stops the janitor ([#266](https://github.com/sethbacon/terraform-suite-identity/issues/266)) ([a2da787](https://github.com/sethbacon/terraform-suite-identity/commit/a2da7878ab37e29e69731f89e95dc64fccac0a07)), closes [#192](https://github.com/sethbacon/terraform-suite-identity/issues/192)
+
 ## [0.35.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.35.0...v0.35.1) (2026-08-24)
 
 
