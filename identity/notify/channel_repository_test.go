@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -252,5 +253,77 @@ func TestChannelRepo_RecordDelivery_DBError(t *testing.T) {
 	mock.ExpectExec("UPDATE notification_channels SET last_status").WillReturnError(errDB)
 	if err := repo.RecordDelivery(context.Background(), testChannelID1, "failed", "boom", time.Now()); err == nil {
 		t.Error("expected error")
+	}
+}
+
+// The three tests below pin the distinction the events column depends on.
+//
+// encoding/json renders a NIL slice as the scalar `null` and an empty one as
+// `[]`. Both are accepted by a jsonb column, and only the second survives
+// ListEnabledForEvent's jsonb_array_length -- so what matters is the bytes that
+// reach the driver, which is what these assert rather than the Go value.
+func TestMarshalEvents_NormalisesNilToEmptyArray(t *testing.T) {
+	// Pin the upstream behaviour that makes the helper necessary. If encoding/json
+	// ever stopped doing this, the helper would be redundant and this says so.
+	raw, err := json.Marshal([]string(nil))
+	if err != nil {
+		t.Fatalf("marshal nil: %v", err)
+	}
+	if string(raw) != "null" {
+		t.Fatalf("json.Marshal of a nil slice = %s, want null -- the premise of marshalEvents has changed", raw)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   []string
+		want string
+	}{
+		{"nil becomes an empty array", nil, `[]`},
+		{"empty stays an empty array", []string{}, `[]`},
+		{"populated is untouched", []string{"drift_detected"}, `["drift_detected"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := marshalEvents(tc.in)
+			if err != nil {
+				t.Fatalf("marshalEvents: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("marshalEvents(%v) = %s, want %s", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestChannelRepo_Create_OmittedEventsWritesEmptyArray(t *testing.T) {
+	repo, mock := newChannelRepo(t)
+	mock.ExpectQuery("INSERT INTO notification_channels").
+		WithArgs("ops-webhook", "webhook", "ENC", []byte(`[]`), true).
+		WillReturnRows(fullChannelRow(testChannelID1, "ENC"))
+
+	// Events is not set at all -- its zero value is nil, which is how this is
+	// reached in practice: no validation, and omitting the field is natural.
+	ch := &NotificationChannel{Name: "ops-webhook", Type: "webhook", EncryptedTarget: "ENC", Enabled: true}
+	if _, err := repo.Create(context.Background(), ch); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// Update marshals events too, and was the second writer that had to learn the
+// same rule -- it takes the slice as a plain parameter, where nil is even easier
+// to pass than it is to leave a struct field unset.
+func TestChannelRepo_Update_NilEventsWritesEmptyArray(t *testing.T) {
+	repo, mock := newChannelRepo(t)
+	mock.ExpectQuery("UPDATE notification_channels").
+		WithArgs(testChannelID1, "ops-webhook", "webhook", []byte(`[]`), true, nil).
+		WillReturnRows(fullChannelRow(testChannelID1, "ENC"))
+
+	if _, err := repo.Update(context.Background(), testChannelID1, "ops-webhook", "webhook", nil, true, ""); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
 	}
 }

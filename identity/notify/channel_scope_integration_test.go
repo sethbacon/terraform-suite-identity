@@ -106,11 +106,13 @@ func TestIntegrationChannelScopeSelectsRowsBothWays(t *testing.T) {
 
 	repo := NewChannelRepository(db)
 	seedChannel(t, db, repo, "a-first", integOrgA, []string{"drift_detected"})
-	// a-second subscribes to a DIFFERENT event, not to none. A channel created
-	// with nil events is stored as the JSON scalar `null` rather than `[]`, and
-	// jsonb_array_length then fails the whole ListEnabledForEvent query — a
-	// pre-existing edge of Create, unrelated to scoping, that this suite must
-	// not depend on either way.
+	// a-second subscribes to a DIFFERENT event, not to none. That used to be
+	// forced: a channel created with nil events was stored as the JSON scalar
+	// `null`, and jsonb_array_length then failed the whole ListEnabledForEvent
+	// query. Create normalises nil to `[]` now — see marshalEvents and
+	// TestIntegrationOmittedEventsDoesNotAbortListEnabledForEvent — so the
+	// constraint is lifted, but this suite is about scoping and still should not
+	// depend on it either way.
 	seedChannel(t, db, repo, "a-second", integOrgA, []string{"run_failed"})
 	seedChannel(t, db, repo, "b-only", integOrgB, []string{"drift_detected"})
 	seedChannel(t, db, repo, "unowned", "", []string{"drift_detected"})
