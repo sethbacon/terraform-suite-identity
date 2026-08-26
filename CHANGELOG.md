@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.35.2...v0.36.0) (2026-08-26)
+
+
+### Features
+
+* **models:** resolve group mappings here, first-match-wins ([#269](https://github.com/sethbacon/terraform-suite-identity/issues/269)) ([c956827](https://github.com/sethbacon/terraform-suite-identity/commit/c95682788349528a12c5637c71e8d48b6c627113)), closes [#268](https://github.com/sethbacon/terraform-suite-identity/issues/268)
+
 ## [0.35.2](https://github.com/sethbacon/terraform-suite-identity/compare/v0.35.1...v0.35.2) (2026-08-25)
 
 
