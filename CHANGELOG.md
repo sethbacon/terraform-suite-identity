@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.39.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.38.0...v0.39.0) (2026-08-27)
+
+
+### Features
+
+* **identity:** state and enforce the minimum identity schema version ([#279](https://github.com/sethbacon/terraform-suite-identity/issues/279)) ([26186ad](https://github.com/sethbacon/terraform-suite-identity/commit/26186ad4187e69296dc8b0413f9022077fa8c193)), closes [#203](https://github.com/sethbacon/terraform-suite-identity/issues/203)
+* **store:** reduce authority and revoke its credentials in one transaction ([#281](https://github.com/sethbacon/terraform-suite-identity/issues/281)) ([1c337ca](https://github.com/sethbacon/terraform-suite-identity/commit/1c337cab2815a40d90bfa661772b286b3ac7182f))
+
 ## [0.38.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.37.0...v0.38.0) (2026-08-27)
 
 
