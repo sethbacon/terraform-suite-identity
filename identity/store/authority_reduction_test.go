@@ -69,10 +69,19 @@ const (
 
 // GUARD reduction-and-sweep-in-one-transaction. The membership DELETE, the
 // retained-authority lookup, the locked key read, the key DELETE and the
-// application's own sweep all happen between BEGIN and COMMIT.
+// application's own sweep all happen in that order, and AppCredentials is
+// handed the live transaction rather than nothing.
 //
-// MUTATION: move any of them onto the pool (r.db instead of tx), or commit
-// before the sweep, and the ordered expectations below stop matching.
+// MUTATION: commit before the sweep, or stop passing the tx to AppCredentials.
+//
+// WHAT THIS TEST CANNOT SEE, verified rather than assumed: moving a statement
+// from tx.QueryContext to r.db.QueryContext. sqlmock serves a *sql.Tx and its
+// parent *sql.DB from the SAME mock connection and records both against the
+// same ordered queue, so that mutation leaves every expectation below matching,
+// in order, while the statement runs outside the transaction and commits on its
+// own. An earlier version of this comment claimed otherwise and was wrong. The
+// property is asserted in authority_reduction_class_test.go by
+// TestReducerIssuesEveryStatementOnTheTransaction, which reads the source.
 func TestReducerRemoveMemberSweepsInsideTheTransaction(t *testing.T) {
 	db, mock, err := newSQLMock()
 	if err != nil {
@@ -537,8 +546,13 @@ func TestReducerReductionsKeepTheirTenantPredicate(t *testing.T) {
 // template deleted between the lookup and the update cannot leave the
 // membership pointing at a row that no longer exists.
 //
-// MUTATION: resolve it on the pool (r.db) before BEGIN and the ordered
-// expectations below fail on the out-of-transaction query.
+// MUTATION: drop the lookup, or issue it after the UPDATE.
+//
+// WHAT THIS TEST CANNOT SEE, again: whether the lookup went to the transaction
+// or to the pool. Passing r.db to lookupRoleTemplateID instead of tx keeps every
+// expectation below matching. TestReducerIssuesEveryStatementOnTheTransaction
+// catches it, and catches it in the ARGUMENT position specifically, which is
+// the form that never writes r.db.Query anywhere.
 func TestReducerUpdateMemberRoleResolvesTheTemplateInTheTransaction(t *testing.T) {
 	db, mock, err := newSQLMock()
 	if err != nil {
