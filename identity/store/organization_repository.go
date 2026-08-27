@@ -309,15 +309,25 @@ func (r *OrganizationRepository) AddMemberWithRoleTemplate(ctx context.Context, 
 	return requireRow(res, "organization by id")
 }
 
+// rowQuerier is the single-row read both a *sql.DB and a *sql.Tx satisfy.
+//
+// It exists so lookupRoleTemplateID can be reached from inside a transaction
+// (Reducer.UpdateMemberRole) and from the pool (AddMemberWithParams) without a
+// second copy of the statement.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
 // lookupRoleTemplateID resolves a role template's ID by name, shared by
-// AddMemberWithParams and UpdateMemberRole. Returns an error when the name
-// does not resolve, rather than a silent NULL role — callers that intend no
-// role should use AddMemberWithRoleTemplate(nil) / UpdateMemberRoleTemplate(nil).
-func (r *OrganizationRepository) lookupRoleTemplateID(ctx context.Context, roleTemplateName string) (*string, error) {
+// AddMemberWithParams, UpdateMemberRole and Reducer.UpdateMemberRole. Returns an
+// error when the name does not resolve, rather than a silent NULL role —
+// callers that intend no role should use AddMemberWithRoleTemplate(nil) /
+// UpdateMemberRoleTemplate(nil).
+func lookupRoleTemplateID(ctx context.Context, q rowQuerier, roleTemplateName string) (*string, error) {
 	query := `SELECT id FROM role_templates WHERE name = $1`
 	var id string
-	err := r.db.QueryRowContext(ctx, query, roleTemplateName).Scan(&id)
-	if err == sql.ErrNoRows {
+	err := q.QueryRowContext(ctx, query, roleTemplateName).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("role template %q not found", roleTemplateName)
 	}
 	if err != nil {
@@ -329,7 +339,7 @@ func (r *OrganizationRepository) lookupRoleTemplateID(ctx context.Context, roleT
 // AddMemberWithParams adds a user to an organization with the specified role template (by template name)
 // This is a convenience method that looks up the role template by name
 func (r *OrganizationRepository) AddMemberWithParams(ctx context.Context, orgID, userID, roleTemplateName string, scope OrgScope) error {
-	id, err := r.lookupRoleTemplateID(ctx, roleTemplateName)
+	id, err := lookupRoleTemplateID(ctx, r.db, roleTemplateName)
 	if err != nil {
 		return err
 	}
@@ -393,7 +403,7 @@ func (r *OrganizationRepository) UpdateMemberRoleTemplate(ctx context.Context, o
 // UpdateMemberRole changes a user's role template in an organization (by template name)
 // This is a convenience method that looks up the role template by name
 func (r *OrganizationRepository) UpdateMemberRole(ctx context.Context, orgID, userID, roleTemplateName string, scope OrgScope) error {
-	id, err := r.lookupRoleTemplateID(ctx, roleTemplateName)
+	id, err := lookupRoleTemplateID(ctx, r.db, roleTemplateName)
 	if err != nil {
 		return err
 	}
