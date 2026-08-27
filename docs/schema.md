@@ -102,6 +102,55 @@ SELECT version, dirty FROM identity.identity_schema_migrations;
 
 or from Go via `identity.GetMigrationVersion(db)`.
 
+### Assert the version at startup
+
+Reading the version is only half of it: nothing told a consumer what to compare
+it against. This module's repositories address post-base columns
+**unconditionally** — no capability probe, no fallback, no version branch — so
+the migration chain is a hard precondition, and a consumer that stops short of it
+starts cleanly and then fails on live traffic.
+
+`identity` **requires identity migration `000007`** or later. `RequiredSchemaVersion`
+is that number, `SchemaRequirements()` is the list of columns behind it, and
+`VerifySchemaVersion` is the check:
+
+```go
+// Refuse to serve rather than fail every audited request.
+if err := identity.VerifySchemaVersion(ctx, identityDB); err != nil {
+    return err
+}
+```
+
+It fails closed on a chain that has never been applied, a chain below the
+required version, a chain marked `dirty`, and a version it cannot read; the error
+names the missing columns and the migration that adds each one. `UnmetSchemaRequirements(v)`
+returns the same list for an arbitrary version, for a consumer building its own
+readiness payload.
+
+| Column | Added by | Read/written by |
+| ------ | -------- | --------------- |
+| `organizations.idp_type`, `organizations.idp_name` | `000003` | `store.OrganizationRepository` |
+| `oidc_config.name`, `provider_type`, `extra_config`, `created_by`, `updated_by` | `000003` | `store.OIDCConfigRepository` |
+| `api_keys.expiry_notification_sent_at` | `000003` | `store.APIKeyRepository` |
+| `audit_logs.actor_email` | `000007` | `store.AuditRepository.CreateAuditLog` |
+
+The last row is why the check exists. `CreateAuditLog` writes `actor_email` on
+every audited request; against a `000006` schema every one of them returns
+SQLSTATE `42703`, at request time, in a process whose startup log already said
+migrations completed — about the **app's own** chain, which is a different chain.
+A consuming app reporting only its own migration version is not reporting this
+one.
+
+`VerifySchemaVersion` and `VerifySchemaRouting` answer neighbouring questions and
+neither implies the other: the first asks whether the identity chain has been
+applied far enough, the second asks whether the connection reaches the tables
+that chain created. Call both.
+
+A consumer that calls `identity.RunMigrations(db, "up")` during startup satisfies
+the version check by construction and may still call it — the chain is at head
+afterwards, so it costs one round trip. A consumer that migrates out of band, or
+behind a feature flag, is the case it exists for.
+
 The runner takes a Postgres advisory lock (golang-migrate default), and the base
 migrations use idempotent DDL (`CREATE … IF NOT EXISTS`, `ON CONFLICT DO
 NOTHING`), so it is safe to run from two apps concurrently against the same
