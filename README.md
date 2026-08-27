@@ -586,6 +586,19 @@ self, when either side's `SchemaVersion` is empty, or when the two schema MAJORs
 five rejection cases in all, listed in
 [docs/suite-coupling.md](docs/suite-coupling.md#version-negotiation-negotiatecompat).
 
+## Tenancy model
+
+**[docs/tenancy-model.md](docs/tenancy-model.md) states the estate's target tenancy model**
+— the host is the content tenant, the organisation is the editorial scope, and the state
+manager is single-host by design. It is the document to read before changing anything that
+touches `organization_id`, namespace ownership, the Terraform protocol surface, or a scoped
+read in either application.
+
+It also records the identity topology that decision implies — **one realm per host**,
+resolved by the connection via `schema_routing.go`, with a host's organisations living
+inside its realm. Under that model this module must **never** gain a host column:
+organisation-name uniqueness is per-host by topology, not by schema.
+
 The manifest route is `suite.ManifestPath`; register your handler from that constant
 rather than a copied literal so the publisher and the discovery client cannot drift apart.
 
