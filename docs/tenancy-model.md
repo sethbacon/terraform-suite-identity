@@ -1,8 +1,9 @@
 # Tenancy Model
 
-**Status: decided (2026-08-26), not yet implemented.** This document states the target
-model for the whole estate. Anything already built that contradicts it is drift, not
-precedent — that includes code in this module.
+**Status: decided (2026-08-26), including the organisation question; not yet
+implemented.** This document states the target model for the whole estate. Anything
+already built that contradicts it is drift, not precedent — that includes code in this
+module.
 
 Read this before changing anything that touches `organization_id`, namespace ownership,
 the Terraform protocol surface, or a scoped read in either application.
@@ -57,32 +58,84 @@ nobody" in the other, with each app correct about its own model.
 
 ---
 
-## The open question: do organisations get a host?
+## Organisations and hosts: N organisations per host, realm per host
 
-**This is not yet decided and it lands in this module.**
+**Decided 2026-08-26, superseding the earlier open question.** Several organisations
+share one host, and the organisation question is answered by *identity topology*, not
+by a schema change in this module.
 
-`organizations.name` is `VARCHAR(255) UNIQUE NOT NULL` with no host column. Under
-host-as-tenant that has two consequences:
+### Three planes of configuration
 
-- two hosts cannot both have an organisation named `platform` — the same collision the
-  host discriminator solves for namespaces, reappearing one level up
-- every organisation picker and admin list shows **every host's** organisations
+The apparent contradiction — "organisations divide teams within a host" versus "an
+organisation configures identity, mirrors and binaries, which are host-level
+singletons" — dissolves by splitting configuration by the question it answers:
 
-Two ways out, and they are very different in size:
+| Plane | Owned by | Contains |
+|---|---|---|
+| **Platform** | platform admin | storage, host creation, assigning each host's owning organisation |
+| **Host** | the host's **owning organisation** | identity/IdP, binaries hosted, provider mirror and version approval, domain and aliases |
+| **Organisation** | each organisation | SCM connections, module publishing, scanning preferences, notifications, teams |
 
-**(a) Organisations become host-scoped.** A host column (or a host-owning realm) in
-this module, and `UNIQUE (host, name)`. Every consumer of this module is affected.
+When the platform admin creates a host they assign its **owning organisation**. That
+organisation configures the host plane. The other organisations on the host are
+editorial tenants and configure only their own plane. The platform admin's remit
+narrows to the platform plane — a deliberate reduction from today's admin wildcard,
+and an authorization refactor in the registry, not a configuration change.
 
-**(b) One host is one identity realm.** A host then implies its own identity database
-and its own state-manager deployment, and only the *registry process* is multi-host.
-That still buys something real — one registry serving many hosts means one cache, one
-mirror sync, one binary sync rather than N — but it is an **operational** saving, not
-an isolation one. Be clear which is being bought.
+### Identity: one realm per host — and no host column, ever
 
-Until this is settled, **do not add a host column anywhere in this module**, and do not
-assume organisations are global in new registry code.
+This module addresses every table **unqualified**; the realm is chosen by the
+connection (`schema_routing.go`). That is the mechanism: **one identity realm per
+host**, with a host's organisations living inside its realm.
 
----
+The consequence that decides the earlier question: `organizations.name UNIQUE` becomes
+per-host *automatically*, because each host is a separate realm. Two hosts can both
+hold an organisation named `platform` with **zero schema changes here**. The earlier
+instruction stands, strengthened: this module must not gain a host column — under this
+model one would be wrong, not merely premature.
+
+Two costs, stated plainly:
+
+- **Host→realm resolution is a security boundary.** `schema_routing.go` already
+  documents that a wrong `search_path` *succeeds silently* — same table names,
+  compatible columns, split-brain identity. Realm-per-host multiplies that hazard by
+  the number of hosts. The resolver needs a guard that fails closed on an unknown
+  host, with the same rigour as the `Host`-header trust below. A convention is not
+  enough.
+- **Cross-host queries stop existing.** Platform-wide views become fan-outs. That is
+  isolation working as intended, but the platform plane therefore needs its own small
+  store — the hosts table, `platform_admins`, storage configuration — because it can
+  live inside no single realm.
+
+### Storage: content-addressed blobs, capability URLs
+
+Sync of binaries and providers is storage-aware and deduplicates:
+
+```
+blobs stored once:        blobs/sha256/<digest>          ← shared, content-addressed
+per-host metadata row:    (host, namespace, …) → digest  ← where isolation lives
+```
+
+Deduplication means the blob store is deliberately *not* isolated, so isolation moves
+entirely to the metadata layer — and provider hashes are public, so a digest is not a
+secret. The download flow that makes this safe:
+
+1. the protocol handler resolves the artifact in **this host's** metadata
+2. it authorizes the caller for this host — the only authorization decision
+3. it issues a **short-TTL signed URL** — a capability, not an address
+4. the blob route serves **only valid signatures**, never a bare digest
+
+Three of the four storage backends already work exactly this way — Azure SAS, S3
+presigned, GCS signed, each behind `GetURL(path, ttl)` with a 15-minute TTL. The
+**local backend is the gap**: its `GetURL` returns an API path served by the
+unauthenticated files route with no signature. The build item is an HMAC-signed URL
+for the local backend (path + expiry + signature over a server secret, verified by the
+files handler), and a deployment check that the cloud buckets themselves refuse public
+reads — otherwise the signing is theatre.
+
+Version approval and mirror configuration gate which providers a **host** offers;
+today's defect where one shared approval row serves every caller becomes the correct
+per-host shape rather than an accident.
 
 ## Consequences to design for from the start
 
@@ -176,5 +229,6 @@ frontend, the parts that most likely reach you:
 - A **guard or gate** that asserts "everything is scoped" will be wrong for the
   registry's public routes. Guards should assert that every unscoped read is
   *declared*, not that none exists.
-- **UI work should not assume organisations are global** while the open question above
-  is unresolved — particularly organisation pickers and any admin list.
+- **UI work must not assume organisations are global.** Organisations are per-host by
+  realm topology: a picker or admin list shows one host's organisations, resolved by
+  the connection, never a cross-host union.

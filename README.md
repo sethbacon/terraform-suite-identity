@@ -594,9 +594,10 @@ manager is single-host by design. It is the document to read before changing any
 touches `organization_id`, namespace ownership, the Terraform protocol surface, or a scoped
 read in either application.
 
-It also records the one question that is still open **and that lands in this module**:
-whether organisations become host-scoped. Until that is settled, do not add a host column
-here, and do not assume organisations are global in new application code.
+It also records the identity topology that decision implies — **one realm per host**,
+resolved by the connection via `schema_routing.go`, with a host's organisations living
+inside its realm. Under that model this module must **never** gain a host column:
+organisation-name uniqueness is per-host by topology, not by schema.
 
 The manifest route is `suite.ManifestPath`; register your handler from that constant
 rather than a copied literal so the publisher and the discovery client cannot drift apart.
