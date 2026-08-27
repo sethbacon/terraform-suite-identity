@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.37.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.36.0...v0.37.0) (2026-08-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **identity:** one identifier grammar, lowercase only ([#274](https://github.com/sethbacon/terraform-suite-identity/issues/274))
+
+### Bug Fixes
+
+* **identity:** one identifier grammar, lowercase only ([#274](https://github.com/sethbacon/terraform-suite-identity/issues/274)) ([5b197c8](https://github.com/sethbacon/terraform-suite-identity/commit/5b197c8bea564f6bb35c03729e623d2ed2519d4a)), closes [#213](https://github.com/sethbacon/terraform-suite-identity/issues/213)
+
+
+### Documentation
+
+* **tenancy:** state the estate's tenancy model, and the question it leaves open ([#271](https://github.com/sethbacon/terraform-suite-identity/issues/271)) ([376635d](https://github.com/sethbacon/terraform-suite-identity/commit/376635d7209aff0be385155eb67bcb1bf0817d17))
+
 ## [0.36.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.35.2...v0.36.0) (2026-08-26)
 
 
