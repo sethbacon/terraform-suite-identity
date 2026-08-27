@@ -71,6 +71,10 @@ type AuditSweepOption func(*auditSweepFilter)
 // does not get a hold check that silently matched nothing.
 type auditSweepFilter struct {
 	holdTable string
+	// holdTableSet distinguishes "no option given" from WithLegalHolds("").
+	// Without it the two are the same value and cannot be told apart, which is
+	// exactly how the empty name became a silent no-op.
+	holdTableSet bool
 }
 
 // WithLegalHolds exempts from deletion any audit row whose created_at falls
@@ -94,6 +98,7 @@ type auditSweepFilter struct {
 func WithLegalHolds(table string) AuditSweepOption {
 	return func(f *auditSweepFilter) {
 		f.holdTable = table
+		f.holdTableSet = true
 	}
 }
 
@@ -119,8 +124,26 @@ func newAuditSweepFilter(opts []AuditSweepOption) auditSweepFilter {
 // held rows are never selected in the first place, so each batch is a full
 // batch of deletable rows and the loop terminates.
 func (f auditSweepFilter) exemption() (string, error) {
-	if f.holdTable == "" {
+	// An UNSET filter means the caller passed no WithLegalHolds at all, which is
+	// the documented way to sweep without exemptions. That stays a no-op.
+	if !f.holdTableSet {
 		return "", nil
+	}
+	// WithLegalHolds("") is a DIFFERENT thing and is now refused.
+	//
+	// It used to return ("", nil) -- an unprotected sweep, silently, from a
+	// caller that had asked for protection. That is the fail-open shape: a
+	// consumer wiring WithLegalHolds(cfg.HoldTable) against an unset config got
+	// a sweep with no exemption and no error, while VerifyLegalHoldTable
+	// REJECTED the same empty value at startup. The startup check and the sweep
+	// disagreed about what "" meant, and the sweep's answer was the dangerous
+	// one.
+	//
+	// Nothing legitimate is lost: a caller that wants no exemption omits the
+	// option, which is what the unset branch above is for.
+	if f.holdTable == "" {
+		return "", fmt.Errorf("legal-hold table: WithLegalHolds was given an empty name; " +
+			"omit the option entirely to sweep without exemptions, or pass the table")
 	}
 	quoted, err := quoteAuditTable(f.holdTable)
 	if err != nil {

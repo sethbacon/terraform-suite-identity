@@ -173,3 +173,73 @@ func TestVerifyLegalHoldTableNeedsAConnection(t *testing.T) {
 		t.Fatal("a nil database was accepted")
 	}
 }
+
+// TestEmptyHoldTableFailsClosed.
+//
+// WithLegalHolds("") used to return an empty exemption and a NIL ERROR -- an
+// unprotected sweep, silently, from a caller that had explicitly asked for
+// protection. A consumer wiring WithLegalHolds(cfg.HoldTable) against an unset
+// config got exactly that, while VerifyLegalHoldTable REJECTED the same empty
+// value at startup. The startup check and the sweep disagreed about what ""
+// meant, and the sweep took the dangerous reading.
+//
+// The distinction that makes this expressible is holdTableSet: without it,
+// "no option given" and "option given with an empty name" are the same value
+// and cannot be told apart.
+func TestEmptyHoldTableFailsClosed(t *testing.T) {
+	// No option at all: the documented way to sweep without exemptions.
+	clause, err := newAuditSweepFilter(nil).exemption()
+	if err != nil {
+		t.Fatalf("a sweep with no options errored: %v", err)
+	}
+	if clause != "" {
+		t.Errorf("a sweep with no options rendered an exemption: %q", clause)
+	}
+
+	// Explicitly asking for holds, with nothing to hold against.
+	if _, err := newAuditSweepFilter([]AuditSweepOption{WithLegalHolds("")}).exemption(); err == nil {
+		t.Error("WithLegalHolds(\"\") produced no error.\n" +
+			"That is an unprotected sweep from a caller that asked to be protected -- and " +
+			"VerifyLegalHoldTable rejects the same value, so the startup check and the sweep " +
+			"would disagree about whether the deployment is safe.")
+	}
+
+	// And a real name still works.
+	clause, err = newAuditSweepFilter([]AuditSweepOption{WithLegalHolds("legal_holds")}).exemption()
+	if err != nil {
+		t.Fatalf("a valid hold table errored: %v", err)
+	}
+	if clause == "" {
+		t.Error("a valid hold table rendered no exemption")
+	}
+}
+
+// TestVerifyAndSweepAgreeOnEveryTableName is the property, rather than the one
+// value that happened to break it.
+//
+// If VerifyLegalHoldTable accepts a name the sweep refuses, an operator gets a
+// green startup and a failing sweep. If the sweep accepts one Verify refuses,
+// they get the opposite -- and that direction deletes data. The two must agree
+// on every input, not just on the empty string.
+func TestVerifyAndSweepAgreeOnEveryTableName(t *testing.T) {
+	for _, name := range []string{
+		"", "   ", "legal_holds", "identity.legal_holds", "a.b.c",
+		"legal-holds", "1legal", "legal holds", `legal";DROP TABLE x--`,
+		"MixedCase", "legal_holds\x00",
+	} {
+		// The sweep's view.
+		_, sweepErr := newAuditSweepFilter([]AuditSweepOption{WithLegalHolds(name)}).exemption()
+		// Verify's view, reached through the same validator it uses.
+		_, verifyErr := quoteAuditTable(name)
+
+		if (sweepErr == nil) != (verifyErr == nil) {
+			t.Errorf("name %q: the sweep %s it but the startup check %s it.\n"+
+				"They must agree: a name one accepts and the other refuses means either a green "+
+				"startup with a broken sweep, or -- worse -- a verified deployment whose sweep "+
+				"deletes without the exemption.",
+				name,
+				map[bool]string{true: "accepts", false: "refuses"}[sweepErr == nil],
+				map[bool]string{true: "accepts", false: "refuses"}[verifyErr == nil])
+		}
+	}
+}
