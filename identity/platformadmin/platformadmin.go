@@ -65,7 +65,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"regexp"
 	"strings"
 	"time"
 
@@ -175,18 +174,18 @@ type AuditIntentWriter func(ctx context.Context, tx *sql.Tx) error
 // survives errors.Is.
 type Predicate func(ctx context.Context, remaining []Grant) error
 
-// identifierPattern is a bare, unquoted SQL identifier: a letter or underscore
-// followed by letters, digits, underscores or dollar signs. Postgres allows
-// more inside double quotes, and that is precisely what is refused here — a
-// table name is the one part of these queries that cannot be a bind parameter,
-// so it is admitted only in the shape that has no interpretation beyond itself.
-var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
-
-// maxIdentifierLen is Postgres's NAMEDATALEN-1. A longer name is silently
-// TRUNCATED by the server, so two carriers configured with names differing
-// only past this point would address one table while taking two different
-// floor locks. Refused rather than truncated.
-const maxIdentifierLen = 63
+// The accepted identifier grammar lives in identity/internal/pgquote (#213).
+//
+// It used to be defined here as ^[A-Za-z_][A-Za-z0-9_$]*$, accepting mixed
+// case, while identity/auditoutbox refused it -- and an application wiring a
+// carrier and an outbox against one database had to satisfy both, so the strict
+// grammar was already the effective one by intersection. The permissive branch
+// here was unreachable for every consumer that exists.
+//
+// Tightened to lowercase-only, which is a real narrowing of what this package
+// accepts: a table genuinely created as quoted "MixedCase" can no longer be
+// named. That case is refused deliberately -- see the folding argument in
+// pgquote/identifier.go -- and no consumer in the estate has ever passed one.
 
 // Carrier reads and writes one application's platform-admin grant table.
 type Carrier struct {
@@ -278,13 +277,13 @@ func quoteTable(table string) (string, error) {
 	}
 	quoted := make([]string, 0, len(parts))
 	for _, p := range parts {
-		if !identifierPattern.MatchString(p) {
+		if !pgquote.ValidIdentifier(p) {
 			return "", fmt.Errorf("%w: %q in table name %q is not a bare SQL identifier",
 				ErrNotConfigured, p, table)
 		}
-		if len(p) > maxIdentifierLen {
+		if len(p) > pgquote.MaxIdentifierLength {
 			return "", fmt.Errorf("%w: %q in table name %q is %d bytes, over Postgres's %d-byte limit",
-				ErrNotConfigured, p, table, len(p), maxIdentifierLen)
+				ErrNotConfigured, p, table, len(p), pgquote.MaxIdentifierLength)
 		}
 		quoted = append(quoted, pgquote.Identifier(p))
 	}

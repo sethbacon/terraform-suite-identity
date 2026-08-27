@@ -47,7 +47,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
@@ -129,7 +128,7 @@ func (f auditSweepFilter) exemption() (string, error) {
 	}
 	// Not a #nosec: gosec does not flag this Sprintf, because the string is
 	// returned rather than handed to a database call here. Recorded anyway —
-	// quoted is validated against auditIdentifierPattern and escaped by
+	// quoted is validated against pgquote.ValidIdentifier and escaped by
 	// pgquote.Identifier, and the column names are compile-time constants, so
 	// nothing caller-controlled reaches the SQL.
 	return fmt.Sprintf(`
@@ -213,7 +212,7 @@ func VerifyLegalHoldTable(ctx context.Context, db *sql.DB, table string) error {
 	// all; the answer is entirely in whether the statement planned.
 	// #nosec G201 -- this Sprintf DOES reach a database call, which is why it
 	// is the one suppression in this file that gosec exercises. quoted is
-	// validated against auditIdentifierPattern and escaped by
+	// validated against pgquote.ValidIdentifier and escaped by
 	// pgquote.Identifier; the three column names are compile-time constants.
 	probe := fmt.Sprintf(`SELECT %s, %s, %s FROM %s WHERE false`,
 		LegalHoldActiveColumn, LegalHoldStartDateColumn, LegalHoldEndDateColumn, quoted)
@@ -236,18 +235,25 @@ func bareName(table string) string {
 
 func legalHoldIndexName(table string) (string, error) {
 	name := "idx_" + bareName(table) + "_active_range"
-	if !auditIdentifierPattern.MatchString(name) {
+	if !pgquote.ValidIdentifier(name) {
 		return "", fmt.Errorf("legal-hold table %q yields an invalid index name %q", table, name)
 	}
-	if len(name) > maxAuditIdentifierLen {
-		name = name[:maxAuditIdentifierLen]
+	if len(name) > pgquote.MaxIdentifierLength {
+		name = name[:pgquote.MaxIdentifierLength]
 	}
 	return pgquote.Identifier(name), nil
 }
 
-var auditIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
-
-const maxAuditIdentifierLen = 63
+// The accepted identifier grammar lives in identity/internal/pgquote (#213).
+//
+// This file used to carry its own copy, with the comment: "Mirrors
+// platformadmin.quoteTable; kept here because the two packages do not import
+// each other and a shared internal helper for two call sites would be a package
+// whose only purpose is to be shared."
+//
+// That was a fair call at two call sites. It stopped being one at three, and
+// what it cost was drift: this copy and platformadmin's accepted mixed case
+// while auditoutbox refused it.
 
 // quoteAuditTable validates and quotes a "table" or "schema.table" reference.
 // Mirrors platformadmin.quoteTable; kept here because the two packages do not
@@ -265,12 +271,12 @@ func quoteAuditTable(table string) (string, error) {
 	}
 	quoted := make([]string, 0, len(parts))
 	for _, p := range parts {
-		if !auditIdentifierPattern.MatchString(p) {
+		if !pgquote.ValidIdentifier(p) {
 			return "", fmt.Errorf("%q in legal-hold table %q is not a bare SQL identifier", p, table)
 		}
-		if len(p) > maxAuditIdentifierLen {
+		if len(p) > pgquote.MaxIdentifierLength {
 			return "", fmt.Errorf("%q in legal-hold table %q is %d bytes, over Postgres's %d-byte limit",
-				p, table, len(p), maxAuditIdentifierLen)
+				p, table, len(p), pgquote.MaxIdentifierLength)
 		}
 		quoted = append(quoted, pgquote.Identifier(p))
 	}

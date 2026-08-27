@@ -24,7 +24,6 @@ package auditoutbox
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/sethbacon/terraform-suite-identity/identity/internal/pgquote"
@@ -35,12 +34,11 @@ import (
 // mutation.
 var ErrInvalidTable = errors.New("identity/auditoutbox: invalid table name")
 
-// maxIdentifierLength is PostgreSQL's NAMEDATALEN-1. An identifier longer than
-// this is TRUNCATED rather than rejected by the server, which is how two
-// distinct generated names silently become one object.
-const maxIdentifierLength = 63
-
-var identifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
+// The grammar this package documents above is now defined once, in
+// identity/internal/pgquote, and shared with identity/platformadmin and
+// identity/store (#213). Those two used to accept mixed case while this package
+// refused it; the argument recorded in this file's header is the one that won.
+const maxIdentifierLength = pgquote.MaxIdentifierLength
 
 // table is a validated, optionally schema-qualified table identifier.
 //
@@ -84,13 +82,13 @@ func validateIdentifier(what, whole, part string) error {
 		return fmt.Errorf("%w: %s %q contains a %d-byte identifier %q; PostgreSQL truncates at %d, "+
 			"which would silently address a different object", ErrInvalidTable, what, whole, len(part), part, maxIdentifierLength)
 	}
-	if identifierPattern.MatchString(part) {
+	if pgquote.ValidIdentifier(part) {
 		return nil
 	}
 	// The case-specific message only when case is the ONLY problem: a name that
 	// is also malformed is not a folding question, and saying so would send the
 	// operator to lowercase something that still would not parse.
-	if lowered := strings.ToLower(part); lowered != part && identifierPattern.MatchString(lowered) {
+	if lowered := strings.ToLower(part); lowered != part && pgquote.ValidIdentifier(lowered) {
 		return fmt.Errorf("%w: %s %q contains upper case in %q. Unquoted identifiers fold to lower "+
 			"case and quoted ones do not, so a mixed-case name means two different tables; "+
 			"name the folded (lower-case) table", ErrInvalidTable, what, whole, part)
