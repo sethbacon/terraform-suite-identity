@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"os"
 )
 
 // The retention sweep deletes; legal hold preserves. Both halves shipped, and
@@ -242,4 +243,103 @@ func TestVerifyAndSweepAgreeOnEveryTableName(t *testing.T) {
 				map[bool]string{true: "accepts", false: "refuses"}[verifyErr == nil])
 		}
 	}
+}
+
+// TestVerifyProbeExercisesTheColumnsAsThePredicateDoes.
+//
+// The probe used to SELECT the three columns as a projection, which proves only
+// that they exist. The sweep uses them as `h.active AND ts >= h.start_date AND
+// ts <= h.end_date`, so a hold table whose `active` is TEXT passed verification
+// and then failed at the sweep's plan time -- verification-green did not mean
+// sweep-green, which is the one thing a startup check exists to guarantee.
+//
+// Asserted against the rendered SQL rather than a live database, because the
+// unit suite has none: what matters is that the probe's shape matches the
+// exemption's, and that is decidable from the text.
+func TestVerifyProbeExercisesTheColumnsAsThePredicateDoes(t *testing.T) {
+	src, err := os.ReadFile("audit_sweep.go")
+	if err != nil {
+		t.Fatalf("read audit_sweep.go: %v", err)
+	}
+	body, ok := funcBodyIn(string(src), "VerifyLegalHoldTable")
+	if !ok {
+		t.Fatal("VerifyLegalHoldTable not found; if it was renamed, point this guard at the new name")
+	}
+	// The probe must place the columns in a WHERE, not only in a SELECT list.
+	if !strings.Contains(body, "WHERE false AND") {
+		t.Error("the probe does not exercise the hold columns in a predicate.\n" +
+			"A projection proves only that the columns exist; the sweep uses them as booleans and " +
+			"timestamps, so a mistyped column would pass verification and fail at sweep time.")
+	}
+	for _, col := range []string{"LegalHoldActiveColumn", "LegalHoldStartDateColumn", "LegalHoldEndDateColumn"} {
+		if !strings.Contains(body, col) {
+			t.Errorf("the probe does not reference %s, so a table missing that column would "+
+				"verify clean", col)
+		}
+	}
+	// And it must still read nothing.
+	if !strings.Contains(body, "WHERE false") {
+		t.Error("the probe no longer short-circuits; a startup check must not scan the table")
+	}
+}
+
+// TestProbeAndExemptionUseTheSameColumns is the agreement property: the check
+// and the thing it certifies must read the same columns, or the check certifies
+// something else.
+func TestProbeAndExemptionUseTheSameColumns(t *testing.T) {
+	src, err := os.ReadFile("audit_sweep.go")
+	if err != nil {
+		t.Fatalf("read audit_sweep.go: %v", err)
+	}
+	probe, ok := funcBodyIn(string(src), "VerifyLegalHoldTable")
+	if !ok {
+		t.Fatal("VerifyLegalHoldTable not found")
+	}
+	exemption, ok := funcBodyIn(string(src), "exemption")
+	if !ok {
+		t.Fatal("exemption not found")
+	}
+	// Compared on the CONSTANT NAMES, not their values: both functions reference
+	// the identifiers rather than inlining "active". An earlier draft compared
+	// the values and reported a difference that was entirely its own -- the
+	// probe happens to interpolate them and the exemption passes them as
+	// Sprintf arguments, so neither contains the literal text.
+	for _, col := range []string{"LegalHoldActiveColumn", "LegalHoldStartDateColumn", "LegalHoldEndDateColumn"} {
+		inProbe := strings.Contains(probe, col)
+		inSweep := strings.Contains(exemption, col)
+		if inProbe != inSweep {
+			t.Errorf("column %q appears in the %s but not the other.\n"+
+				"The startup check and the sweep must read the same columns, or a green "+
+				"verification says nothing about whether the sweep will run.",
+				col, map[bool]string{true: "probe", false: "exemption"}[inProbe])
+		}
+	}
+}
+
+// funcBodyIn returns a top-level func body, matched by brace depth.
+func funcBodyIn(src, name string) (string, bool) {
+	i := strings.Index(src, "\nfunc "+name+"(")
+	if i < 0 {
+		if i = strings.Index(src, ") "+name+"("); i < 0 {
+			return "", false
+		}
+	}
+	open := strings.Index(src[i:], "{")
+	if open < 0 {
+		return "", false
+	}
+	start := i + open
+	depth := 0
+	for j := start; j < len(src); j++ {
+		switch src[j] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[start : j+1], true
+			}
+		}
+	}
+	return "", false
 }

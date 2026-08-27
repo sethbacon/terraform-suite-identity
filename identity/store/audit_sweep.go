@@ -233,12 +233,24 @@ func VerifyLegalHoldTable(ctx context.Context, db *sql.DB, table string) error {
 	// Exec whose result nobody reads — for a statement meant to change rows
 	// that is how a no-op passes for work. Here there is no result to read at
 	// all; the answer is entirely in whether the statement planned.
+	// The columns are exercised IN A PREDICATE, not selected as a projection.
+	//
+	// A projection only proves the columns EXIST. The sweep uses them as
+	// `h.active AND $ts >= h.start_date AND $ts <= h.end_date`, so a hold table
+	// whose active is TEXT, or whose dates are TEXT, passes a projection probe
+	// and then fails at the sweep's plan time with "argument of AND must be
+	// type boolean". Verification-green would not have meant sweep-green, which
+	// is the one thing a startup check exists to guarantee.
+	//
+	// WHERE false still short-circuits, so this plans the real expression and
+	// reads no rows.
 	// #nosec G201 -- this Sprintf DOES reach a database call, which is why it
 	// is the one suppression in this file that gosec exercises. quoted is
 	// validated against pgquote.ValidIdentifier and escaped by
 	// pgquote.Identifier; the three column names are compile-time constants.
-	probe := fmt.Sprintf(`SELECT %s, %s, %s FROM %s WHERE false`,
-		LegalHoldActiveColumn, LegalHoldStartDateColumn, LegalHoldEndDateColumn, quoted)
+	probe := fmt.Sprintf(
+		`SELECT 1 FROM %s h WHERE false AND h.%s AND now() >= h.%s AND now() <= h.%s`,
+		quoted, LegalHoldActiveColumn, LegalHoldStartDateColumn, LegalHoldEndDateColumn)
 	rows, err := db.QueryContext(ctx, probe)
 	if err != nil {
 		return fmt.Errorf("legal-hold table %q is not readable as the audit sweep will read it "+
