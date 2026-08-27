@@ -266,6 +266,28 @@ version, dirty, err := identity.GetMigrationVersion(db)
 `CREATE … IF NOT EXISTS` / `ON CONFLICT DO NOTHING` with an advisory lock, so it is safe
 for **detect-and-attach** when multiple apps run it against the same database.
 
+### Minimum schema version
+
+The store repositories name post-base columns **unconditionally** — there is no capability
+check and no fallback — so this module requires identity migration **`000007`** or later.
+Below it, `AuditRepository.CreateAuditLog` fails on every audited request with SQLSTATE
+`42703` (`column "actor_email" ... does not exist`), at request time, in a process that
+started cleanly. Assert it once at startup:
+
+```go
+if err := identity.VerifySchemaVersion(ctx, identityDB); err != nil {
+    return err // refuse to serve rather than fail every audited request
+}
+```
+
+`identity.RequiredSchemaVersion` is the number, `identity.SchemaRequirements()` lists the
+columns behind it, and `identity.UnmetSchemaRequirements(v)` reports which of them a given
+version is missing. A consumer that calls `RunMigrations(db, "up")` at startup satisfies
+this by construction; one that migrates out of band, or behind a feature flag, is the case
+it exists for. Note the identity chain is **separate** from the app's own migrations — an
+app logging its own schema version says nothing about this one. See
+[docs/schema.md](docs/schema.md#assert-the-version-at-startup).
+
 ### Schema routing
 
 The store repositories use unqualified table names, so *the connection decides the
