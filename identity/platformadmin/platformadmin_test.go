@@ -98,6 +98,27 @@ func TestNewRefusesATableNameThatIsNotABareIdentifier(t *testing.T) {
 		"an empty schema part":     ".platform_admins",
 		"an empty table part":      "registry.",
 		"over 63 bytes":            strings.Repeat("a", 64),
+		// REVERSED IN #213, and this entry used to be an ACCEPTED case
+		// asserting that "MixedCase.MixedTable" survived as
+		// `"MixedCase"."MixedTable"` -- on the reasoning that refusing it makes
+		// this package unusable against a table an operator genuinely created
+		// with quoted DDL.
+		//
+		// That reasoning was sound and lost to a better one. PostgreSQL folds
+		// an unquoted CREATE TABLE MixedCase to mixedcase, while a quoted
+		// "MixedCase" is a different, case-sensitive table -- so a package
+		// accepting mixed case must GUESS which the operator meant, and
+		// addresses the wrong one when it guesses wrong. Usually that is loud;
+		// where both tables exist it is silent, on a privileged mutation
+		// surface.
+		//
+		// identity/auditoutbox had refused it all along for exactly that
+		// reason, and any application wiring a carrier and an outbox against
+		// one database already had to satisfy both -- so the strict grammar was
+		// the effective one by intersection and this branch was unreachable for
+		// every consumer that exists.
+		"mixed case, which is ambiguous about which table was created": "MixedCase.MixedTable",
+		"mixed case, unqualified":                                      "MixedTable",
 	}
 	for name, table := range rejected {
 		t.Run(name, func(t *testing.T) {
@@ -129,7 +150,6 @@ func TestNewAcceptsQualifiedAndUnqualifiedTableNames(t *testing.T) {
 		{"schema-qualified", "registry.tsm_admins", `"registry"."tsm_admins"`},
 		{"surrounding whitespace is trimmed", "  platform_admins  ", `"platform_admins"`},
 		{"a leading underscore", "_leading_underscore", `"_leading_underscore"`},
-		{"mixed case survives quoting", "MixedCase.MixedTable", `"MixedCase"."MixedTable"`},
 		{"digits after the first character", "tsm.platform_admins_v2", `"tsm"."platform_admins_v2"`},
 	}
 	for _, tc := range accepted {
