@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.38.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.37.0...v0.38.0) (2026-08-27)
+
+
+### Features
+
+* **notify:** SendTest and delivery records carry the caller's organization scope ([#275](https://github.com/sethbacon/terraform-suite-identity/issues/275)) ([10ecf3c](https://github.com/sethbacon/terraform-suite-identity/commit/10ecf3c9a8abbf214685d2b179de25b9f8266de3)), closes [#246](https://github.com/sethbacon/terraform-suite-identity/issues/246)
+
+
+### Bug Fixes
+
+* **store:** an empty legal-hold table name fails closed ([#277](https://github.com/sethbacon/terraform-suite-identity/issues/277)) ([d63d0d3](https://github.com/sethbacon/terraform-suite-identity/commit/d63d0d3c0616df8ec71d9ca73c622761bf3a2338))
+* **store:** verify the hold table the way the sweep reads it ([#278](https://github.com/sethbacon/terraform-suite-identity/issues/278)) ([d623de3](https://github.com/sethbacon/terraform-suite-identity/commit/d623de390e6547a5de41fb678a79d860f174e1fe))
+
 ## [0.37.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.36.0...v0.37.0) (2026-08-27)
 
 
