@@ -132,23 +132,43 @@ func (n *Notifier) Notify(ctx context.Context, ev Event, opts ...ChannelQueryOpt
 		return
 	}
 	for i := range channels {
-		_ = n.deliver(ctx, &channels[i], ev.Title, ev.Message)
+		// opts forwarded so the delivery record is written under the same
+		// scope the channel was listed under.
+		_ = n.deliver(ctx, &channels[i], ev.Title, ev.Message, opts...)
 	}
 }
 
 // SendTest delivers a fixed test message to one channel (the admin UI "test" button).
-func (n *Notifier) SendTest(ctx context.Context, channelID string) error {
+//
+// The opts are forwarded to GetByID, and a consumer whose channels are
+// partitioned MUST pass a scope (#246).
+//
+// WHY THIS MATTERS MORE THAN IT LOOKS. channelID comes from the caller's
+// request, so an unscoped lookup is an IDOR on a SENDING surface: an
+// administrator of one organization who supplies another organization's channel
+// id makes this service POST to that organization's Slack or webhook URL. The
+// message is fixed and harmless; the disclosure is that the channel exists, and
+// the nuisance is delivered to somebody else's tenant.
+//
+// Consumers that do not partition their channels pass nothing and are
+// unaffected -- variadic, exactly as v0.31.0's repository options were.
+func (n *Notifier) SendTest(ctx context.Context, channelID string, opts ...ChannelQueryOption) error {
 	if n == nil || n.repo == nil {
 		return fmt.Errorf("notifications are not available")
 	}
 	// GetByID reports a missing channel as store.ErrNotFound; returning it
 	// unwrapped lets a handler map it to 404 with errors.Is instead of matching
 	// on the string "channel not found" this used to fabricate.
-	ch, err := n.repo.GetByID(ctx, channelID)
+	//
+	// A channel outside the scope is reported as NOT FOUND rather than
+	// forbidden, which is what the scoped GetByID already does: telling a
+	// caller that a channel exists but belongs to someone else is the
+	// disclosure the scope exists to prevent.
+	ch, err := n.repo.GetByID(ctx, channelID, opts...)
 	if err != nil {
 		return err
 	}
-	return n.deliver(ctx, ch, "Test notification", n.opts.TestMessage)
+	return n.deliver(ctx, ch, "Test notification", n.opts.TestMessage, opts...)
 }
 
 // SendTestEmail delivers an ad-hoc message directly through the shared SMTP
@@ -161,10 +181,10 @@ func (n *Notifier) SendTestEmail(ctx context.Context, recipients []string, subje
 	return n.sendEmail(ctx, strings.Join(recipients, ","), subject, body)
 }
 
-func (n *Notifier) deliver(ctx context.Context, ch *NotificationChannel, title, message string) error {
+func (n *Notifier) deliver(ctx context.Context, ch *NotificationChannel, title, message string, opts ...ChannelQueryOption) error {
 	target, err := n.decryptTarget(ch)
 	if err != nil {
-		n.record(ctx, ch.ID, err)
+		n.record(ctx, ch.ID, err, opts...)
 		return err
 	}
 	// Email targets are recipient address(es) sent through the shared relay;
@@ -177,10 +197,10 @@ func (n *Notifier) deliver(ctx context.Context, ch *NotificationChannel, title, 
 	}
 	if sendErr != nil {
 		n.logger.Warn("notification delivery failed", "channel", ch.Name, "error", sendErr)
-		n.record(ctx, ch.ID, sendErr)
+		n.record(ctx, ch.ID, sendErr, opts...)
 		return sendErr
 	}
-	n.record(ctx, ch.ID, nil)
+	n.record(ctx, ch.ID, nil, opts...)
 	return nil
 }
 
@@ -350,7 +370,7 @@ func ParseRecipients(list string) ([]string, error) {
 
 // record stamps the outcome of a delivery attempt. Errors are logged only —
 // a failure to record delivery status must never surface as a notify failure.
-func (n *Notifier) record(ctx context.Context, channelID string, sendErr error) {
+func (n *Notifier) record(ctx context.Context, channelID string, sendErr error, opts ...ChannelQueryOption) {
 	if n.repo == nil {
 		return
 	}
@@ -358,7 +378,12 @@ func (n *Notifier) record(ctx context.Context, channelID string, sendErr error) 
 	if sendErr != nil {
 		status, msg = "failed", sendErr.Error()
 	}
-	if err := n.repo.RecordDelivery(ctx, channelID, status, msg, time.Now()); err != nil {
+	// Scoped too, though the channel was already loaded under the same scope --
+	// so this cannot reach a row the caller could not see. Passed anyway
+	// because RecordDelivery accepts it, and an UPDATE that is unscoped only
+	// because nobody threaded the option is the kind of thing that becomes
+	// wrong when the surrounding code moves.
+	if err := n.repo.RecordDelivery(ctx, channelID, status, msg, time.Now(), opts...); err != nil {
 		n.logger.Error("failed to record delivery", "channel_id", channelID, "error", err)
 	}
 }
