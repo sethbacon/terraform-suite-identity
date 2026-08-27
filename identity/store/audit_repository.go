@@ -49,6 +49,19 @@ type AuditFilters struct {
 // at the cost of one index lookup. A caller that DOES set ActorEmail wins: that
 // is the path for recording an actor this database holds no users row for (a
 // federated entry from a sibling application, for instance).
+//
+// # Schema requirement
+//
+// actor_email is added by identity migration 000007 and is written here
+// UNCONDITIONALLY: there is no capability check, no fallback and no version
+// branch, deliberately (a library carrying compatibility shims for migrations it
+// owns carries them forever). Against a schema below 000007 every call returns
+// SQLSTATE 42703, undefined_column, at request time.
+//
+// That is a startup concern, not a per-call one. Call
+// identity.VerifySchemaVersion once before serving; it refuses a schema below
+// identity.RequiredSchemaVersion and names this column and the migration that
+// adds it. See identity/schema_version.go and issue #203.
 func (r *AuditRepository) CreateAuditLog(ctx context.Context, log *models.AuditLog) error {
 	log.ID = uuid.New().String()
 	log.CreatedAt = time.Now()

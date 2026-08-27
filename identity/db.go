@@ -156,7 +156,24 @@ func RunMigrationSteps(db *sql.DB, n int) error {
 // it before returning, so it is safe to call repeatedly — for example from a
 // readiness probe — without draining the caller's pool.
 func GetMigrationVersion(db *sql.DB) (version uint, dirty bool, err error) {
-	m, err := newMigrator(context.Background(), db)
+	return migrationVersion(context.Background(), db)
+}
+
+// migrationVersion is GetMigrationVersion with a caller-supplied context.
+//
+// It exists because VerifySchemaVersion is a startup assertion that belongs
+// under the same deadline as the rest of a consumer's startup work, and
+// GetMigrationVersion's signature — fixed since the module's first release —
+// has no context parameter to give it. The context governs the connection
+// acquisition inside newMigrator; golang-migrate's Version() reads the row
+// through that already-borrowed connection and takes no context of its own.
+//
+// A missing version row (migrate.ErrNilVersion) is reported as version 0, not
+// as an error: "the chain has never been applied" is an ANSWER, and callers
+// distinguish it by the zero rather than by matching a sentinel from a
+// dependency.
+func migrationVersion(ctx context.Context, db *sql.DB) (version uint, dirty bool, err error) {
+	m, err := newMigrator(ctx, db)
 	if err != nil {
 		return 0, false, err
 	}
