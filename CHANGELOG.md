@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.41.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.40.0...v0.41.0) (2026-08-31)
+
+
+### Features
+
+* **ci:** adopt the shared Dependabot CI-health check ([#290](https://github.com/sethbacon/terraform-suite-identity/issues/290)) ([52d97f8](https://github.com/sethbacon/terraform-suite-identity/commit/52d97f80450f6180b8ef3c0cf66c74aeeb0e341b))
+* **notify:** optional idempotency key for Notify, and a stated notify/mailer scope boundary ([9e0126e](https://github.com/sethbacon/terraform-suite-identity/commit/9e0126e7d454c531f1728f0e13f9c79c9b192519))
+* **store:** bounded, resumable reconciliation for role-template edits ([#286](https://github.com/sethbacon/terraform-suite-identity/issues/286)) ([1736884](https://github.com/sethbacon/terraform-suite-identity/commit/17368844d53b8c8671c5a731ef878a803bbcadc4))
+
 ## [0.40.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.39.0...v0.40.0) (2026-08-31)
 
 
