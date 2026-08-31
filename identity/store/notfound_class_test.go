@@ -837,6 +837,8 @@ func TestNotFoundClass_ExecResultDiscardersAreEnumerated(t *testing.T) {
 		"deactivateAllOIDCConfigsTx": "bulk UPDATE inside a transaction; zero rows means there were no configs",
 		"maybePruneExpiredRevocations": "best-effort bounded prune; it must never fail the revocation " +
 			"that triggered it, so it deliberately acts on nothing but the error",
+		"maybePruneExpiredClaims": "best-effort bounded prune; it must never fail the claim " +
+			"that triggered it, so it deliberately acts on nothing but the error",
 	}
 
 	got := execDiscarders(t)

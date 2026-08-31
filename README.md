@@ -12,6 +12,28 @@ The module is a **Go library** — it is linked into each app's binary, not run 
 separate service. Consuming it has no runtime/operational footprint; an app can use the
 shared schema or keep identity in its own schema (see [Schema routing](#schema-routing)).
 
+## Scope: shared suite plumbing, not only auth
+
+Most of this module is identity/auth-specific (`auth`, `auth/oidc`, `store`, `models`).
+Two packages are not: `identity/notify` and `identity/mailer` are general-purpose alert
+fan-out and SMTP transport with no identity concept at all — an app event like
+`module_published` or `drift_detected` has nothing to do with authentication. They live
+here anyway, on the same "fix a security issue once, every app gets it" reasoning
+`identity/notify`'s own package doc already gives: SSRF egress guarding, webhook-secret
+redaction, and key-rotation-capable encryption only need to be built and audited once.
+
+That coupling has a real cost, stated here rather than left implicit: because Go modules
+version as one indivisible unit, a consumer that wants only JWT/OIDC/scope-checking
+primitives still compiles in, and must re-vet on every dependency bump, the SMTP client
+and webhook-delivery code. Splitting `notify`/`mailer` into their own module would remove
+that coupling, but it is a breaking change for both consuming apps and isn't planned while
+this suite holds to no major-version bumps — this section exists so the current module
+boundary is a stated decision, not an emergent one (#157).
+
+`crypto` and `httpsafe` stay here uncontroversially: encrypting capability-bearing secrets
+and guarding egress to admin-configured URLs — including `notify`'s own webhook targets —
+are identity-adjacent in a way generic event fan-out is not.
+
 ## Packages
 
 | Package              | Purpose                                                                                                                                                                                                                                   |
@@ -269,7 +291,7 @@ for **detect-and-attach** when multiple apps run it against the same database.
 ### Minimum schema version
 
 The store repositories name post-base columns **unconditionally** — there is no capability
-check and no fallback — so this module requires identity migration **`000007`** or later.
+check and no fallback — so this module requires identity migration **`000008`** or later.
 Below it, `AuditRepository.CreateAuditLog` fails on every audited request with SQLSTATE
 `42703` (`column "actor_email" ... does not exist`), at request time, in a process that
 started cleanly. Assert it once at startup:
