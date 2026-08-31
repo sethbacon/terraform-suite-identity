@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.40.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.39.0...v0.40.0) (2026-08-31)
+
+
+### Features
+
+* **release-guard:** adopt the centralized release-PR closing-keyword guard ([ee64993](https://github.com/sethbacon/terraform-suite-identity/commit/ee64993a755a9c605e0865835b9b367aea59c688))
+
+
+### Bug Fixes
+
+* **ci:** a non-empty, non-ref-shaped comment satisfies both pin gates ([d1ffbbc](https://github.com/sethbacon/terraform-suite-identity/commit/d1ffbbc4a6338efcebe7079b60f247b94e1c47b3))
+* **ci:** correct the pin comment to name the commit actually referenced ([2afe133](https://github.com/sethbacon/terraform-suite-identity/commit/2afe133c30e973338b84a7a4513a81e6b40d20a1))
+* **ci:** drop the unresolvable pin comment zizmor's ref-version-mismatch flagged ([9f60080](https://github.com/sethbacon/terraform-suite-identity/commit/9f60080ca5a1a792ff7321d4e1af5bccbeb208e1))
+* **ci:** re-pin the release-close guard to the fixed shared-workflows commit ([90007ed](https://github.com/sethbacon/terraform-suite-identity/commit/90007edb5e05c3a53357b99c6f46fa09a0a9e3f9))
+
 ## [0.39.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.38.0...v0.39.0) (2026-08-27)
 
 
