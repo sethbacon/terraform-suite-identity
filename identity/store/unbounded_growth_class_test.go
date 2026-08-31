@@ -67,6 +67,13 @@ var writtenTableGrowth = map[string]tableGrowth{
 	// One row per revoked token. Bounded by RevokeToken's own self-prune, which
 	// is asserted separately below.
 	"revoked_tokens": growthAppendOnly,
+	// One row per distinct dedup key ever claimed by identity/notify's
+	// Notifier (issue #157), not per event -- but nothing here can tell a
+	// caller with well-bounded key cardinality from one that defeats its own
+	// dedup with an unbounded key, so this is still append-only rather than
+	// growthEntity. Bounded by ClaimDedup's own self-prune, asserted
+	// separately below.
+	"notify_dedup_claims": growthAppendOnly,
 }
 
 var insertIntoPattern = regexp.MustCompile(`(?i)INSERT\s+INTO\s+([a-z_][a-z0-9_]*)`)
@@ -75,7 +82,7 @@ var insertIntoPattern = regexp.MustCompile(`(?i)INSERT\s+INTO\s+([a-z_][a-z0-9_]
 // strictly-less-than comparison on a time column somewhere in the same
 // statement (the audit sweep puts its comparison in a subselect).
 func horizonDeletePattern(table string) *regexp.Regexp {
-	return regexp.MustCompile(`(?is)DELETE\s+FROM\s+` + table + `.{0,500}?(created_at|expires_at|revoked_at)\s*<`)
+	return regexp.MustCompile(`(?is)DELETE\s+FROM\s+` + table + `.{0,500}?(created_at|expires_at|revoked_at|claimed_at)\s*<`)
 }
 
 // packageSources returns the package's non-test .go files as name -> contents.
@@ -171,10 +178,46 @@ func TestUnboundedGrowthClass_EveryWrittenTableIsBounded(t *testing.T) {
 // deployment that forgets; attaching it to the write itself cannot be forgotten,
 // and this test is what keeps it attached.
 func TestUnboundedGrowthClass_RevocationPruneRidesTheWritePath(t *testing.T) {
-	const (
-		insertMarker = "INSERT INTO revoked_tokens"
-		pruneCall    = "maybePruneExpiredRevocations"
-	)
+	assertPruneRidesWritePath(t, pruneWritePathCheck{
+		table:        "revoked_tokens",
+		insertMarker: "INSERT INTO revoked_tokens",
+		pruneCall:    "maybePruneExpiredRevocations",
+		notAttached: "the denylist is only self-bounding while the prune rides the write path. " +
+			"Re-attach it, or the table grows for the life of any deployment that does not " +
+			"separately schedule CleanupExpiredRevocations (issue #154).",
+	})
+}
+
+// TestUnboundedGrowthClass_DedupPruneRidesTheWritePath is
+// TestUnboundedGrowthClass_RevocationPruneRidesTheWritePath's sibling for
+// notify_dedup_claims (issue #157): the same near-miss issue #154 found on
+// revoked_tokens -- a prune that exists but that nothing calls -- is equally
+// available to this table, so it gets the same guard.
+func TestUnboundedGrowthClass_DedupPruneRidesTheWritePath(t *testing.T) {
+	assertPruneRidesWritePath(t, pruneWritePathCheck{
+		table:        "notify_dedup_claims",
+		insertMarker: "INSERT INTO notify_dedup_claims",
+		pruneCall:    "maybePruneExpiredClaims",
+		notAttached: "the claim store is only self-bounding while the prune rides the write " +
+			"path. Re-attach it, or the table grows for the life of any deployment (issue #157).",
+	})
+}
+
+// pruneWritePathCheck parameterises assertPruneRidesWritePath over one
+// self-bounding table.
+type pruneWritePathCheck struct {
+	table        string
+	insertMarker string
+	pruneCall    string
+	notAttached  string
+}
+
+// assertPruneRidesWritePath asserts that every function in this package
+// which INSERTs into check.table also calls check.pruneCall in the same
+// function body -- the invariant that keeps a self-bounding table's prune
+// from silently becoming unreachable on a refactor.
+func assertPruneRidesWritePath(t *testing.T, check pruneWritePathCheck) {
+	t.Helper()
 
 	fset := token.NewFileSet()
 	var writers []string
@@ -193,7 +236,7 @@ func TestUnboundedGrowthClass_RevocationPruneRidesTheWritePath(t *testing.T) {
 
 			inserts := false
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				if lit, ok := n.(*ast.BasicLit); ok && strings.Contains(lit.Value, insertMarker) {
+				if lit, ok := n.(*ast.BasicLit); ok && strings.Contains(lit.Value, check.insertMarker) {
 					inserts = true
 				}
 				return true
@@ -211,32 +254,30 @@ func TestUnboundedGrowthClass_RevocationPruneRidesTheWritePath(t *testing.T) {
 				}
 				switch fun := call.Fun.(type) {
 				case *ast.SelectorExpr:
-					if fun.Sel.Name == pruneCall {
+					if fun.Sel.Name == check.pruneCall {
 						prunes = true
 					}
 				case *ast.Ident:
-					if fun.Name == pruneCall {
+					if fun.Name == check.pruneCall {
 						prunes = true
 					}
 				}
 				return true
 			})
 			if !prunes {
-				t.Errorf("%s writes revoked_tokens but never calls %s: the denylist is only "+
-					"self-bounding while the prune rides the write path. Re-attach it, or the "+
-					"table grows for the life of any deployment that does not separately "+
-					"schedule CleanupExpiredRevocations (issue #154).", fn.Name.Name, pruneCall)
+				t.Errorf("%s writes %s but never calls %s: %s",
+					fn.Name.Name, check.table, check.pruneCall, check.notAttached)
 			}
 		}
 	}
 
 	if len(writers) == 0 {
-		t.Fatalf("no function in this package was found inserting into revoked_tokens; "+
-			"this guard would pass vacuously (looked for the literal %q)", insertMarker)
+		t.Fatalf("no function in this package was found inserting into %s; "+
+			"this guard would pass vacuously (looked for the literal %q)", check.table, check.insertMarker)
 	}
 	if len(writers) > 1 {
 		sort.Strings(writers)
-		t.Logf("note: %d functions write revoked_tokens (%s); each must prune", len(writers),
+		t.Logf("note: %d functions write %s (%s); each must prune", len(writers), check.table,
 			strings.Join(writers, ", "))
 	}
 }

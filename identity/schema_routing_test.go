@@ -97,7 +97,7 @@ func TestVerifySchemaRouting_DetectsTheSplitBrainRouting(t *testing.T) {
 	if !errors.Is(err, ErrSchemaRouting) {
 		t.Errorf("error does not wrap ErrSchemaRouting: %v", err)
 	}
-	for _, want := range []string{"users resolves to public.users", "$user", "8 of 8"} {
+	for _, want := range []string{"users resolves to public.users", "$user", "9 of 9"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error omits %q, which is what an operator needs to act on:\n%v", want, err)
 		}

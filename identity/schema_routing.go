@@ -68,6 +68,7 @@ const SchemaName = identitySchemaName
 var repositoryTables = []string{
 	"api_keys",
 	"audit_logs",
+	"notify_dedup_claims",
 	"oidc_config",
 	"organization_members",
 	"organizations",

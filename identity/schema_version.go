@@ -67,7 +67,7 @@ import (
 // consumer pinned to an older schema starts failing VerifySchemaVersion the
 // moment it upgrades this module. That is the intended behaviour — the
 // alternative is the 42703 — but it belongs in the release notes.
-const RequiredSchemaVersion uint = 7
+const RequiredSchemaVersion uint = 8
 
 // SchemaRequirement is one column this module's SQL names that the base schema
 // does not create, together with the migration that adds it.
@@ -109,6 +109,8 @@ var schemaRequirements = []SchemaRequirement{
 	{Table: "organizations", Column: "idp_name", Version: 3},
 	{Table: "organizations", Column: "idp_type", Version: 3},
 	{Table: "audit_logs", Column: "actor_email", Version: 7},
+	{Table: "notify_dedup_claims", Column: "claimed_at", Version: 8},
+	{Table: "notify_dedup_claims", Column: "dedup_key", Version: 8},
 }
 
 // SchemaRequirements returns every post-base column this module's SQL requires,

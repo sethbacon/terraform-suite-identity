@@ -110,7 +110,7 @@ it against. This module's repositories address post-base columns
 the migration chain is a hard precondition, and a consumer that stops short of it
 starts cleanly and then fails on live traffic.
 
-`identity` **requires identity migration `000007`** or later. `RequiredSchemaVersion`
+`identity` **requires identity migration `000008`** or later. `RequiredSchemaVersion`
 is that number, `SchemaRequirements()` is the list of columns behind it, and
 `VerifySchemaVersion` is the check:
 
@@ -364,8 +364,9 @@ new sequential pair instead.
 | `000006` | `000006_hot_path_indexes` | Adds indexes for the query shapes the module now forces on every caller. The tenant scope (`AuditScope`, renamed `OrgScope` in v0.25.0) became a required parameter in v0.21.0, so every audit read carries an `organization_id` predicate that had no supporting index: this adds the composite `(organization_id, created_at DESC)` covering both the list/count and export-stream shapes. Also indexes `organization_members(user_id)` (previously only the trailing column of a unique, so unseekable — every membership resolution on the auth path depends on it), `api_keys(user_id)` and `api_keys(organization_id)`, and the two unindexed referencing columns whose parents the module deletes: `organization_members(role_template_id)` (SET NULL) and `revoked_tokens(user_id)` (CASCADE). Index-only and fully reversible. |
 
 | `000007` | `000007_delete_does_not_rehome_rows` | Stops a `DELETE` from moving a surviving row into a state that already means something else (issue #142). Drops the foreign keys on `audit_logs.user_id` and `audit_logs.organization_id` — those columns are a historical record, not live references, and every `ON DELETE` action available to a foreign key is wrong for one (see "Delete behavior" above). Changes `api_keys.user_id` from `SET NULL` to **`ON DELETE CASCADE`**, so deleting a user revokes their personal keys instead of promoting them into the org-service-credential shape. Adds `audit_logs.actor_email` (denormalised actor address, stamped by `CreateAuditLog`) and backfills it for every row whose user still exists. `organization_members.role_template_id` is deliberately untouched. |
+| `000008` | `000008_notify_dedup_claims` | Adds `notify_dedup_claims` (`dedup_key TEXT PRIMARY KEY`, `claimed_at TIMESTAMPTZ`), backing `Notifier.Notify`'s optional `Event.DedupKey` (issue #157): an atomic, TTL-bounded claim so a logical occurrence delivered by one caller — a sibling replica, or a periodic trigger that independently rediscovers the same fact — is not redelivered to every configured channel a second time. No expiry sweep; see the migration's own comment for why. |
 
-The current version is `000007`.
+The current version is `000008`.
 
 ### Where the "additive" rule has been broken, and why
 

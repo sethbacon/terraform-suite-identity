@@ -24,6 +24,7 @@ import (
 	"github.com/sethbacon/terraform-suite-identity/identity/crypto"
 	"github.com/sethbacon/terraform-suite-identity/identity/httpsafe"
 	"github.com/sethbacon/terraform-suite-identity/identity/mailer"
+	"github.com/sethbacon/terraform-suite-identity/identity/store"
 )
 
 // Event is a single alert-worthy occurrence to fan out to subscribed channels.
@@ -31,7 +32,35 @@ type Event struct {
 	Type    string
 	Title   string
 	Message string
+
+	// DedupKey, when set, makes this occurrence idempotent across concurrent
+	// callers -- including sibling replicas of a horizontally-scaled host,
+	// and a periodic trigger that independently rediscovers the same fact on
+	// more than one tick. The first caller to claim a given key within
+	// DedupTTL delivers; every other caller racing the same key (any
+	// replica, any process) finds the claim already held and returns
+	// without delivering and without error -- matching Notify's existing
+	// silent, best-effort semantics.
+	//
+	// Leave it empty for an event whose trigger is already exactly-once (a
+	// single HTTP request handling one admin action, for example). The
+	// empty key is the zero-cost default: Notify does not touch the claim
+	// store at all, so this field is free for every caller unaffected by
+	// the class of bug it exists to prevent.
+	DedupKey string
+	// DedupTTL bounds how long a claim blocks a redelivery of the same key.
+	// Zero means defaultDedupTTL. It is a reservation, not a permanent
+	// tombstone: once the window elapses, the same key can be claimed again
+	// -- necessary because "the same logical occurrence" can legitimately
+	// recur (a scanner version rediscovered after a data reset, a health
+	// check that fails again after recovering). Set it to roughly your
+	// trigger's own re-fire interval; the default suits a daily-or-slower
+	// poll.
+	DedupTTL time.Duration
 }
+
+// defaultDedupTTL is the claim window applied when Event.DedupTTL is zero.
+const defaultDedupTTL = time.Hour
 
 // Options carries the small pieces of copy/identity that differ between
 // consuming apps; everything else about channel delivery is identical.
@@ -59,6 +88,12 @@ type Notifier struct {
 	client      *http.Client
 	logger      *slog.Logger
 	opts        Options
+	// dedupRepo backs claimDedup. Constructed once, here, rather than per
+	// call: it carries a self-prune throttle (see NotifyDedupRepository)
+	// that a fresh repository on every call would reset to "prune now"
+	// every time. nil when repo is nil -- claimDedup treats that the same
+	// as any other claim-store error (won).
+	dedupRepo *store.NotifyDedupRepository
 }
 
 // NewNotifier builds a Notifier over the channel repository. smtp provides
@@ -84,6 +119,10 @@ func NewNotifier(repo *ChannelRepository, smtp SMTPProvider, tokenCipher *crypto
 	if smtp == nil {
 		smtp = func() mailer.Config { return mailer.Config{} }
 	}
+	var dedupRepo *store.NotifyDedupRepository
+	if repo != nil {
+		dedupRepo = store.NewNotifyDedupRepository(repo.db)
+	}
 	return &Notifier{
 		repo:        repo,
 		smtp:        smtp,
@@ -91,6 +130,7 @@ func NewNotifier(repo *ChannelRepository, smtp SMTPProvider, tokenCipher *crypto
 		client:      httpsafe.NewClient(10*time.Second, guard),
 		logger:      slog.With("component", "notify"),
 		opts:        opts,
+		dedupRepo:   dedupRepo,
 	}
 }
 
@@ -126,6 +166,11 @@ func (n *Notifier) Notify(ctx context.Context, ev Event, opts ...ChannelQueryOpt
 		n.logger.Error("notification channels are not configured", "event", ev.Type)
 		return
 	}
+	if !n.claimDedup(ctx, ev) {
+		n.logger.Debug("skipping duplicate notification: dedup key already claimed",
+			"event", ev.Type, "dedup_key", ev.DedupKey)
+		return
+	}
 	channels, err := n.repo.ListEnabledForEvent(ctx, ev.Type, opts...)
 	if err != nil {
 		n.logger.Error("failed to load notification channels", "event", ev.Type, "error", err)
@@ -136,6 +181,48 @@ func (n *Notifier) Notify(ctx context.Context, ev Event, opts ...ChannelQueryOpt
 		// scope the channel was listed under.
 		_ = n.deliver(ctx, &channels[i], ev.Title, ev.Message, opts...)
 	}
+}
+
+// claimDedup reports whether THIS call won ev's dedup claim and should
+// proceed to deliver. An empty DedupKey always wins (the zero-cost default:
+// no claim-store round trip at all).
+//
+// The actual claim -- one atomic UPSERT, not a check-then-act pair -- lives
+// on identity/store's NotifyDedupRepository, for the same reason
+// ClaimExpiryNotification lives on APIKeyRepository rather than here: every
+// migration-owned identity-schema table is addressed from identity/store, so
+// VerifySchemaRouting's inventory stays complete by construction. n.dedupRepo
+// is constructed once, at NewNotifier time, from the channel repository's
+// own *sql.DB -- not a new Notifier constructor parameter, so this field is
+// free for every existing caller -- and reused, because it carries a
+// self-prune throttle a fresh repository per call would defeat.
+//
+// migration 000008 (RequiredSchemaVersion) makes the claims table a startup
+// precondition like every other post-base column this module addresses, so
+// a genuine "table does not exist" is not an expected runtime case here. A
+// claim-store error is still treated as a WON claim regardless of its
+// cause (a connection blip, a lock wait timing out): this event still gets
+// delivered. Silently dropping an alert nobody asked to suppress is worse
+// than an occasional duplicate.
+func (n *Notifier) claimDedup(ctx context.Context, ev Event) bool {
+	if ev.DedupKey == "" {
+		return true
+	}
+	if n.dedupRepo == nil {
+		return true
+	}
+	ttl := ev.DedupTTL
+	if ttl <= 0 {
+		ttl = defaultDedupTTL
+	}
+
+	won, err := n.dedupRepo.ClaimDedup(ctx, ev.DedupKey, ttl)
+	if err != nil {
+		n.logger.Error("failed to claim notification dedup key; delivering without dedup protection",
+			"event", ev.Type, "dedup_key", ev.DedupKey, "error", err)
+		return true
+	}
+	return won
 }
 
 // SendTest delivers a fixed test message to one channel (the admin UI "test" button).

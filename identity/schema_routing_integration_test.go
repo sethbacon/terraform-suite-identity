@@ -163,6 +163,8 @@ var decoyPublicSchema = []string{
 	`CREATE TABLE public.revoked_tokens (
 		jti UUID PRIMARY KEY, user_id UUID NOT NULL,
 		expires_at TIMESTAMPTZ NOT NULL, revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+	`CREATE TABLE public.notify_dedup_claims (
+		dedup_key TEXT PRIMARY KEY, claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 }
 
 // TestIntegrationSchemaRoutingIsAsserted is the batch-12 gate: a connection
