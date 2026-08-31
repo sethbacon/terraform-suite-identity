@@ -102,6 +102,14 @@ var boolFields = map[string]struct {
 			"one and relaxing it is a word a reviewer sees in the diff. This is the shape " +
 			"mailer.Config should have had from the start."},
 
+	"store.TemplateReconcileResult.Done": {zeroSafe,
+		"false is what a consumer must read as 'not confirmed complete, do not proceed to " +
+			"UpdateRoleTemplate/DeleteRoleTemplate yet'. Every early return in ReconcileRoleTemplate " +
+			"— ctx cancelled, MaxBatches reached, and the unpopulated zero value alike — reports " +
+			"false; only a batch that planned a page and found it short of BatchSize sets it true. " +
+			"A caller that mishandles or ignores the field is left holding the conservative answer, " +
+			"the same direction issue #282 asks every guard in this file to fail toward."},
+
 	"notify.NotificationChannel.Enabled": {zeroInert,
 		"false means the channel does not deliver. A channel nobody enabled sending nothing is " +
 			"the conservative outcome."},
