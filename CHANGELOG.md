@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.42.0...v0.42.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **deps:** move golang.org/x/crypto to 0.56.0 for GO-2026-6354 and GO-2026-6355 ([#293](https://github.com/sethbacon/terraform-suite-identity/issues/293)) ([3100b3e](https://github.com/sethbacon/terraform-suite-identity/commit/3100b3e31ae7bb2c03247ed9c9d0e7b507d26707))
+
 ## [0.42.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.41.0...v0.42.0) (2026-09-02)
 
 
