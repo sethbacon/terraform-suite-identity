@@ -246,8 +246,21 @@ type authorityVerdict struct {
 	// Covered names the Reducer method that makes this reduction and its
 	// credential sweep one transaction. Empty unless Reduces.
 	Covered string
-	// Exempt is the written reason a reduction needs no Reducer. Exactly one of
-	// Covered and Exempt is set on a reduction; neither is set on a
+	// Reconciled names the method that makes this reduction and its credential
+	// sweep one OPERATION — reconcile first, mutate second, or neither — for
+	// the reductions whose blast radius rules out doing it in one transaction.
+	//
+	// It is a third verdict rather than a loose reading of Covered because the
+	// guarantee is genuinely weaker and a reader deserves to see which one a
+	// site has. Covered means the two halves cannot half-happen. Reconciled
+	// means they can — the sweep is many bounded transactions and the mutation
+	// is another — but the sweep cannot be SKIPPED, cannot run in the order
+	// that silently finds nobody, and cannot be left unfinished with the
+	// mutation applied anyway. Collapsing the two would let a future site claim
+	// atomicity it does not have.
+	Reconciled string
+	// Exempt is the written reason a reduction needs neither. Exactly one of
+	// Covered, Reconciled and Exempt is set on a reduction; none is set on a
 	// non-reduction.
 	Exempt string
 }
@@ -282,30 +295,37 @@ var authorityMutatorVerdicts = map[string]authorityVerdict{
 			"memberships and the keys bound to it in one statement.",
 	},
 
-	// ---- reductions deliberately NOT covered here -------------------------
+	// ---- reductions a bounded reconciliation covers (issue #282) -----------
 	//
 	// Both edit the TEMPLATE rather than a membership, so the principals whose
 	// authority moves are every member holding it — unbounded, and for a
-	// seeded template that is potentially every member in the deployment. A
-	// synchronous in-request transaction over that set would take row locks on
-	// most of organization_members and most of api_keys at once, and the
-	// failure mode of getting that wrong is a fleet-wide credential
-	// destruction event rather than a stranded key. The right shape is a
-	// reconciliation the operator can see and bound, which is separate work,
-	// filed as #282; what this entry buys is that it cannot go unnoticed in the
-	// meantime.
+	// seeded template that is potentially every member in the deployment. That
+	// is why these are Reconciled and not Covered: a synchronous in-request
+	// transaction over that set would take row locks on most of
+	// organization_members and most of api_keys at once, and the failure mode
+	// of getting it wrong is a fleet-wide credential destruction event rather
+	// than a stranded key.
+	//
+	// The plain repository methods remain exported and still invalidate
+	// nothing, exactly as OrganizationRepository.RemoveMember does beside
+	// Reducer.RemoveMember. What changed with #282 is that the un-swept
+	// reduction is now a CHOICE with a sanctioned alternative — naming a
+	// different symbol — rather than the only path this module offers.
 	"RoleTemplateRepository.UpdateRoleTemplate": {
-		Reduces: true,
-		Exempt: "unbounded blast radius: narrowing a template's scopes reduces authority for " +
-			"every membership holding it, so the sweep is a bounded reconciliation and not " +
-			"an in-request transaction. Tracked by #282, not covered by Reducer.",
+		Reduces: true, Reconciled: "TemplateWriter.UpdateRoleTemplate",
 	},
 	"RoleTemplateRepository.DeleteRoleTemplate": {
-		Reduces: true,
-		Exempt: "same unbounded blast radius as UpdateRoleTemplate; the ON DELETE SET NULL on " +
-			"organization_members.role_template_id leaves every affected member with no " +
-			"scopes, which is fail-closed for the membership but not for their keys. " +
-			"Tracked by #282, not covered by Reducer.",
+		Reduces: true, Reconciled: "TemplateWriter.DeleteRoleTemplate",
+	},
+
+	// The sanctioned path's own statements. They are the SAME two package
+	// constants the repository issues, which is why the scan finds them here
+	// too — and why there is no second copy of either statement to drift.
+	"TemplateWriter.UpdateRoleTemplate": {
+		Reduces: true, Reconciled: "TemplateWriter.UpdateRoleTemplate",
+	},
+	"TemplateWriter.DeleteRoleTemplate": {
+		Reduces: true, Reconciled: "TemplateWriter.DeleteRoleTemplate",
 	},
 
 	// ---- statements that touch an authority table but reduce nothing ------
@@ -332,7 +352,7 @@ var authorityMutatorVerdicts = map[string]authorityVerdict{
 //
 // TestAuthorityReductionInventoryFloorIsFalsifiable proves the floor is real by
 // handing the scan an EMPTY universe rather than by lowering it.
-const authorityInventoryFloor = 15
+const authorityInventoryFloor = 17
 
 // GUARD authority-reduction-inventory. Every statement in this package that can
 // remove derived authority is either made transactional by a Reducer method or
@@ -391,22 +411,41 @@ func TestAuthorityReductionInventoryIsAccountedFor(t *testing.T) {
 				m.Name, m.Position, m.Tables)
 			continue
 		}
+		verdicts := 0
+		for _, set := range []string{v.Covered, v.Reconciled, v.Exempt} {
+			if set != "" {
+				verdicts++
+			}
+		}
 		switch {
 		case !v.Reduces:
-			if v.Covered != "" || v.Exempt != "" {
+			if verdicts != 0 {
 				t.Errorf("%s is recorded as not reducing authority but also carries a "+
-					"coverage or exemption note; one of those is wrong", m.Name)
+					"coverage, reconciliation or exemption note; one of those is wrong", m.Name)
 			}
-		case v.Covered != "" && v.Exempt != "":
-			t.Errorf("%s is recorded as both covered and exempt", m.Name)
-		case v.Covered == "" && v.Exempt == "":
-			t.Errorf("%s (%s) reduces authority but is neither covered by a Reducer method "+
-				"nor exempt with a stated reason", m.Name, m.Position)
+		case verdicts > 1:
+			t.Errorf("%s carries more than one verdict (covered/reconciled/exempt); they are "+
+				"different guarantees and a site has exactly one", m.Name)
+		case verdicts == 0:
+			t.Errorf("%s (%s) reduces authority but is neither covered by a Reducer method, "+
+				"nor reconciled by a bounded sweep, nor exempt with a stated reason",
+				m.Name, m.Position)
 		case v.Covered != "":
 			if _, ok := byName[v.Covered]; !ok {
 				t.Errorf("%s is recorded as covered by %s, but the scan found no such "+
 					"statement-issuing method — the coverage claim resolves to nothing",
 					m.Name, v.Covered)
+			}
+		case v.Reconciled != "":
+			// Resolved the same way, and for the same reason: a reconciliation
+			// claim naming a method that issues no statement is a claim about
+			// nothing. The sanctioned writer issues the mutation itself (via
+			// the shared package constants) rather than delegating to the
+			// repository, which is what keeps it visible to this scan at all.
+			if _, ok := byName[v.Reconciled]; !ok {
+				t.Errorf("%s is recorded as reconciled by %s, but the scan found no such "+
+					"statement-issuing method — the reconciliation claim resolves to nothing",
+					m.Name, v.Reconciled)
 			}
 		}
 	}

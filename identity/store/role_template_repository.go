@@ -154,57 +154,105 @@ func (r *RoleTemplateRepository) CreateRoleTemplate(ctx context.Context, templat
 	return nil
 }
 
-// UpdateRoleTemplate updates an existing role template (non-system only).
+// updateRoleTemplateStmt and deleteRoleTemplateStmt are the two statements that
+// can reduce authority for every membership holding a template (issue #282).
 //
-// This method already refused to report a zero-row update as success before
-// v0.24.0; what changed is that its error now WRAPS ErrNotFound, so one
-// errors.Is check covers every accessor in the package instead of this one
-// needing a string match. The WHERE also filters is_system, so the sentinel here
-// means "no such template, or it is a system template" — both are "matched no
-// row", and the message says which possibilities apply.
-func (r *RoleTemplateRepository) UpdateRoleTemplate(ctx context.Context, template *models.RoleTemplate) error {
-	scopesJSON, err := json.Marshal(template.Scopes)
-	if err != nil {
-		return fmt.Errorf("failed to marshal role template scopes: %w", err)
-	}
-
-	query := `UPDATE role_templates SET display_name = $2, description = $3, scopes = $4, updated_at = $5
+// They are package constants with exactly one copy each because TWO callers
+// issue them: the plain repository methods below, and TemplateWriter in
+// template_write.go, which runs the credential reconciliation first and then
+// this same statement. A second hand-written copy in the writer would be a
+// statement that can drift from the one the repository's own tests and the
+// authority-reduction inventory are written against — and the WHERE clause here
+// carries the is_system immutability rule, which is not a detail worth having
+// two versions of.
+//
+// Being package constants is also what keeps both callers VISIBLE to the
+// inventory scan in authority_reduction_class_test.go: it resolves a
+// package-level string constant referenced by identifier inside a function
+// body, so every function that names one of these is attributed the statement.
+// A writer that delegated to the repository method instead would issue no SQL
+// of its own and would therefore be invisible to that scan, which is precisely
+// the "delegating wrappers" blind spot the guard documents about itself.
+const (
+	updateRoleTemplateStmt = `UPDATE role_templates SET display_name = $2, description = $3, scopes = $4, updated_at = $5
 			  WHERE id = $1 AND is_system = false`
 
-	result, err := r.db.ExecContext(ctx, query,
-		template.ID, template.DisplayName, template.Description, scopesJSON, time.Now())
-	if err != nil {
-		return fmt.Errorf("failed to update role template: %w", err)
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected updating role template: %w", err)
-	}
-	if n == 0 {
-		// The WHERE also matches on is_system = false, so zero rows means the
-		// template does not exist or is a system template. Surface it instead of
-		// reporting a silent success.
-		return fmt.Errorf("role template %s not found or is a system template (immutable): %w", template.ID, ErrNotFound)
-	}
-	return nil
+	deleteRoleTemplateStmt = `DELETE FROM role_templates WHERE id = $1 AND is_system = false`
+)
+
+// roleTemplateExecer is the subset of a database handle these two statements
+// need. Both *sqlx.DB (the repository's handle) and *sql.DB (the writer's)
+// satisfy it, so neither caller has to convert the other's handle type.
+type roleTemplateExecer interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
 }
 
-// DeleteRoleTemplate deletes a role template (non-system only).
+// updateRoleTemplateArgs renders one template as updateRoleTemplateStmt's
+// arguments, in its parameter order.
 //
-// As with UpdateRoleTemplate, the zero-row error now wraps ErrNotFound and
-// covers both "no such template" and "that template is a system template".
-func (r *RoleTemplateRepository) DeleteRoleTemplate(ctx context.Context, id uuid.UUID) error {
-	query := `DELETE FROM role_templates WHERE id = $1 AND is_system = false`
-	result, err := r.db.ExecContext(ctx, query, id)
+// Shared for the same reason the statement itself is: the argument list and the
+// $N placeholders are one fact, and a caller that assembled its own could put
+// the scopes where the description goes and still compile.
+func updateRoleTemplateArgs(template *models.RoleTemplate) ([]interface{}, error) {
+	scopesJSON, err := json.Marshal(template.Scopes)
 	if err != nil {
-		return fmt.Errorf("failed to delete role template: %w", err)
+		return nil, fmt.Errorf("failed to marshal role template scopes: %w", err)
+	}
+	return []interface{}{template.ID, template.DisplayName, template.Description, scopesJSON, time.Now()}, nil
+}
+
+// execRoleTemplateMutation runs one of the two statements above and applies the
+// shared zero-row rule.
+//
+// The zero-row error WRAPS ErrNotFound, so one errors.Is check covers every
+// accessor in the package rather than this one needing a string match. Because
+// both statements also filter is_system, zero rows means "no such template, or
+// it is a system template" — both are "matched no row", and the message says
+// which possibilities apply rather than reporting a silent success.
+func execRoleTemplateMutation(ctx context.Context, db roleTemplateExecer, stmt string, id uuid.UUID, args ...interface{}) error {
+	result, err := db.ExecContext(ctx, stmt, args...)
+	if err != nil {
+		return fmt.Errorf("failed to mutate role template: %w", err)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("failed to get rows affected deleting role template: %w", err)
+		return fmt.Errorf("failed to get rows affected mutating role template: %w", err)
 	}
 	if n == 0 {
 		return fmt.Errorf("role template %s not found or is a system template (immutable): %w", id, ErrNotFound)
 	}
 	return nil
+}
+
+// UpdateRoleTemplate updates an existing role template (non-system only).
+//
+// IT INVALIDATES NOTHING, and that is a choice this signature makes visible.
+// Narrowing a template's scopes narrows what every membership holding it
+// grants, while every API key those members hold keeps working from the scope
+// snapshot frozen on it at creation. TemplateWriter.UpdateRoleTemplate
+// (template_write.go) is the path that reconciles those credentials first and
+// then issues this same statement; this one is for a caller who has decided,
+// deliberately, that the reduction needs no sweep — an app that keeps its own
+// per-app mirror and sweeps from that, or an edit known to widen. Choosing it
+// is a different symbol rather than an omitted argument, exactly as choosing
+// OrganizationRepository.RemoveMember over Reducer.RemoveMember is.
+func (r *RoleTemplateRepository) UpdateRoleTemplate(ctx context.Context, template *models.RoleTemplate) error {
+	args, err := updateRoleTemplateArgs(template)
+	if err != nil {
+		return err
+	}
+	return execRoleTemplateMutation(ctx, r.db, updateRoleTemplateStmt, template.ID, args...)
+}
+
+// DeleteRoleTemplate deletes a role template (non-system only).
+//
+// As with UpdateRoleTemplate it invalidates nothing, and the blast radius is
+// larger: organization_members.role_template_id is ON DELETE SET NULL, so every
+// member holding the template is left with no role template — read everywhere
+// in this package as no scopes at all — while their API keys keep the scopes
+// the template used to grant. TemplateWriter.DeleteRoleTemplate is the path
+// that sweeps first; it must be, because after this statement commits there is
+// no longer any row saying who held the template.
+func (r *RoleTemplateRepository) DeleteRoleTemplate(ctx context.Context, id uuid.UUID) error {
+	return execRoleTemplateMutation(ctx, r.db, deleteRoleTemplateStmt, id, id)
 }

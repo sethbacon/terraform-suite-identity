@@ -110,6 +110,15 @@ var boolFields = map[string]struct {
 			"A caller that mishandles or ignores the field is left holding the conservative answer, " +
 			"the same direction issue #282 asks every guard in this file to fail toward."},
 
+	"store.TemplateWritten.Mutated": {zeroSafe,
+		"false means the template statement did not land — a refusal before the sweep, an " +
+			"unfinished reconciliation, or a failed write — so a caller that reads nothing and " +
+			"assumes the zero value concludes the edit did NOT take effect. That is the " +
+			"conservative reading in both directions: an operator who believes a narrowing " +
+			"landed when it did not goes and looks, whereas one who believes it landed when it " +
+			"did not would stop looking. Every path that sets it true has already run the " +
+			"credential sweep to completion."},
+
 	"notify.NotificationChannel.Enabled": {zeroInert,
 		"false means the channel does not deliver. A channel nobody enabled sending nothing is " +
 			"the conservative outcome."},

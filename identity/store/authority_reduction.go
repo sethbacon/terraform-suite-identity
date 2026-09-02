@@ -165,9 +165,12 @@ func NoAppCredentials(context.Context, *sql.Tx, Reduced) error { return nil }
 // DeleteRoleTemplate also reduce derived authority, for every membership
 // holding the template rather than for one principal. That sweep belongs in a
 // bounded reconciliation rather than an in-request transaction holding locks on
-// most of two tables, and is tracked separately as issue #282. The inventory
-// guard in authority_reduction_class_test.go records both as exempt with that
-// reason, so neither can go unnoticed.
+// most of two tables, so it is not a Reducer method and will not become one.
+// Its sanctioned path is TemplateWriter (template_write.go), which reconciles
+// the stranded credentials in bounded batches and only then issues the
+// mutation; the inventory guard in authority_reduction_class_test.go records
+// both sites against it under a verdict of its own, Reconciled, because that
+// guarantee is weaker than a Reducer's and the difference is worth reading.
 //
 // # Wanting the reduction WITHOUT the invalidation
 //
