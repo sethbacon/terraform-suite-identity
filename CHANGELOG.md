@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.41.0...v0.42.0) (2026-09-02)
+
+
+### Features
+
+* **store:** make the role-template credential sweep unskippable ([#291](https://github.com/sethbacon/terraform-suite-identity/issues/291)) ([ea632b3](https://github.com/sethbacon/terraform-suite-identity/commit/ea632b3fa093a9e1a5d44bfee1418c112ea87ae9))
+
 ## [0.41.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.40.0...v0.41.0) (2026-08-31)
 
 
