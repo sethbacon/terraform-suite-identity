@@ -1,6 +1,6 @@
 module github.com/sethbacon/terraform-suite-identity
 
-go 1.25.0
+go 1.26.0
 
 // Pinned to a patched release (CVE-2026-42505 / GO-2026-5856, a crypto/tls ECH
 // privacy leak affecting Go before 1.25.12 and the 1.26.x line before 1.26.5).
@@ -16,7 +16,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jmoiron/sqlx v1.4.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/net v0.58.0
 	golang.org/x/oauth2 v0.36.0
 )

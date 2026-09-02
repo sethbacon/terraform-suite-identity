@@ -264,9 +264,9 @@ with **four documented exceptions** — a seed-data `UPDATE` (`000002`), in-plac
 (`000004`), and a data `UPDATE` plus a new `UNIQUE` index (`000005`) — see
 [docs/schema.md](docs/schema.md).
 
-Requires **Go 1.25** or newer as the language floor (`go 1.25.0` in `go.mod`). `go.mod`
+Requires **Go 1.26** or newer as the language floor (`go 1.26.0` in `go.mod`). `go.mod`
 also pins `toolchain go1.26.6`, which is the version CI builds and tests with; the `go`
-command downloads it automatically, so a local Go 1.25 works unless you have set
+command downloads it automatically, so a local Go 1.26 works unless you have set
 `GOTOOLCHAIN=local`.
 
 ## Usage
