@@ -39,20 +39,26 @@
 // role_templates.scopes. That is what makes it possible to call them BEFORE
 // RoleTemplateRepository.UpdateRoleTemplate / DeleteRoleTemplate, with the
 // values about to be written, and get the same answer either function would
-// give if the write had already landed. The consumer wiring's job — not this
-// PR's, see the package doc note below — is: preview, run ReconcileRoleTemplate
-// to completion, THEN call the repository mutation. Running it in the other
-// order is not merely unnecessary, it is silently wrong for a delete: the
+// give if the write had already landed. The required order is: preview, run
+// ReconcileRoleTemplate to completion, THEN mutate. Running it the other way
+// round is not merely unnecessary, it is silently wrong for a delete: the
 // predicate this file reads has already been erased by the cascade, and
 // Scanned == 0 is indistinguishable from a template that never had a member.
+//
+// THAT ORDER IS NO LONGER A SENTENCE A CONSUMER HAS TO FOLLOW. TemplateWriter
+// in template_write.go composes the two so the mutation cannot be expressed
+// without the sweep, cannot run before it, and cannot run at all if the sweep
+// did not finish. This file remains the primitive underneath — callable
+// directly by an application reconciling on its own schedule, which is what
+// the preview endpoint in terraform-registry-backend does.
 //
 // A membership added to the template between a completed reconciliation and
 // the mutation that follows it is a real, accepted gap — resumability is
 // bought by NOT holding one transaction across the whole sweep, and that is
-// the price. The consumer wiring is the right place to decide how that gap is
-// closed (re-run before mutating, or re-run periodically after); this file
-// only guarantees that every run it is given time to finish never leaves a key
-// alive that its own predicate identified as unretained.
+// the price. Closing it is the caller's decision (re-run before mutating, or
+// re-run periodically after); this file only guarantees that every run it is
+// given time to finish never leaves a key alive that its own predicate
+// identified as unretained.
 package store
 
 import (
