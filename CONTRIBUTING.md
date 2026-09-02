@@ -35,7 +35,7 @@ is not acceptable.
 
 ### Prerequisites
 
-- Go 1.25 or later — the module sets `go 1.25.0` in `go.mod` as its language floor.
+- Go 1.26 or later — the module sets `go 1.26.0` in `go.mod` as its language floor.
   `go.mod` also pins `toolchain go1.26.6`, and CI resolves its Go version from
   `go.mod` (`actions/setup-go` with `go-version-file`), so **CI builds and tests
   with 1.26.6**. The `go` command downloads that toolchain automatically; if you
