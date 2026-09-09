@@ -117,11 +117,12 @@ type Creds interface {
 // A Minter is safe for concurrent use, holds no mutable state, and caches
 // nothing -- see the package comment.
 type Minter struct {
-	httpClient        *http.Client
-	entraLoginBaseURL string
-	githubAPIBaseURL  string
-	now               func() time.Time
-	credentialFactory FederatedCredentialFactory
+	httpClient         *http.Client
+	entraLoginBaseURL  string
+	githubAPIBaseURL   string
+	now                func() time.Time
+	credentialFactory  FederatedCredentialFactory
+	certificateFactory CertificateCredentialFactory
 }
 
 // Option configures a Minter.
@@ -192,6 +193,17 @@ func WithFederatedCredentialFactory(f FederatedCredentialFactory) Option {
 	}
 }
 
+// WithCertificateCredentialFactory substitutes how a certificate credential is
+// built. Its only production use is the default; tests use it to mint without
+// an app registration that trusts the test certificate.
+func WithCertificateCredentialFactory(f CertificateCredentialFactory) Option {
+	return func(m *Minter) {
+		if f != nil {
+			m.certificateFactory = f
+		}
+	}
+}
+
 // New builds a Minter.
 //
 // The default HTTP client is GUARDED by the strict httpsafe policy: private,
@@ -208,11 +220,12 @@ func WithFederatedCredentialFactory(f FederatedCredentialFactory) Option {
 // not the other two.
 func New(opts ...Option) *Minter {
 	m := &Minter{
-		httpClient:        httpsafe.NewClient(defaultHTTPTimeout, strictGuard),
-		entraLoginBaseURL: DefaultEntraLoginBaseURL,
-		githubAPIBaseURL:  DefaultGitHubAPIBaseURL,
-		now:               time.Now,
-		credentialFactory: defaultFederatedCredentialFactory,
+		httpClient:         httpsafe.NewClient(defaultHTTPTimeout, strictGuard),
+		entraLoginBaseURL:  DefaultEntraLoginBaseURL,
+		githubAPIBaseURL:   DefaultGitHubAPIBaseURL,
+		now:                time.Now,
+		credentialFactory:  defaultFederatedCredentialFactory,
+		certificateFactory: defaultCertificateCredentialFactory,
 	}
 	for _, opt := range opts {
 		opt(m)
