@@ -117,12 +117,13 @@ type Creds interface {
 // A Minter is safe for concurrent use, holds no mutable state, and caches
 // nothing -- see the package comment.
 type Minter struct {
-	httpClient         *http.Client
-	entraLoginBaseURL  string
-	githubAPIBaseURL   string
-	now                func() time.Time
-	credentialFactory  FederatedCredentialFactory
-	certificateFactory CertificateCredentialFactory
+	httpClient             *http.Client
+	entraLoginBaseURL      string
+	githubAPIBaseURL       string
+	now                    func() time.Time
+	credentialFactory      FederatedCredentialFactory
+	certificateFactory     CertificateCredentialFactory
+	managedIdentityFactory ManagedIdentityCredentialFactory
 }
 
 // Option configures a Minter.
@@ -204,6 +205,17 @@ func WithCertificateCredentialFactory(f CertificateCredentialFactory) Option {
 	}
 }
 
+// WithManagedIdentityCredentialFactory substitutes how a managed-identity
+// credential is built. Its only production use is the default; tests use it to
+// mint without running on Azure compute.
+func WithManagedIdentityCredentialFactory(f ManagedIdentityCredentialFactory) Option {
+	return func(m *Minter) {
+		if f != nil {
+			m.managedIdentityFactory = f
+		}
+	}
+}
+
 // New builds a Minter.
 //
 // The default HTTP client is GUARDED by the strict httpsafe policy: private,
@@ -220,12 +232,13 @@ func WithCertificateCredentialFactory(f CertificateCredentialFactory) Option {
 // not the other two.
 func New(opts ...Option) *Minter {
 	m := &Minter{
-		httpClient:         httpsafe.NewClient(defaultHTTPTimeout, strictGuard),
-		entraLoginBaseURL:  DefaultEntraLoginBaseURL,
-		githubAPIBaseURL:   DefaultGitHubAPIBaseURL,
-		now:                time.Now,
-		credentialFactory:  defaultFederatedCredentialFactory,
-		certificateFactory: defaultCertificateCredentialFactory,
+		httpClient:             httpsafe.NewClient(defaultHTTPTimeout, strictGuard),
+		entraLoginBaseURL:      DefaultEntraLoginBaseURL,
+		githubAPIBaseURL:       DefaultGitHubAPIBaseURL,
+		now:                    time.Now,
+		credentialFactory:      defaultFederatedCredentialFactory,
+		certificateFactory:     defaultCertificateCredentialFactory,
+		managedIdentityFactory: defaultManagedIdentityCredentialFactory,
 	}
 	for _, opt := range opts {
 		opt(m)
