@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.44.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.43.0...v0.44.0) (2026-09-09)
+
+
+### Features
+
+* **appcreds:** mint Azure DevOps tokens from a certificate credential ([#304](https://github.com/sethbacon/terraform-suite-identity/issues/304)) ([93f849d](https://github.com/sethbacon/terraform-suite-identity/commit/93f849d2c02718f1aafbfe7d51c4fd432201647a))
+
 ## [0.43.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.42.1...v0.43.0) (2026-09-09)
 
 
