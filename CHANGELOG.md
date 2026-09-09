@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.43.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.42.1...v0.43.0) (2026-09-09)
+
+
+### Features
+
+* **appcreds:** extract app credential minting from both backends ([#302](https://github.com/sethbacon/terraform-suite-identity/issues/302)) ([1b936ba](https://github.com/sethbacon/terraform-suite-identity/commit/1b936ba586c0b754886792c9c964de9d488d4a36))
+
 ## [0.42.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.42.0...v0.42.1) (2026-09-02)
 
 
