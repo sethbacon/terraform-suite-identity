@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.1](https://github.com/sethbacon/terraform-suite-identity/compare/v0.45.0...v0.45.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **zizmor:** drop the dead github-app ignore, leaving no accepted findings ([#318](https://github.com/sethbacon/terraform-suite-identity/issues/318)) ([7f81773](https://github.com/sethbacon/terraform-suite-identity/commit/7f81773d46503d0b6c84a7a6215fe3813cb15ca2))
+
 ## [0.45.0](https://github.com/sethbacon/terraform-suite-identity/compare/v0.44.0...v0.45.0) (2026-09-09)
 
 
